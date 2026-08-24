@@ -240,6 +240,30 @@ function commandBasename(token: string): string {
   return token.replace(/.*\//, '').toLowerCase();
 }
 
+const FIND_PREFIX_KEYWORDS = new Set([
+  'then', 'do', 'else', 'elif', 'if', 'while', 'until', 'fi', 'done',
+]);
+const FIND_PREFIX_BUILTINS = new Set(['command', 'builtin', 'exec', 'env']);
+
+/** 只剥本 gate 需要的前缀：NAME=val、then/do、command/env/exec。不走 unwrapWrappers。 */
+function skipFindCommandPrefixes(tokens: string[]): string[] {
+  let i = 0;
+  while (i < tokens.length) {
+    const tok = tokens[i];
+    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(tok) || FIND_PREFIX_KEYWORDS.has(tok.toLowerCase())) {
+      i += 1;
+      continue;
+    }
+    if (FIND_PREFIX_BUILTINS.has(commandBasename(tok))) {
+      i += 1;
+      while (i < tokens.length && tokens[i].startsWith('-')) i += 1;
+      continue;
+    }
+    break;
+  }
+  return tokens.slice(i);
+}
+
 export function bashHasDestructiveFind(command: string): boolean {
   if (typeof command !== 'string' || command.trim() === '') return false;
   const words = shellWords(command);
@@ -254,9 +278,7 @@ export function bashHasDestructiveFind(command: string): boolean {
       segment.push(words[i]);
       i += 1;
     }
-    // 前导 NAME=val / then|do|else / command|env|exec 不是命令名。
-    // 复用 unwrapWrappers，与 classify 同一套剥壳，避免 FOO=1 find 漏拦。
-    const unwrapped = unwrapWrappers(segment);
+    const unwrapped = skipFindCommandPrefixes(segment);
     const bin = commandBasename(unwrapped[0] ?? '');
     const rest = unwrapped.slice(1);
     if (bin === 'find' && rest.some((w) => FIND_DESTRUCTIVE_FLAG_RE.test(w))) return true;
