@@ -4491,5 +4491,7 @@ describe('bashHasDestructiveFind — PreToolUse 拦在 SDK 只读放行之前', 
     expect(bashHasDestructiveFind('find . -name -delete')).toBe(false);
     expect(bashHasDestructiveFind('find . -name echo -delete')).toBe(true);
     expect(bashHasDestructiveFind("find . -name '*-delete' -delete")).toBe(true);
+    expect(bashHasDestructiveFind('find . -nouser -delete')).toBe(true);
+    expect(bashHasDestructiveFind('find . -nogroup -exec echo {} \\;')).toBe(true);
   });
 });

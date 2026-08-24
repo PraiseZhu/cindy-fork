@@ -161,7 +161,7 @@ const FIND_DESTRUCTIVE_FLAG_RE = /^-(?:exec(?:dir)?|ok(?:dir)?|delete)$/;
 const FIND_VALUE_PREDICATES = new Set([
   '-name', '-iname', '-path', '-ipath', '-wholename', '-iwholename',
   '-regex', '-iregex', '-lname', '-ilname',
-  '-newer', '-anewer', '-cnewer', '-used', '-user', '-group', '-nouser', '-nogroup',
+  '-newer', '-anewer', '-cnewer', '-used', '-user', '-group',
   '-perm', '-type', '-xtype', '-size', '-links', '-inum', '-samefile',
   '-fstype',
 ]);
