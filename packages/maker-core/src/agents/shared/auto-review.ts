@@ -159,34 +159,81 @@ export function reviewAction(
  */
 const FIND_DESTRUCTIVE_FLAG_RE = /-(?:exec(?:dir)?|ok(?:dir)?|delete)\b/;
 
-function outsideQuotes(command: string): string {
-  let out = '';
+/**
+ * 还原 shell 词(去引号、拼相邻片段、解开 \' / \\),保留引号内的 flag 字面量。
+ * `find . '-delete'` 与 `find . -ex'ec'` 必须仍看见 -delete/-exec;
+ * `echo 'find . -delete'` 的 find 落在 echo 的数据词里,命令位不是 find。
+ */
+function shellWords(command: string): string[] {
+  const words: string[] = [];
+  let cur = '';
+  let inWord = false;
   let quote: "'" | '"' | null = null;
+  const flush = (): void => {
+    if (!inWord) return;
+    words.push(cur);
+    cur = '';
+    inWord = false;
+  };
   for (let i = 0; i < command.length; i++) {
     const ch = command[i];
-    if (quote) {
-      if (ch === quote) quote = null;
+    if (quote === "'") {
+      if (ch === "'") quote = null;
+      else cur += ch;
+      continue;
+    }
+    if (quote === '"') {
+      if (ch === '"') quote = null;
+      else if (ch === '\\' && i + 1 < command.length) {
+        cur += command[i + 1];
+        i++;
+      } else cur += ch;
       continue;
     }
     if (ch === "'" || ch === '"') {
       quote = ch;
+      inWord = true;
       continue;
     }
     if (ch === '\\' && i + 1 < command.length) {
-      out += command[i + 1];
+      cur += command[i + 1];
+      inWord = true;
       i++;
       continue;
     }
-    out += ch;
+    if (/\s/.test(ch) || ch === '|' || ch === '&' || ch === ';' || ch === '\n') {
+      flush();
+      continue;
+    }
+    cur += ch;
+    inWord = true;
   }
-  return out;
+  flush();
+  return words;
 }
 
 export function bashHasDestructiveFind(command: string): boolean {
   if (typeof command !== 'string' || command.trim() === '') return false;
-  const visible = outsideQuotes(command);
-  if (!/\bfind\b/i.test(visible)) return false;
-  return FIND_DESTRUCTIVE_FLAG_RE.test(visible);
+  const words = shellWords(command);
+  let i = 0;
+  while (i < words.length) {
+    const bin = words[i]?.replace(/.*\//, '').toLowerCase();
+    if (bin === 'find') {
+      const rest: string[] = [];
+      i += 1;
+      while (i < words.length) {
+        const w = words[i];
+        const b = w.replace(/.*\//, '').toLowerCase();
+        if (b === 'find' || b === 'echo' || b === 'printf') break;
+        rest.push(w);
+        i += 1;
+      }
+      if (rest.some((w) => FIND_DESTRUCTIVE_FLAG_RE.test(w))) return true;
+      continue;
+    }
+    i += 1;
+  }
+  return false;
 }
 
 const SAFE_READONLY_BINS: ReadonlySet<string> = new Set([

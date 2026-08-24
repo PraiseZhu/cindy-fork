@@ -1474,8 +1474,13 @@ export class ClaudeCodeAgent extends BaseAgent {
     // SDK 2.1.219 把 `find` 放进内置只读集:builtin readonly 先于 canUseTool、也不评
     // deny glob,所以 `find … -delete` 会静默下发。PreToolUse 无条件先于权限判定,
     // hook deny 能在只读放行之前拦住破坏性 find,只读 `find -print` 不碰。
+    // 声明必须在 destructiveFindHook 之前,否则闭包创建时撞 TDZ。
+    let mutablePermissionMode: PermissionMode = reviewMode ? 'ask' : opts.permissionMode ?? 'default';
     const destructiveFindHook: HookCallback = async (input) => {
       if (input.hook_event_name !== 'PreToolUse') return { continue: true };
+      // hook deny 先于权限管线,Ask/Full 下硬拦会让用户换档也做不了 find -delete。
+      // 只在 Auto 档补 SDK builtin-readonly 缺口;其它档走原权限链。
+      if (mutablePermissionMode !== 'auto') return { continue: true };
       const pre = input as PreToolUseHookInput;
       if (pre.tool_name !== 'Bash') return { continue: true };
       const command = (pre.tool_input as { command?: unknown } | undefined)?.command;
@@ -2197,7 +2202,6 @@ export class ClaudeCodeAgent extends BaseAgent {
       ? new ToolLoopGuard()
       : null;
     let mutableEffort: Effort = opts.effort ?? 'high';
-    let mutablePermissionMode: PermissionMode = reviewMode ? 'ask' : opts.permissionMode ?? 'default';
     // 计划模式(与 permissionMode 正交, **一次性选择**): mutablePlanMode 是 UI 勾选的
     // "武装"态 —— send 消耗它并立即 emit plan_mode_changed(false) 让勾选熄灭;
     // 本轮 plan turn 由 planTurnActive 承载(SDK 保持 plan 档): ExitPlanMode 批准

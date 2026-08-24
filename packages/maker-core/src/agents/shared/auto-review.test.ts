@@ -4460,4 +4460,10 @@ describe('bashHasDestructiveFind — PreToolUse 拦在 SDK 只读放行之前', 
     expect(bashHasDestructiveFind("find . -path ./.git -prune -o -name '*.md' -print")).toBe(false);
     expect(bashHasDestructiveFind("echo 'find . -delete'")).toBe(false);
   });
+  it('引号包着的 flag 仍是 argv: find . \'-delete\' / -ex\'ec\' 命中', () => {
+    expect(bashHasDestructiveFind("find . '-delete'")).toBe(true);
+    expect(bashHasDestructiveFind('find . "-delete"')).toBe(true);
+    expect(bashHasDestructiveFind("find . -ex'ec' rm {} \\;")).toBe(true);
+    expect(bashHasDestructiveFind("find . '-exec' rm {} \\;")).toBe(true);
+  });
 });
