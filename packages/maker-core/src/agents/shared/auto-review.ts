@@ -227,7 +227,14 @@ function shellWords(command: string): string[] {
       if (command[i + 1] === '&') {
         pushOp('&&');
         i++;
-      } else pushOp('&');
+        continue;
+      }
+      // `2>&1` / `>&2` 是重定向，不是后台分隔符。
+      if (inWord && (cur.endsWith('>') || cur.endsWith('<'))) {
+        cur += ch;
+        continue;
+      }
+      pushOp('&');
       continue;
     }
     if (/\s/.test(ch)) {
