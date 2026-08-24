@@ -152,6 +152,43 @@ export function reviewAction(
 // 包裹器仍会剥壳按内层命令判定(见 COMMAND_WRAPPERS);裸 `env` 剥壳后为空段→fail-closed 升级。
 // `cat`/`grep`/`base64` 等能读文件的仍在列,但读**凭证文件**由 ALWAYS_ASK_PATTERNS 先行拦成
 // prompt-each-time(在 classifyShellCommand 里先于分段判定),读普通文件才放行。
+/**
+ * Bash 里的 find 是否带破坏性 flag。给 PreToolUse hook 用:
+ * SDK 内置只读集把 `find` 整命令放行,deny glob 对 builtin readonly 不评,
+ * 必须在 canUseTool / 只读放行之前用 hook deny 把 -delete/-exec 拦下。
+ */
+const FIND_DESTRUCTIVE_FLAG_RE = /-(?:exec(?:dir)?|ok(?:dir)?|delete)\b/;
+
+function outsideQuotes(command: string): string {
+  let out = '';
+  let quote: "'" | '"' | null = null;
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i];
+    if (quote) {
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch;
+      continue;
+    }
+    if (ch === '\\' && i + 1 < command.length) {
+      out += command[i + 1];
+      i++;
+      continue;
+    }
+    out += ch;
+  }
+  return out;
+}
+
+export function bashHasDestructiveFind(command: string): boolean {
+  if (typeof command !== 'string' || command.trim() === '') return false;
+  const visible = outsideQuotes(command);
+  if (!/\bfind\b/i.test(visible)) return false;
+  return FIND_DESTRUCTIVE_FLAG_RE.test(visible);
+}
+
 const SAFE_READONLY_BINS: ReadonlySet<string> = new Set([
   'ls', 'pwd', 'echo', 'cat', 'head', 'tail', 'wc', 'stat', 'file', 'which',
   'type', 'date', 'whoami', 'hostname', 'uname', 'basename', 'dirname',

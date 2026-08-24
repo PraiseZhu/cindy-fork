@@ -128,7 +128,7 @@ import {
   resolveAutoReviewDecision,
   type AutoReviewDecision,
 } from '../shared/auto-review-decision.js';
-import type { ReviewableAction } from '../shared/auto-review.js';
+import { bashHasDestructiveFind, type ReviewableAction } from '../shared/auto-review.js';
 import {
   resolveAgentCredentialMode,
   resolveEffectiveCredentialModeFromAuthSource,
@@ -1471,6 +1471,27 @@ export class ClaudeCodeAgent extends BaseAgent {
       }
       return { continue: true };
     };
+    // SDK 2.1.219 把 `find` 放进内置只读集:builtin readonly 先于 canUseTool、也不评
+    // deny glob,所以 `find … -delete` 会静默下发。PreToolUse 无条件先于权限判定,
+    // hook deny 能在只读放行之前拦住破坏性 find,只读 `find -print` 不碰。
+    const destructiveFindHook: HookCallback = async (input) => {
+      if (input.hook_event_name !== 'PreToolUse') return { continue: true };
+      const pre = input as PreToolUseHookInput;
+      if (pre.tool_name !== 'Bash') return { continue: true };
+      const command = (pre.tool_input as { command?: unknown } | undefined)?.command;
+      if (typeof command !== 'string' || !bashHasDestructiveFind(command)) {
+        return { continue: true };
+      }
+      return {
+        continue: true,
+        hookSpecificOutput: {
+          hookEventName: 'PreToolUse',
+          permissionDecision: 'deny',
+          permissionDecisionReason:
+            'find -delete/-exec is destructive; Cindy blocks it before the SDK builtin-readonly allowlist.',
+        },
+      };
+    };
     const reviewReadOnlyHook: HookCallback = async (input) => {
       if (input.hook_event_name !== 'PreToolUse') return { continue: true };
       const pre = input as PreToolUseHookInput;
@@ -1519,7 +1540,7 @@ export class ClaudeCodeAgent extends BaseAgent {
             () => nonHarnessMcpServerNames,
           ),
           {
-            PreToolUse: [{ hooks: [turnChangeCaptureHook] }],
+            PreToolUse: [{ hooks: [destructiveFindHook, turnChangeCaptureHook] }],
             PostToolUse: [{ hooks: [turnChangeCaptureHook] }],
             PostToolUseFailure: [{ hooks: [turnChangeCaptureHook] }],
           },

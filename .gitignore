@@ -170,6 +170,7 @@ config/log-upload.json
 # 本地跑 visual-baseline-check 时会自动生成。
 apps/mobile/e2e/visual-baselines/
 .cindy-worktrees/
+.worktrees/
 # 品牌迁移前已创建的 worktree 仍需保持 ignored。
 .xdt-worktrees/
 .xdtworktreeinclude

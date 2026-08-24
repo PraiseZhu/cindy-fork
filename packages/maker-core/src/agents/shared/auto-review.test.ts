@@ -9,6 +9,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  bashHasDestructiveFind,
   classifyShellCommand,
   isProtectedSystemPath,
   reviewAction,
@@ -4447,5 +4448,16 @@ describe('删除也是写通道:普通 rm / mv 源 / cmd del(第四十八批评�
     ]) {
       expect(classifyShellCommand(c, roots), c).not.toBe('prompt-each-time');
     }
+  });
+});
+
+describe('bashHasDestructiveFind — PreToolUse 拦在 SDK 只读放行之前', () => {
+  it('最简 find -delete 与 -exec 命中;只读 find 与管道放行', () => {
+    expect(bashHasDestructiveFind('find /tmp/no-such -delete')).toBe(true);
+    expect(bashHasDestructiveFind('find . -delete')).toBe(true);
+    expect(bashHasDestructiveFind('find . -exec echo {} \\;')).toBe(true);
+    expect(bashHasDestructiveFind("cd /repo && find . -path ./.git -prune -o -name '*.md' -print | sort | head")).toBe(false);
+    expect(bashHasDestructiveFind("find . -path ./.git -prune -o -name '*.md' -print")).toBe(false);
+    expect(bashHasDestructiveFind("echo 'find . -delete'")).toBe(false);
   });
 });
