@@ -1545,7 +1545,7 @@ export class ClaudeCodeAgent extends BaseAgent {
             () => nonHarnessMcpServerNames,
           ),
           {
-            PreToolUse: [{ hooks: [destructiveFindHook, turnChangeCaptureHook] }],
+            PreToolUse: [{ hooks: [turnChangeCaptureHook, destructiveFindHook] }],
             PostToolUse: [{ hooks: [turnChangeCaptureHook] }],
             PostToolUseFailure: [{ hooks: [turnChangeCaptureHook] }],
           },
