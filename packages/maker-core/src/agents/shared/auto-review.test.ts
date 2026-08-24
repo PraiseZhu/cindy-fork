@@ -4466,4 +4466,11 @@ describe('bashHasDestructiveFind — PreToolUse 拦在 SDK 只读放行之前', 
     expect(bashHasDestructiveFind("find . -ex'ec' rm {} \\;")).toBe(true);
     expect(bashHasDestructiveFind("find . '-exec' rm {} \\;")).toBe(true);
   });
+  it('分段与路径名不误伤: 后段 -delete / -name echo / find echo -delete', () => {
+    expect(bashHasDestructiveFind('find . -print; true -delete')).toBe(false);
+    expect(bashHasDestructiveFind('find . -print && echo -delete')).toBe(false);
+    expect(bashHasDestructiveFind('find . -name echo -print')).toBe(false);
+    expect(bashHasDestructiveFind('find echo -delete')).toBe(true);
+    expect(bashHasDestructiveFind('find . -name echo -delete')).toBe(true);
+  });
 });

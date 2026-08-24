@@ -175,6 +175,10 @@ function shellWords(command: string): string[] {
     cur = '';
     inWord = false;
   };
+  const pushOp = (op: string): void => {
+    flush();
+    words.push(op);
+  };
   for (let i = 0; i < command.length; i++) {
     const ch = command[i];
     if (quote === "'") {
@@ -201,7 +205,25 @@ function shellWords(command: string): string[] {
       i++;
       continue;
     }
-    if (/\s/.test(ch) || ch === '|' || ch === '&' || ch === ';' || ch === '\n') {
+    if (ch === '\n' || ch === ';') {
+      pushOp(';');
+      continue;
+    }
+    if (ch === '|') {
+      if (command[i + 1] === '|') {
+        pushOp('||');
+        i++;
+      } else pushOp('|');
+      continue;
+    }
+    if (ch === '&') {
+      if (command[i + 1] === '&') {
+        pushOp('&&');
+        i++;
+      } else pushOp('&');
+      continue;
+    }
+    if (/\s/.test(ch)) {
       flush();
       continue;
     }
@@ -212,26 +234,29 @@ function shellWords(command: string): string[] {
   return words;
 }
 
+const SHELL_OP = new Set(['|', '||', '&&', ';', '&']);
+
+function commandBasename(token: string): string {
+  return token.replace(/.*\//, '').toLowerCase();
+}
+
 export function bashHasDestructiveFind(command: string): boolean {
   if (typeof command !== 'string' || command.trim() === '') return false;
   const words = shellWords(command);
   let i = 0;
   while (i < words.length) {
-    const bin = words[i]?.replace(/.*\//, '').toLowerCase();
-    if (bin === 'find') {
-      const rest: string[] = [];
+    if (SHELL_OP.has(words[i])) {
       i += 1;
-      while (i < words.length) {
-        const w = words[i];
-        const b = w.replace(/.*\//, '').toLowerCase();
-        if (b === 'find' || b === 'echo' || b === 'printf') break;
-        rest.push(w);
-        i += 1;
-      }
-      if (rest.some((w) => FIND_DESTRUCTIVE_FLAG_RE.test(w))) return true;
       continue;
     }
+    const bin = commandBasename(words[i] ?? '');
+    const rest: string[] = [];
     i += 1;
+    while (i < words.length && !SHELL_OP.has(words[i])) {
+      rest.push(words[i]);
+      i += 1;
+    }
+    if (bin === 'find' && rest.some((w) => FIND_DESTRUCTIVE_FLAG_RE.test(w))) return true;
   }
   return false;
 }
