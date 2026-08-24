@@ -157,7 +157,14 @@ export function reviewAction(
  * SDK 内置只读集把 `find` 整命令放行,deny glob 对 builtin readonly 不评,
  * 必须在 canUseTool / 只读放行之前用 hook deny 把 -delete/-exec 拦下。
  */
-const FIND_DESTRUCTIVE_FLAG_RE = /-(?:exec(?:dir)?|ok(?:dir)?|delete)\b/;
+const FIND_DESTRUCTIVE_FLAG_RE = /^-(?:exec(?:dir)?|ok(?:dir)?|delete)$/;
+const FIND_VALUE_PREDICATES = new Set([
+  '-name', '-iname', '-path', '-ipath', '-wholename', '-iwholename',
+  '-regex', '-iregex', '-lname', '-ilname',
+  '-newer', '-anewer', '-cnewer', '-used', '-user', '-group', '-nouser', '-nogroup',
+  '-perm', '-type', '-xtype', '-size', '-links', '-inum', '-samefile',
+  '-fstype',
+]);
 
 /**
  * 还原 shell 词(去引号、拼相邻片段、解开 \' / \\),保留引号内的 flag 字面量。
@@ -280,8 +287,16 @@ export function bashHasDestructiveFind(command: string): boolean {
     }
     const unwrapped = skipFindCommandPrefixes(segment);
     const bin = commandBasename(unwrapped[0] ?? '');
+    if (bin !== 'find') continue;
     const rest = unwrapped.slice(1);
-    if (bin === 'find' && rest.some((w) => FIND_DESTRUCTIVE_FLAG_RE.test(w))) return true;
+    for (let j = 0; j < rest.length; j++) {
+      const w = rest[j];
+      if (FIND_VALUE_PREDICATES.has(w.toLowerCase())) {
+        j += 1;
+        continue;
+      }
+      if (FIND_DESTRUCTIVE_FLAG_RE.test(w)) return true;
+    }
   }
   return false;
 }

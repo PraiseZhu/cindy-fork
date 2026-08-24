@@ -4485,4 +4485,11 @@ describe('bashHasDestructiveFind — PreToolUse 拦在 SDK 只读放行之前', 
     expect(bashHasDestructiveFind('if true; then echo x; fi')).toBe(false);
     expect(bashHasDestructiveFind('command echo -delete')).toBe(false);
   });
+  it('谓词值不是 action: -name *-delete / -name -delete 放行, 真 -delete 仍拦', () => {
+    expect(bashHasDestructiveFind("find . -name '*-delete' -print")).toBe(false);
+    expect(bashHasDestructiveFind("find . -name 'foo-delete.txt'")).toBe(false);
+    expect(bashHasDestructiveFind('find . -name -delete')).toBe(false);
+    expect(bashHasDestructiveFind('find . -name echo -delete')).toBe(true);
+    expect(bashHasDestructiveFind("find . -name '*-delete' -delete")).toBe(true);
+  });
 });
