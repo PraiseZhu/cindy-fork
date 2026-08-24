@@ -249,13 +249,16 @@ export function bashHasDestructiveFind(command: string): boolean {
       i += 1;
       continue;
     }
-    const bin = commandBasename(words[i] ?? '');
-    const rest: string[] = [];
-    i += 1;
+    const segment: string[] = [];
     while (i < words.length && !SHELL_OP.has(words[i])) {
-      rest.push(words[i]);
+      segment.push(words[i]);
       i += 1;
     }
+    // 前导 NAME=val / then|do|else / command|env|exec 不是命令名。
+    // 复用 unwrapWrappers，与 classify 同一套剥壳，避免 FOO=1 find 漏拦。
+    const unwrapped = unwrapWrappers(segment);
+    const bin = commandBasename(unwrapped[0] ?? '');
+    const rest = unwrapped.slice(1);
     if (bin === 'find' && rest.some((w) => FIND_DESTRUCTIVE_FLAG_RE.test(w))) return true;
   }
   return false;

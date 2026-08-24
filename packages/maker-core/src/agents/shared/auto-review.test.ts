@@ -4473,4 +4473,16 @@ describe('bashHasDestructiveFind — PreToolUse 拦在 SDK 只读放行之前', 
     expect(bashHasDestructiveFind('find echo -delete')).toBe(true);
     expect(bashHasDestructiveFind('find . -name echo -delete')).toBe(true);
   });
+  it('前导赋值 / 关键字 / command 前缀仍看见 find: FOO=1 / then / command', () => {
+    expect(bashHasDestructiveFind('FOO=1 find . -delete')).toBe(true);
+    expect(bashHasDestructiveFind('FOO=1 BAR=2 find . -exec echo {} \\;')).toBe(true);
+    expect(bashHasDestructiveFind('if true; then find . -delete; fi')).toBe(true);
+    expect(bashHasDestructiveFind('while true; do find . -delete; done')).toBe(true);
+    expect(bashHasDestructiveFind('command find . -delete')).toBe(true);
+    expect(bashHasDestructiveFind('command -p find . -delete')).toBe(true);
+    expect(bashHasDestructiveFind('env find . -delete')).toBe(true);
+    expect(bashHasDestructiveFind('FOO=1 echo -delete')).toBe(false);
+    expect(bashHasDestructiveFind('if true; then echo x; fi')).toBe(false);
+    expect(bashHasDestructiveFind('command echo -delete')).toBe(false);
+  });
 });
