@@ -8248,6 +8248,7 @@ export const GHOST_LIBRARY_OPS = [
   'db.userVersion',
   'reveal',
   'saveAs',
+  'clipboardWrite',
 ] as const;
 export type GhostLibraryOp = (typeof GHOST_LIBRARY_OPS)[number];
 
@@ -8257,7 +8258,7 @@ export interface GhostPipeLibraryRequest {
   op: GhostLibraryOp;
   /** library 相对路径(段数/总长上限比 fs 宽:32 段/512 字符)。 */
   path?: string;
-  /** write 内容(≤16MiB;更大走 writeBegin 分块流)。 */
+  /** write 内容(≤16MiB;更大走 writeBegin 分块流);clipboardWrite 只收 encoding:'base64' 的 PNG 字节。 */
   content?: string;
   encoding?: 'utf8' | 'base64';
   /** write:排他创建(目标已存在则 ALREADY_EXISTS)。 */
@@ -8353,6 +8354,8 @@ export type GhostPipeLibraryResult =
   | { ok: true; op: 'saveAs'; cancelled: true }
   /** saveAs 成功:path 是库内相对键(与请求相同),不是用户另存到的绝对路径。 */
   | { ok: true; op: 'saveAs'; cancelled: false; path: string; bytes: number }
+  /** clipboardWrite 成功:bytes 是写入系统剪贴板的 PNG 位图字节数,不是文件引用。 */
+  | { ok: true; op: 'clipboardWrite'; bytes: number }
   | { ok: false; errorCode: string; message: string };
 
 /** Library 概览(ghosts:library-overview IPC 载荷;设置页插件详情消费)。 */

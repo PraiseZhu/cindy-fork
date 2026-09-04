@@ -35,6 +35,14 @@ import type { LibraryDbResult } from './libraryDbCore.js';
 /** 正本相对键:assets/<hash 前 2 位>/<64-hex>/blob.<ext>(不是 <hash>.<ext>)。 */
 const LIBRARY_BLOB_REL_RE = /^assets\/([0-9a-f]{2})\/([0-9a-f]{64})\/blob\.([A-Za-z0-9]+)$/i;
 const LIBRARY_SIDECAR_BASENAME = new Set(['meta.json', 'preview.webp']);
+/** clipboardWrite 单次 PNG 上限:与 library 单次 write 同为 16MiB,必须是有限整数。 */
+export const LIBRARY_CLIPBOARD_WRITE_MAX_BYTES = 16 * 1024 * 1024;
+const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+
+function isPngBuffer(bytes: Buffer): boolean {
+  return bytes.byteLength >= PNG_SIGNATURE.byteLength
+    && bytes.subarray(0, PNG_SIGNATURE.byteLength).equals(PNG_SIGNATURE);
+}
 
 export function libraryBlobRelPath(hash: string, ext: string): string {
   const cleanExt = ext.replace(/^\./, '');
@@ -110,6 +118,8 @@ export interface GhostLibrarySlotDeps {
   showItemInFolder?(absPath: string): void;
   /** 系统另存为(生产接 dialog.showSaveDialog;标题/正文由主机拼装并带已核验插件名)。 */
   showSaveDialog?(opts: { defaultPath: string; ghostName: string }): Promise<{ canceled: boolean; filePath?: string }>;
+  /** 写系统剪贴板 PNG 位图(生产接 nativeImage + clipboard.writeImage;零 Electron 单测注入 fake)。 */
+  writeClipboardPng?(pngBytes: Buffer): Promise<void> | void;
   /** 可注入时钟(单测限速);默认 Date.now。 */
   now?(): number;
   /**
@@ -134,6 +144,8 @@ export class GhostLibrarySlot {
   private readonly lastRevealAttemptAt = new Map<string, number>();
   /** 插件 id → 上次 saveAs 尝试时刻(按尝试记账;对齐 pick/confirm 骚扰钳制)。 */
   private readonly lastSaveAsAttemptAt = new Map<string, number>();
+  /** 插件 id → 上次 clipboardWrite 尝试时刻(按尝试记账;对齐 pick/confirm 骚扰钳制)。 */
+  private readonly lastClipboardWriteAttemptAt = new Map<string, number>();
   /** 全局另存为对话框在场标记(系统弹窗一次一个,不排队)。 */
   private saveAsDialogInFlight = false;
   /**
@@ -641,6 +653,62 @@ export class GhostLibrarySlot {
         }
         const st = await fs.promises.stat(dest);
         return { ok: true, op: 'saveAs', cancelled: false, path: relPath, bytes: st.size };
+      }
+      case 'clipboardWrite': {
+        if (req.encoding !== 'base64') {
+          return fail('PATH_INVALID', 'clipboardWrite 只接受 encoding:"base64" 的 PNG 字节');
+        }
+        if (typeof req.content !== 'string') {
+          return fail('PATH_INVALID', 'clipboardWrite 需要 content(base64 PNG)');
+        }
+        if (req.content.length > (LIBRARY_CLIPBOARD_WRITE_MAX_BYTES * 4) / 3 + 8) {
+          return fail('TOO_LARGE', `clipboardWrite 内容超限(上限 ${LIBRARY_CLIPBOARD_WRITE_MAX_BYTES} 字节)`);
+        }
+        if (!/^[A-Za-z0-9+/=\r\n]*$/.test(req.content)) {
+          return fail('PATH_INVALID', 'clipboardWrite content 不是合法 base64');
+        }
+        const pngBytes = Buffer.from(req.content, 'base64');
+        if (pngBytes.byteLength === 0) {
+          return fail('PATH_INVALID', 'clipboardWrite 不能写入空字节');
+        }
+        if (pngBytes.byteLength > LIBRARY_CLIPBOARD_WRITE_MAX_BYTES) {
+          return fail('TOO_LARGE', `clipboardWrite 内容超限(上限 ${LIBRARY_CLIPBOARD_WRITE_MAX_BYTES} 字节)`);
+        }
+        if (!isPngBuffer(pngBytes)) {
+          return fail('PATH_INVALID', 'clipboardWrite 只接受 PNG 字节');
+        }
+        if (!this.deps.writeClipboardPng) {
+          return fail('UNSUPPORTED', '当前宿主不能写入系统剪贴板');
+        }
+
+        const now = this.deps.now?.() ?? Date.now();
+        const last = this.lastClipboardWriteAttemptAt.get(ghostId);
+        this.lastClipboardWriteAttemptAt.set(ghostId, now);
+        if (last !== undefined && now - last < GHOST_PICK_MIN_INTERVAL_MS) {
+          return fail('RATE_LIMITED', '写入剪贴板请求太频繁,稍后再试');
+        }
+        const stale = this.rejectIfSessionStale(
+          ghostId,
+          session,
+          '账号已切换,写入剪贴板已取消',
+        );
+        if (stale) return stale;
+        try {
+          await this.deps.writeClipboardPng(pngBytes);
+        } catch (error) {
+          this.deps.log?.warn('ghost library clipboardWrite failed', {
+            ghostId,
+            err: error instanceof Error ? error.message : String(error),
+          });
+          return fail('INTERNAL', '写入系统剪贴板失败');
+        }
+        const afterWrite = this.rejectIfSessionStale(
+          ghostId,
+          session,
+          '账号已切换,写入剪贴板已取消',
+        );
+        if (afterWrite) return afterWrite;
+        return { ok: true, op: 'clipboardWrite', bytes: pngBytes.byteLength };
       }
       case 'db.open': {
         const resolved = await this.resolveDbPath(session, req.dbPath);
