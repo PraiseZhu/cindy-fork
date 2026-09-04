@@ -20,6 +20,7 @@
 import { randomBytes } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { crc32 } from 'node:zlib';
 
 import {
   GHOST_LIBRARY_OPS,
@@ -41,7 +42,8 @@ const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0
 const PNG_IHDR = Buffer.from('IHDR', 'ascii');
 const PNG_IEND = Buffer.from('IEND', 'ascii');
 /** 签名(8) + 完整 IHDR 块(4+4+13+4=25) = 33。缺 IHDR 数据/CRC 的截断头不得写剪贴板。 */
-const PNG_IHDR_CHUNK_BYTES = 25;
+const PNG_IHDR_DATA_BYTES = 13;
+const PNG_IHDR_CHUNK_BYTES = 4 + 4 + PNG_IHDR_DATA_BYTES + 4;
 const PNG_MIN_BYTES = 8 + PNG_IHDR_CHUNK_BYTES;
 
 function decodeStrictBase64(content: string): Buffer | null {
@@ -57,14 +59,39 @@ function decodeStrictBase64(content: string): Buffer | null {
 function isPngBuffer(bytes: Buffer): boolean {
   if (bytes.byteLength < PNG_MIN_BYTES) return false;
   if (!bytes.subarray(0, PNG_SIGNATURE.byteLength).equals(PNG_SIGNATURE)) return false;
-  if (bytes.readUInt32BE(8) !== 13) return false;
-  if (!bytes.subarray(12, 16).equals(PNG_IHDR)) return false;
-  const width = bytes.readUInt32BE(16);
-  const height = bytes.readUInt32BE(20);
-  if (width === 0 || height === 0) return false;
-  const ihdrCrcOffset = 8 + PNG_IHDR_CHUNK_BYTES - 4;
-  if (ihdrCrcOffset + 4 > bytes.byteLength) return false;
-  return bytes.includes(PNG_IEND);
+  let offset = PNG_SIGNATURE.byteLength;
+  let sawIhdr = false;
+  let sawIend = false;
+  let chunkIndex = 0;
+  while (offset + 12 <= bytes.byteLength) {
+    if (sawIend) return false;
+    const length = bytes.readUInt32BE(offset);
+    const typeStart = offset + 4;
+    const dataStart = typeStart + 4;
+    const next = dataStart + length + 4;
+    if (!Number.isSafeInteger(length) || length < 0 || next > bytes.byteLength) return false;
+    const type = bytes.subarray(typeStart, dataStart);
+    const data = bytes.subarray(dataStart, dataStart + length);
+    const crc = bytes.readUInt32BE(dataStart + length);
+    if ((crc32(Buffer.concat([type, data])) >>> 0) !== crc) return false;
+    if (chunkIndex === 0) {
+      if (!type.equals(PNG_IHDR) || length !== PNG_IHDR_DATA_BYTES) return false;
+      const width = data.readUInt32BE(0);
+      const height = data.readUInt32BE(4);
+      if (width === 0 || height === 0) return false;
+      sawIhdr = true;
+    } else if (type.equals(PNG_IHDR)) {
+      return false;
+    }
+    if (type.equals(PNG_IEND)) {
+      if (length !== 0) return false;
+      if (next !== bytes.byteLength) return false;
+      sawIend = true;
+    }
+    offset = next;
+    chunkIndex += 1;
+  }
+  return sawIhdr && sawIend && offset === bytes.byteLength;
 }
 
 export function libraryBlobRelPath(hash: string, ext: string): string {

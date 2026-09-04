@@ -512,6 +512,20 @@ describe('GhostLibrarySlot', () => {
       op: 'clipboardWrite', content: truncatedPng.toString('base64'), encoding: 'base64',
     });
     expect(truncated).toMatchObject({ ok: false, errorCode: 'PATH_INVALID' });
+    // 插进 IDAT 数据区:IHDR 结束于 33,IDAT type 后是 offset 41。
+    const iendInIdat = Buffer.concat([
+      MIN_PNG.subarray(0, 41),
+      Buffer.from('IEND', 'ascii'),
+      MIN_PNG.subarray(41),
+    ]);
+    const embedded = await slot.handleLibraryRequest(GHOST_ID, {
+      op: 'clipboardWrite', content: iendInIdat.toString('base64'), encoding: 'base64',
+    });
+    expect(embedded).toMatchObject({ ok: false, errorCode: 'PATH_INVALID' });
+    const trailing = await slot.handleLibraryRequest(GHOST_ID, {
+      op: 'clipboardWrite', content: Buffer.concat([MIN_PNG, Buffer.from([0x00])]).toString('base64'), encoding: 'base64',
+    });
+    expect(trailing).toMatchObject({ ok: false, errorCode: 'PATH_INVALID' });
     expect(writeClipboardPng).not.toHaveBeenCalled();
     expect(showItemInFolder).not.toHaveBeenCalled();
     expect(showSaveDialog).not.toHaveBeenCalled();
