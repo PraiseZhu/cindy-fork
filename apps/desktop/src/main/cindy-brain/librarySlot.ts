@@ -39,8 +39,10 @@ const LIBRARY_SIDECAR_BASENAME = new Set(['meta.json', 'preview.webp']);
 export const LIBRARY_CLIPBOARD_WRITE_MAX_BYTES = 16 * 1024 * 1024;
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 const PNG_IHDR = Buffer.from('IHDR', 'ascii');
-/** PNG 签名(8) + IHDR 长度(4) + 类型(4) + 宽高(8) = 24。截断头不得当图像写剪贴板。 */
-const PNG_MIN_HEADER_BYTES = 24;
+const PNG_IEND = Buffer.from('IEND', 'ascii');
+/** 签名(8) + 完整 IHDR 块(4+4+13+4=25) = 33。缺 IHDR 数据/CRC 的截断头不得写剪贴板。 */
+const PNG_IHDR_CHUNK_BYTES = 25;
+const PNG_MIN_BYTES = 8 + PNG_IHDR_CHUNK_BYTES;
 
 function decodeStrictBase64(content: string): Buffer | null {
   const compact = content.replace(/[\r\n]/g, '');
@@ -53,10 +55,16 @@ function decodeStrictBase64(content: string): Buffer | null {
 }
 
 function isPngBuffer(bytes: Buffer): boolean {
-  if (bytes.byteLength < PNG_MIN_HEADER_BYTES) return false;
+  if (bytes.byteLength < PNG_MIN_BYTES) return false;
   if (!bytes.subarray(0, PNG_SIGNATURE.byteLength).equals(PNG_SIGNATURE)) return false;
+  if (bytes.readUInt32BE(8) !== 13) return false;
   if (!bytes.subarray(12, 16).equals(PNG_IHDR)) return false;
-  return bytes.readUInt32BE(8) === 13;
+  const width = bytes.readUInt32BE(16);
+  const height = bytes.readUInt32BE(20);
+  if (width === 0 || height === 0) return false;
+  const ihdrCrcOffset = 8 + PNG_IHDR_CHUNK_BYTES - 4;
+  if (ihdrCrcOffset + 4 > bytes.byteLength) return false;
+  return bytes.includes(PNG_IEND);
 }
 
 export function libraryBlobRelPath(hash: string, ext: string): string {

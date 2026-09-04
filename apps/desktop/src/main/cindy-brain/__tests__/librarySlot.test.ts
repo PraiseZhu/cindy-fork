@@ -457,14 +457,13 @@ describe('GhostLibrarySlot', () => {
     expect(fs.existsSync(dest)).toBe(false);
   });
 
-  const MIN_PNG = Buffer.alloc(24);
-  MIN_PNG.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], 0);
-  MIN_PNG.writeUInt32BE(13, 8);
-  MIN_PNG.set([0x49, 0x48, 0x44, 0x52], 12);
-  MIN_PNG.writeUInt32BE(1, 16);
-  MIN_PNG.writeUInt32BE(1, 20);
+  // 1x1 灰度 PNG:签名 + 完整 IHDR(含 13 字节数据与 CRC) + IDAT + IEND。
+  const MIN_PNG = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAAAAAA6fptVAAAACklEQVR42mNgAAAAAgAB5Sfe/AAAAABJRU5ErkJggg==',
+    'base64',
+  );
   const pngB64 = MIN_PNG.toString('base64');
-  const truncatedPng = MIN_PNG.subarray(0, 16);
+  const truncatedPng = MIN_PNG.subarray(0, 24);
 
   it('clipboardWrite: 成功写回 bytes,不调用 Finder/saveAs',
     async () => {
