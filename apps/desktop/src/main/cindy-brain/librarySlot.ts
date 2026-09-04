@@ -45,6 +45,8 @@ const PNG_IEND = Buffer.from('IEND', 'ascii');
 const PNG_IHDR_DATA_BYTES = 13;
 const PNG_IHDR_CHUNK_BYTES = 4 + 4 + PNG_IHDR_DATA_BYTES + 4;
 const PNG_MIN_BYTES = 8 + PNG_IHDR_CHUNK_BYTES;
+/** 与 getGhostLibrarySlot 生产接线同文案:无可见主壳窗时抛出,槽内映射 UNSUPPORTED。 */
+const CLIPBOARD_NO_HOST_WINDOW = '没有可挂靠的宿主窗口';
 
 function decodeStrictBase64(content: string): Buffer | null {
   const compact = content.replace(/[\r\n]/g, '');
@@ -746,10 +748,11 @@ export class GhostLibrarySlot {
         try {
           await this.deps.writeClipboardPng(pngBytes);
         } catch (error) {
-          this.deps.log?.warn('ghost library clipboardWrite failed', {
-            ghostId,
-            err: error instanceof Error ? error.message : String(error),
-          });
+          const message = error instanceof Error ? error.message : String(error);
+          this.deps.log?.warn('ghost library clipboardWrite failed', { ghostId, err: message });
+          if (message === CLIPBOARD_NO_HOST_WINDOW) {
+            return fail('UNSUPPORTED', '当前没有可挂靠的宿主窗口,无法写入系统剪贴板');
+          }
           return fail('INTERNAL', '写入系统剪贴板失败');
         }
         const afterWrite = this.rejectIfSessionStale(

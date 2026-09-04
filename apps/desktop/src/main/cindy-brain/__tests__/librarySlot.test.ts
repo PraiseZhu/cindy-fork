@@ -543,6 +543,19 @@ describe('GhostLibrarySlot', () => {
     expect(writeClipboardPng).not.toHaveBeenCalled();
   });
 
+  it('clipboardWrite: 生产注入无主壳窗 → UNSUPPORTED,不伪装 INTERNAL', async () => {
+    await slot.handleLibraryRequest(GHOST_ID, { op: 'open' });
+    clock += 4_000;
+    writeClipboardPng.mockImplementationOnce(async () => {
+      throw new Error('没有可挂靠的宿主窗口');
+    });
+    const r = await slot.handleLibraryRequest(GHOST_ID, {
+      op: 'clipboardWrite', content: pngB64, encoding: 'base64',
+    });
+    expect(r).toMatchObject({ ok: false, errorCode: 'UNSUPPORTED' });
+    expect(writeClipboardPng).toHaveBeenCalledTimes(1);
+  });
+
   it('clipboardWrite: 未知 op 仍拒,不调用 writeClipboardPng', async () => {
     await slot.handleLibraryRequest(GHOST_ID, { op: 'open' });
     const r = await slot.handleLibraryRequest(GHOST_ID, { op: 'clipboardPaste' });
