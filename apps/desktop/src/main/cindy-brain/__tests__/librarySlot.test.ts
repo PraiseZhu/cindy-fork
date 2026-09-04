@@ -457,11 +457,14 @@ describe('GhostLibrarySlot', () => {
     expect(fs.existsSync(dest)).toBe(false);
   });
 
-  const MIN_PNG = Buffer.from([
-    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
-    0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
-  ]);
+  const MIN_PNG = Buffer.alloc(24);
+  MIN_PNG.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], 0);
+  MIN_PNG.writeUInt32BE(13, 8);
+  MIN_PNG.set([0x49, 0x48, 0x44, 0x52], 12);
+  MIN_PNG.writeUInt32BE(1, 16);
+  MIN_PNG.writeUInt32BE(1, 20);
   const pngB64 = MIN_PNG.toString('base64');
+  const truncatedPng = MIN_PNG.subarray(0, 16);
 
   it('clipboardWrite: 成功写回 bytes,不调用 Finder/saveAs',
     async () => {
@@ -502,6 +505,14 @@ describe('GhostLibrarySlot', () => {
       op: 'clipboardWrite', content: jpeg, encoding: 'base64',
     });
     expect(notPng).toMatchObject({ ok: false, errorCode: 'PATH_INVALID' });
+    const padded = await slot.handleLibraryRequest(GHOST_ID, {
+      op: 'clipboardWrite', content: `${pngB64}=AAAA`, encoding: 'base64',
+    });
+    expect(padded).toMatchObject({ ok: false, errorCode: 'PATH_INVALID' });
+    const truncated = await slot.handleLibraryRequest(GHOST_ID, {
+      op: 'clipboardWrite', content: truncatedPng.toString('base64'), encoding: 'base64',
+    });
+    expect(truncated).toMatchObject({ ok: false, errorCode: 'PATH_INVALID' });
     expect(writeClipboardPng).not.toHaveBeenCalled();
     expect(showItemInFolder).not.toHaveBeenCalled();
     expect(showSaveDialog).not.toHaveBeenCalled();

@@ -38,10 +38,25 @@ const LIBRARY_SIDECAR_BASENAME = new Set(['meta.json', 'preview.webp']);
 /** clipboardWrite 单次 PNG 上限:与 library 单次 write 同为 16MiB,必须是有限整数。 */
 export const LIBRARY_CLIPBOARD_WRITE_MAX_BYTES = 16 * 1024 * 1024;
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+const PNG_IHDR = Buffer.from('IHDR', 'ascii');
+/** PNG 签名(8) + IHDR 长度(4) + 类型(4) + 宽高(8) = 24。截断头不得当图像写剪贴板。 */
+const PNG_MIN_HEADER_BYTES = 24;
+
+function decodeStrictBase64(content: string): Buffer | null {
+  const compact = content.replace(/[\r\n]/g, '');
+  if (compact.length === 0) return Buffer.alloc(0);
+  if (compact.length % 4 !== 0) return null;
+  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(compact)) return null;
+  const decoded = Buffer.from(compact, 'base64');
+  if (decoded.toString('base64') !== compact) return null;
+  return decoded;
+}
 
 function isPngBuffer(bytes: Buffer): boolean {
-  return bytes.byteLength >= PNG_SIGNATURE.byteLength
-    && bytes.subarray(0, PNG_SIGNATURE.byteLength).equals(PNG_SIGNATURE);
+  if (bytes.byteLength < PNG_MIN_HEADER_BYTES) return false;
+  if (!bytes.subarray(0, PNG_SIGNATURE.byteLength).equals(PNG_SIGNATURE)) return false;
+  if (!bytes.subarray(12, 16).equals(PNG_IHDR)) return false;
+  return bytes.readUInt32BE(8) === 13;
 }
 
 export function libraryBlobRelPath(hash: string, ext: string): string {
@@ -664,10 +679,10 @@ export class GhostLibrarySlot {
         if (req.content.length > (LIBRARY_CLIPBOARD_WRITE_MAX_BYTES * 4) / 3 + 8) {
           return fail('TOO_LARGE', `clipboardWrite 内容超限(上限 ${LIBRARY_CLIPBOARD_WRITE_MAX_BYTES} 字节)`);
         }
-        if (!/^[A-Za-z0-9+/=\r\n]*$/.test(req.content)) {
+        const pngBytes = decodeStrictBase64(req.content);
+        if (pngBytes === null) {
           return fail('PATH_INVALID', 'clipboardWrite content 不是合法 base64');
         }
-        const pngBytes = Buffer.from(req.content, 'base64');
         if (pngBytes.byteLength === 0) {
           return fail('PATH_INVALID', 'clipboardWrite 不能写入空字节');
         }
