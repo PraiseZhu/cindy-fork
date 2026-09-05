@@ -5,9 +5,10 @@
  * 文件落 os.tmpdir() 临时目录并收尾清理(规则 23:凭证不入仓同族约束)。
  */
 
-import { describe, it, expect, vi, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, vi, beforeAll, afterAll, afterEach } from 'vitest';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
+import fsp from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -29,6 +30,42 @@ beforeAll(() => {
 afterAll(() => {
   fs.rmSync(tmpUserData, { recursive: true, force: true });
 });
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
+
+function hashedPng(label: string) {
+  const buffer = Buffer.concat([PNG_BYTES, Buffer.from(label)]);
+  const hash = createHash('sha256').update(buffer).digest('hex');
+  const dest = path.join(tmpUserData, 'cindy-media', 'blobs', hash.slice(0, 2), `${hash}.png`);
+  return { buffer, hash, dest, shard: path.dirname(dest) };
+}
+
+function seedDest(dest: string, contents: Buffer | 'dir' | { symlink: string }) {
+  fs.mkdirSync(path.dirname(dest), { recursive: true });
+  fs.rmSync(dest, { recursive: true, force: true });
+  if (contents === 'dir') {
+    fs.mkdirSync(dest);
+    return;
+  }
+  if (typeof contents === 'object' && 'symlink' in contents) {
+    fs.symlinkSync(contents.symlink, dest);
+    return;
+  }
+  fs.writeFileSync(dest, contents);
+}
+
+async function withUnsupportedLink<T>(fn: () => Promise<T>): Promise<T> {
+  const spy = vi.spyOn(fsp, 'link').mockRejectedValue(
+    Object.assign(new Error('hard-link unsupported'), { code: 'ENOTSUP' }),
+  );
+  try {
+    return await fn();
+  } finally {
+    spy.mockRestore();
+  }
+}
 
 describe('writeBlob(内容寻址写入)', () => {
   it('支持 Telegram voice 使用的 Ogg/Opus 容器 MIME', () => {
@@ -67,6 +104,175 @@ describe('writeBlob(内容寻址写入)', () => {
     await expect(
       blobStore.writeBlob({ buffer: PNG_BYTES, mimeType: 'application/x-msdownload' }),
     ).rejects.toThrow('unsupported mime');
+  });
+});
+
+describe('writeBlob(已存在副本核验与自愈)', () => {
+  it.each(['link', 'rename'] as const)('%s 分支:正确副本去重不重写', async (mode) => {
+    const sample = hashedPng(`ok-${mode}`);
+    seedDest(sample.dest, sample.buffer);
+    const before = fs.statSync(sample.dest);
+    const run = () => blobStore.writeBlob({ buffer: sample.buffer, mimeType: 'image/png' });
+    const written = mode === 'rename' ? await withUnsupportedLink(run) : await run();
+    expect(written.deduplicated).toBe(true);
+    const after = fs.statSync(sample.dest);
+    expect(after.ino).toBe(before.ino);
+    expect(after.mtimeMs).toBe(before.mtimeMs);
+    expect(fs.readFileSync(sample.dest)).toEqual(sample.buffer);
+  });
+
+  it.each(['link', 'rename'] as const)('%s 分支:损坏文件按输入 hash 修复', async (mode) => {
+    const sample = hashedPng(`bad-${mode}`);
+    seedDest(sample.dest, Buffer.from('poisoned-bytes'));
+    const run = () => blobStore.writeBlob({ buffer: sample.buffer, mimeType: 'image/png' });
+    const written = mode === 'rename' ? await withUnsupportedLink(run) : await run();
+    expect(written.deduplicated).toBe(false);
+    expect(written.hash).toBe(sample.hash);
+    expect(fs.readFileSync(sample.dest)).toEqual(sample.buffer);
+    expect(createHash('sha256').update(fs.readFileSync(sample.dest)).digest('hex')).toBe(sample.hash);
+  });
+
+  it.each(['link', 'rename'] as const)('%s 分支:缺失补写', async (mode) => {
+    const sample = hashedPng(`missing-${mode}`);
+    fs.mkdirSync(sample.shard, { recursive: true });
+    const run = () => blobStore.writeBlob({ buffer: sample.buffer, mimeType: 'image/png' });
+    const written = mode === 'rename' ? await withUnsupportedLink(run) : await run();
+    expect(written.deduplicated).toBe(false);
+    expect(fs.readFileSync(sample.dest)).toEqual(sample.buffer);
+  });
+
+  it.each(['link', 'rename'] as const)('%s 分支:symlink 不当成去重成功', async (mode) => {
+    const sample = hashedPng(`symlink-${mode}`);
+    const outside = path.join(os.tmpdir(), `cindy-media-outside-${mode}-${process.pid}`);
+    fs.writeFileSync(outside, sample.buffer);
+    try {
+      seedDest(sample.dest, { symlink: outside });
+      const run = () => blobStore.writeBlob({ buffer: sample.buffer, mimeType: 'image/png' });
+      await expect(mode === 'rename' ? withUnsupportedLink(run) : run()).rejects.toThrow(/symlink/);
+      expect(fs.lstatSync(sample.dest).isSymbolicLink()).toBe(true);
+      expect(fs.readFileSync(outside)).toEqual(sample.buffer);
+    } finally {
+      fs.rmSync(outside, { force: true });
+    }
+  });
+
+  it.each(['link', 'rename'] as const)('%s 分支:目录不当成去重成功', async (mode) => {
+    const sample = hashedPng(`dir-${mode}`);
+    seedDest(sample.dest, 'dir');
+    const run = () => blobStore.writeBlob({ buffer: sample.buffer, mimeType: 'image/png' });
+    await expect(mode === 'rename' ? withUnsupportedLink(run) : run()).rejects.toThrow(/directory/);
+    expect(fs.statSync(sample.dest).isDirectory()).toBe(true);
+  });
+
+  it.each(['link', 'rename'] as const)('%s 分支:检查期间替换不当成去重成功', async (mode) => {
+    const sample = hashedPng(`swap-${mode}`);
+    seedDest(sample.dest, sample.buffer);
+    const outside = path.join(os.tmpdir(), `cindy-media-swap-${mode}-${process.pid}`);
+    fs.writeFileSync(outside, Buffer.from('not-the-blob'));
+    const originalOpen = fsp.open.bind(fsp);
+    const spy = vi.spyOn(fsp, 'open').mockImplementation(async (target, flags, perm) => {
+      if (path.resolve(String(target)) === path.resolve(sample.dest)) {
+        fs.rmSync(sample.dest, { force: true });
+        fs.symlinkSync(outside, sample.dest);
+      }
+      return originalOpen(target, flags, perm);
+    });
+    try {
+      const run = () => blobStore.writeBlob({ buffer: sample.buffer, mimeType: 'image/png' });
+      await expect(mode === 'rename' ? withUnsupportedLink(run) : run()).rejects.toThrow();
+      expect(fs.lstatSync(sample.dest).isSymbolicLink()).toBe(true);
+      expect(fs.readFileSync(outside).toString()).toBe('not-the-blob');
+    } finally {
+      spy.mockRestore();
+      fs.rmSync(outside, { force: true });
+    }
+  });
+});
+
+describe('writeBlob(串行与原子发布)', () => {
+  it('进程内同目标串行,正确副本幂等收敛', async () => {
+    const sample = hashedPng('serial');
+    const [first, second] = await Promise.all([
+      blobStore.writeBlob({ buffer: sample.buffer, mimeType: 'image/png' }),
+      blobStore.writeBlob({ buffer: sample.buffer, mimeType: 'image/png' }),
+    ]);
+    expect([first.deduplicated, second.deduplicated].sort()).toEqual([false, true]);
+    expect(fs.readdirSync(sample.shard).filter((name) => !name.startsWith('.tmp-'))).toEqual([
+      `${sample.hash}.png`,
+    ]);
+    expect(fs.readFileSync(sample.dest)).toEqual(sample.buffer);
+  });
+
+  it('损坏目标并发写入后读回正确内容,不暴露半截文件', async () => {
+    const sample = hashedPng('race-repair');
+    seedDest(sample.dest, Buffer.from('truncated'));
+    const results = await Promise.all([
+      blobStore.writeBlob({ buffer: sample.buffer, mimeType: 'image/png' }),
+      blobStore.writeBlob({ buffer: sample.buffer, mimeType: 'image/png' }),
+    ]);
+    expect(results.every((item) => item.hash === sample.hash)).toBe(true);
+    expect(fs.readFileSync(sample.dest)).toEqual(sample.buffer);
+    expect(fs.readdirSync(sample.shard).some((name) => name.startsWith('.tmp-'))).toBe(false);
+  });
+
+  it('跨进程同 hash 并发发布后读回验证,正确即幂等收敛', async () => {
+    const sample = hashedPng('cross-proc');
+    seedDest(sample.dest, Buffer.from('poison'));
+    const { spawnSync } = await import('node:child_process');
+    const helper = path.join(sample.shard, 'cross-proc-helper.mjs');
+    fs.writeFileSync(
+      helper,
+      `
+        import { writeFileSync } from 'node:fs';
+        writeFileSync(${JSON.stringify(sample.dest)}, Buffer.from(${JSON.stringify(sample.buffer.toString('base64'))}), 'base64');
+      `,
+    );
+    const racing = blobStore.writeBlob({ buffer: sample.buffer, mimeType: 'image/png' });
+    const child = spawnSync(process.execPath, [helper], { encoding: 'utf8' });
+    expect(child.status).toBe(0);
+    const written = await racing;
+    expect(written.hash).toBe(sample.hash);
+    expect(fs.readFileSync(sample.dest)).toEqual(sample.buffer);
+    fs.rmSync(helper, { force: true });
+  });
+
+  it('权限拒绝不追随链接改仓外路径', async () => {
+    const sample = hashedPng('eacces');
+    seedDest(sample.dest, Buffer.from('bad'));
+    const spy = vi.spyOn(fsp, 'rename').mockRejectedValue(
+      Object.assign(new Error('permission denied'), { code: 'EACCES' }),
+    );
+    const originalOpen = fsp.open.bind(fsp);
+    vi.spyOn(fsp, 'open').mockImplementation(async (target, flags, perm) => {
+      if (path.resolve(String(target)) === path.resolve(sample.dest)) {
+        throw Object.assign(new Error('permission denied'), { code: 'EACCES' });
+      }
+      return originalOpen(target, flags, perm);
+    });
+    try {
+      await expect(
+        blobStore.writeBlob({ buffer: sample.buffer, mimeType: 'image/png' }),
+      ).rejects.toMatchObject({ code: 'EACCES' });
+      expect(fs.readFileSync(sample.dest).toString()).toBe('bad');
+    } finally {
+      spy.mockRestore();
+      vi.restoreAllMocks();
+    }
+  });
+
+  it('磁盘满时失败且不把半截内容当成功', async () => {
+    const sample = hashedPng('enospc');
+    const spy = vi.spyOn(fsp, 'writeFile').mockRejectedValue(
+      Object.assign(new Error('no space left'), { code: 'ENOSPC' }),
+    );
+    try {
+      await expect(
+        blobStore.writeBlob({ buffer: sample.buffer, mimeType: 'image/png' }),
+      ).rejects.toMatchObject({ code: 'ENOSPC' });
+      expect(fs.existsSync(sample.dest)).toBe(false);
+    } finally {
+      spy.mockRestore();
+    }
   });
 });
 
