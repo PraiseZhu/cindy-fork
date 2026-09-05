@@ -2085,7 +2085,8 @@ export function ghostPermissionItems(manifest: GhostManifest): GhostPermissionIt
     items.push({ key: 'fs', kind: 'fs', labelKey: 'fsWrite', detailKey: 'fsWriteDetail' });
   }
   // library 能力:持久作品库(用户数据语义,不是临时缓存)。详情页必须讲清
-  // 卸载不删、删除走独立确认,以及会打开系统文件夹/另存为对话框。
+  // 卸载不删、删除走独立确认、会打开系统文件夹/另存为对话框,以及可把 PNG
+  // 位图写入系统剪贴板(无确认框,会覆盖当前剪贴板)。
   if (manifest.library === true) {
     items.push({
       key: 'library',
