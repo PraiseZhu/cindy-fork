@@ -95,9 +95,11 @@ backups）对插件不可达——路径语法段首不许点，协议层天然�
     operation 忽略，已知项保留；有效 v1 清单缺少某项才是 unsupported；缺字段、错类型、
     `version` 非 1、或旧宿主 unknown-op 一律 unknown。旧插件无需重装或重授权。
     实际操作失败仍用旧 `errorCode`，另加稳定 `reason`：无 handler=`IMPLEMENTATION_UNSUPPORTED`，
-    无窗口=`NO_VISIBLE_WINDOW`，权限=`PERMISSION_DENIED`，库不可用=`LIBRARY_UNAVAILABLE`，
-    非法请求=`INVALID_REQUEST`，取消=`CANCELLED`。查询/传输层本地分类 `TIMEOUT` /
-    `TRANSPORT_ERROR`。插件不得解析人类 `message` 猜类别。插件基座改动按仓库白名单人工
+    无窗口=`NO_VISIBLE_WINDOW`，权限=`PERMISSION_DENIED`，库不可用=`LIBRARY_UNAVAILABLE`
+    （含 vault 透传的 open/status 失败），非法请求=`INVALID_REQUEST`（含非法/越界
+    `dbPath` 与未知 op），取消=`CANCELLED`。成功 `open`/`status` 的 `state:'unavailable'`
+    仍用结果体 `reason`（如 `disk-missing`），不是失败 `reason` 枚举。查询/传输层本地分类
+    `TIMEOUT` / `TRANSPORT_ERROR`。插件不得解析人类 `message` 猜类别。插件基座改动按仓库白名单人工
     Approve 才能合并。合同示例：
 
     ```ts

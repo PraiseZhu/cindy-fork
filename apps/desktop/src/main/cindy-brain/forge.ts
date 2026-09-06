@@ -3526,8 +3526,10 @@ await cindy.library({ op: 'db.check',  dbPath: 'library.sqlite' });  // quick_ch
   \`DB_ROW_LIMIT\`(结果集超 2000 行,自己加 LIMIT)、\`DB_MIGRATION_CONFLICT\`、
   \`BUSY\`、\`RATE_LIMITED\`、\`UNSUPPORTED\`、\`NOT_DECLARED\`;
   稳定 \`reason\`:无 handler=\`IMPLEMENTATION_UNSUPPORTED\`,无窗口=\`NO_VISIBLE_WINDOW\`,
-  权限=\`PERMISSION_DENIED\`,库不可用=\`LIBRARY_UNAVAILABLE\`,非法请求=\`INVALID_REQUEST\`,
-  取消=\`CANCELLED\`;查询/传输层本地分类 \`TIMEOUT\` / \`TRANSPORT_ERROR\`;
+  权限=\`PERMISSION_DENIED\`,库不可用=\`LIBRARY_UNAVAILABLE\`(含 vault 透传的
+  open/status 失败),非法请求=\`INVALID_REQUEST\`(含非法/越界 dbPath 与未知 op),
+  取消=\`CANCELLED\`;成功 open/status 的 \`state:'unavailable'\` 仍用结果体 reason
+  (如 disk-missing),不是失败 reason 枚举;查询/传输层本地分类 \`TIMEOUT\` / \`TRANSPORT_ERROR\`;
 - **capabilities**:先查 \`{ op:'capabilities' }\`。仅 \`version===1\` 且
   \`operations\` 为**全部字符串**的数组才有效;额外字段忽略,未知 operation 忽略,
   已知项保留;有效 v1 清单缺少某项才是 unsupported。缺字段、错类型(含数组内混入

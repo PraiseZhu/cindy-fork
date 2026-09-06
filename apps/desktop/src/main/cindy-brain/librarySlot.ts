@@ -194,6 +194,12 @@ const fail = (
   reason?: GhostLibraryErrorReason,
 ): GhostPipeLibraryResult => (reason ? { ok: false, errorCode, message, reason } : { ok: false, errorCode, message });
 
+const vaultFail = (r: { errorCode: string; message: string }): GhostPipeLibraryResult => (
+  r.errorCode === 'LIBRARY_UNAVAILABLE'
+    ? fail(r.errorCode, r.message, 'LIBRARY_UNAVAILABLE')
+    : { ok: false, errorCode: r.errorCode, message: r.message }
+);
+
 export class GhostLibrarySlot {
   private readonly sessions = new Map<string, GhostLibrarySession>();
   /** 迁移进行中的插件:全部写操作只读化(切换与 grace 前不再有写入落旧根)。 */
@@ -481,9 +487,9 @@ export class GhostLibrarySlot {
   /** dbPath 相对键 → 库内绝对路径;经 vault 收敛校验(库内 symlink 指根外拒)。 */
   private async resolveDbPath(session: GhostLibrarySession, dbPath: unknown): Promise<{ abs: string } | GhostPipeLibraryResult> {
     const reason = validateLibraryRelPath(dbPath);
-    if (reason) return fail('PATH_INVALID', `dbPath 非法:${reason}`);
+    if (reason) return fail('PATH_INVALID', `dbPath 非法:${reason}`, 'INVALID_REQUEST');
     const abs = await session.vault.resolveDbTarget(dbPath as string);
-    if (abs === null) return fail('PATH_INVALID', 'dbPath 越界或目标不可用作数据库');
+    if (abs === null) return fail('PATH_INVALID', 'dbPath 越界或目标不可用作数据库', 'INVALID_REQUEST');
     return { abs };
   }
 
@@ -539,7 +545,7 @@ export class GhostLibrarySlot {
     switch (op) {
       case 'open': {
         const r = await vault.open();
-        if (!r.ok) return { ok: false, errorCode: r.errorCode, message: r.message };
+        if (!r.ok) return vaultFail(r);
         this.extraDirOpenerGhostId = ghostId;
         await this.syncAgentReadonlyExtraDir(ghostId, vault.getRootDir());
         const body = {
@@ -550,7 +556,7 @@ export class GhostLibrarySlot {
       }
       case 'status': {
         const r = await vault.status();
-        if (!r.ok) return { ok: false, errorCode: r.errorCode, message: r.message };
+        if (!r.ok) return vaultFail(r);
         if (this.extraDirOpenerGhostId === ghostId) {
           await this.syncAgentReadonlyExtraDir(ghostId, vault.getRootDir());
         }
@@ -564,57 +570,57 @@ export class GhostLibrarySlot {
       }
       case 'read': {
         const r = await vault.read({ path: req.path, encoding: req.encoding, offset: req.offset, length: req.length });
-        if (!r.ok) return { ok: false, errorCode: r.errorCode, message: r.message };
+        if (!r.ok) return vaultFail(r);
         return { ok: true, op: 'read', path: r.path, content: r.content, encoding: r.encoding, bytes: r.bytes, sha256: r.sha256 };
       }
       case 'write': {
         const r = await vault.write({ path: req.path, content: req.content, encoding: req.encoding, ifNotExists: req.ifNotExists });
-        if (!r.ok) return { ok: false, errorCode: r.errorCode, message: r.message };
+        if (!r.ok) return vaultFail(r);
         return { ok: true, op: 'write', path: r.path, bytes: r.bytes, sha256: r.sha256 };
       }
       case 'writeBegin': {
         const r = await vault.writeBegin({ path: req.path, totalBytes: req.totalBytes, sha256: req.sha256 });
-        if (!r.ok) return { ok: false, errorCode: r.errorCode, message: r.message };
+        if (!r.ok) return vaultFail(r);
         return { ok: true, op: 'writeBegin', streamId: r.streamId };
       }
       case 'writeChunk': {
         const r = await vault.writeChunk({ streamId: req.streamId, seq: req.seq, content: req.content, encoding: req.encoding });
-        if (!r.ok) return { ok: false, errorCode: r.errorCode, message: r.message };
+        if (!r.ok) return vaultFail(r);
         return { ok: true, op: 'writeChunk', accepted: r.accepted };
       }
       case 'writeCommit': {
         const r = await vault.writeCommit({ streamId: req.streamId });
-        if (!r.ok) return { ok: false, errorCode: r.errorCode, message: r.message };
+        if (!r.ok) return vaultFail(r);
         return { ok: true, op: 'writeCommit', path: r.path, bytes: r.bytes, sha256: r.sha256 };
       }
       case 'writeAbort': {
         const r = await vault.writeAbort({ streamId: req.streamId });
-        if (!r.ok) return { ok: false, errorCode: r.errorCode, message: r.message };
+        if (!r.ok) return vaultFail(r);
         return { ok: true, op: 'writeAbort', aborted: r.aborted };
       }
       case 'list': {
         const r = await vault.list({ path: req.path, recursive: req.recursive, cursor: req.cursor, limit: req.limit });
-        if (!r.ok) return { ok: false, errorCode: r.errorCode, message: r.message };
+        if (!r.ok) return vaultFail(r);
         return { ok: true, op: 'list', entries: r.entries, hasMore: r.hasMore, nextCursor: r.nextCursor };
       }
       case 'stat': {
         const r = await vault.stat({ path: req.path });
-        if (!r.ok) return { ok: false, errorCode: r.errorCode, message: r.message };
+        if (!r.ok) return vaultFail(r);
         return { ok: true, op: 'stat', path: r.path, kind: r.kind, bytes: r.bytes, mtime: r.mtime };
       }
       case 'mkdir': {
         const r = await vault.mkdir({ path: req.path });
-        if (!r.ok) return { ok: false, errorCode: r.errorCode, message: r.message };
+        if (!r.ok) return vaultFail(r);
         return { ok: true, op: 'mkdir', path: r.path, existed: r.existed };
       }
       case 'delete': {
         const r = await vault.delete({ path: req.path, recursive: req.recursiveDelete });
-        if (!r.ok) return { ok: false, errorCode: r.errorCode, message: r.message };
+        if (!r.ok) return vaultFail(r);
         return { ok: true, op: 'delete', path: r.path, existed: r.existed };
       }
       case 'rename': {
         const r = await vault.rename({ from: req.from, to: req.to, overwrite: req.overwrite });
-        if (!r.ok) return { ok: false, errorCode: r.errorCode, message: r.message };
+        if (!r.ok) return vaultFail(r);
         return { ok: true, op: 'rename', from: r.from, to: r.to };
       }
       case 'reveal': {
@@ -866,7 +872,7 @@ export class GhostLibrarySlot {
         return this.dbResultToPipe(op, r);
       }
       default:
-        return fail('PATH_INVALID', `未知 op:${op}`);
+        return fail('PATH_INVALID', `未知 op:${op}`, 'INVALID_REQUEST');
     }
   }
 }

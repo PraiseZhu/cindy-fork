@@ -292,6 +292,41 @@ describe('GhostLibrarySlot', () => {
     expect(backups.some((f) => f.startsWith('pre-migrate-'))).toBe(true);
   });
 
+  it('dbPath 非法/越界 → PATH_INVALID + INVALID_REQUEST', async () => {
+    await slot.handleLibraryRequest(GHOST_ID, { op: 'open' });
+    const missing = await slot.handleLibraryRequest(GHOST_ID, { op: 'db.open' });
+    expect(missing).toMatchObject({ ok: false, errorCode: 'PATH_INVALID', reason: 'INVALID_REQUEST' });
+    const escaped = await slot.handleLibraryRequest(GHOST_ID, {
+      op: 'db.open', dbPath: '../escape.sqlite',
+    });
+    expect(escaped).toMatchObject({ ok: false, errorCode: 'PATH_INVALID', reason: 'INVALID_REQUEST' });
+  });
+
+  it('open/status vault LIBRARY_UNAVAILABLE 透传稳定 reason', async () => {
+    const openSpy = vi.spyOn(LibraryVault.prototype, 'open').mockResolvedValue({
+      ok: false, errorCode: 'LIBRARY_UNAVAILABLE', message: 'Library 实例已作废',
+    });
+    try {
+      const r = await slot.handleLibraryRequest(GHOST_ID, { op: 'open' });
+      expect(r).toMatchObject({
+        ok: false, errorCode: 'LIBRARY_UNAVAILABLE', reason: 'LIBRARY_UNAVAILABLE',
+      });
+    } finally {
+      openSpy.mockRestore();
+    }
+    const statusSpy = vi.spyOn(LibraryVault.prototype, 'status').mockResolvedValue({
+      ok: false, errorCode: 'LIBRARY_UNAVAILABLE', message: 'Library 根目录不可访问',
+    });
+    try {
+      const st = await slot.handleLibraryRequest(GHOST_ID, { op: 'status' });
+      expect(st).toMatchObject({
+        ok: false, errorCode: 'LIBRARY_UNAVAILABLE', reason: 'LIBRARY_UNAVAILABLE',
+      });
+    } finally {
+      statusSpy.mockRestore();
+    }
+  });
+
   it('binding 漂移:目录删除 → open 报 unavailable(disk-missing),写拒', async () => {
     const store = new LibraryBindingStore({
       getFile: () => bindingFile,

@@ -1527,6 +1527,8 @@ describe('FORGE_GUIDE', () => {
     expect(FORGE_GUIDE).toContain('`NO_VISIBLE_WINDOW`');
     expect(FORGE_GUIDE).toContain('`PERMISSION_DENIED`');
     expect(FORGE_GUIDE).toContain('{ ok:false, errorCode, message, reason? }');
+    expect(FORGE_GUIDE).toContain('非法/越界 dbPath');
+    expect(FORGE_GUIDE).toContain("state:'unavailable'");
   });
 
   it('documents explicit Forge install without changing pack into an install action', () => {
