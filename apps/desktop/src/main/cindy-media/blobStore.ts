@@ -110,10 +110,8 @@ export async function writeBlob(params: {
   }
 
   const hash = createHash('sha256').update(buffer).digest('hex');
-  const dir = path.join(getBlobsRoot(), hash.slice(0, 2));
-  await fs.mkdir(dir, { recursive: true });
-  const dest = path.join(dir, `${hash}${ext}`);
   const bytes = buffer.byteLength;
+  const { dir, dest } = await prepareBlobDestination(hash, ext);
 
   return withDestLock(dest, async () => {
     // 同目录 tmp + link/rename 发布:终点不以半截内容出现;已存在分支
@@ -146,10 +144,16 @@ export async function writeBlob(params: {
         }
       }
 
-      const finalState = await inspectExistingBlob(dest, hash, bytes);
+      let finalState = await inspectExistingBlob(dest, hash, bytes);
       if (finalState.kind !== 'ok') {
-        throw new Error('cindy-media: blob destination did not match input hash');
+        finalState = await rereadOnce(dest, hash, bytes);
       }
+      if (finalState.kind !== 'ok') {
+        throw finalState.kind === 'invalid'
+          ? existingBlobError(finalState)
+          : new Error('cindy-media: blob destination did not match input hash');
+      }
+      await assertBlobPathContained(dest);
       return {
         hash,
         ext,
@@ -193,8 +197,83 @@ type ExistingBlob =
   | { kind: 'corrupt' }
   | { kind: 'invalid'; reason: 'symlink' | 'directory' | 'non-regular' | 'replaced' };
 
-function sameFileIdentity(left: Stats, right: Stats): boolean {
-  return left.dev === right.dev && left.ino === right.ino;
+function isZeroDev(value: number | bigint): boolean {
+  return typeof value === 'bigint' ? value === 0n : value === 0;
+}
+
+function sameFileIdentity(left: Stats, right: Stats, platform = process.platform): boolean {
+  if (left.ino !== right.ino) return false;
+  if (left.dev === right.dev) return true;
+  // Windows path-based stat can report dev=0 while fd-based stat reports a
+  // real volume serial; treat either-side 0 as unknown device (fs-safe).
+  return platform === 'win32' && (isZeroDev(left.dev) || isZeroDev(right.dev));
+}
+
+async function lstatRegularDir(absPath: string): Promise<Stats> {
+  const st = await fs.lstat(absPath);
+  if (st.isSymbolicLink()) {
+    throw Object.assign(new Error('cindy-media: blob ancestor is a symlink'), { code: 'ELOOP' });
+  }
+  if (!st.isDirectory()) {
+    throw Object.assign(new Error('cindy-media: blob ancestor is not a directory'), { code: 'ENOTDIR' });
+  }
+  return st;
+}
+
+async function ensureContainedDir(absPath: string, parent: string): Promise<Stats> {
+  const st = await lstatRegularDir(absPath);
+  const resolvedParent = path.resolve(parent);
+  const resolvedChild = path.resolve(absPath);
+  const relative = path.relative(resolvedParent, resolvedChild);
+  if (relative === '' || relative.startsWith('..') || path.isAbsolute(relative)) {
+    throw new Error('cindy-media: blob path out of bounds');
+  }
+  return st;
+}
+
+async function prepareBlobDestination(hash: string, ext: string): Promise<{ dir: string; dest: string }> {
+  const root = path.resolve(getBlobsRoot());
+  const rootStat = await (async () => {
+    try {
+      return await lstatRegularDir(root);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException)?.code !== 'ENOENT') throw err;
+      await fs.mkdir(root, { recursive: true });
+      return lstatRegularDir(root);
+    }
+  })();
+  const dir = path.join(root, hash.slice(0, 2));
+  try {
+    await ensureContainedDir(dir, root);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code !== 'ENOENT') throw err;
+    try {
+      await fs.mkdir(dir, { recursive: false });
+    } catch (mkdirErr) {
+      if ((mkdirErr as NodeJS.ErrnoException)?.code !== 'EEXIST') throw mkdirErr;
+    }
+    await ensureContainedDir(dir, root);
+  }
+  const dest = path.join(dir, `${hash}${ext}`);
+  if (!path.resolve(dest).startsWith(root + path.sep)) {
+    throw new Error('cindy-media: blob path out of bounds');
+  }
+  void rootStat;
+  return { dir, dest };
+}
+
+async function assertBlobPathContained(absPath: string): Promise<void> {
+  const root = path.resolve(getBlobsRoot());
+  await lstatRegularDir(root);
+  const dir = path.dirname(absPath);
+  await ensureContainedDir(dir, root);
+  const destStat = await fs.lstat(absPath);
+  if (destStat.isSymbolicLink()) {
+    throw Object.assign(new Error('cindy-media: blob destination is a symlink'), { code: 'ELOOP' });
+  }
+  if (!path.resolve(absPath).startsWith(root + path.sep)) {
+    throw new Error('cindy-media: blob path out of bounds');
+  }
 }
 
 function noFollowReadFlags(): number {
@@ -261,6 +340,14 @@ async function inspectExistingBlob(
   }
 }
 
+async function rereadOnce(
+  dest: string,
+  expectedHash: string,
+  expectedSize: number,
+): Promise<ExistingBlob> {
+  return inspectExistingBlob(dest, expectedHash, expectedSize);
+}
+
 async function reconcileExistingBlob(
   tmpPath: string,
   dest: string,
@@ -273,7 +360,9 @@ async function reconcileExistingBlob(
     await publishByRename(tmpPath, dest, expectedHash, expectedSize);
     return false;
   }
-  throw existingBlobError(existing);
+  const again = await rereadOnce(dest, expectedHash, expectedSize);
+  if (again.kind === 'ok') return true;
+  throw existingBlobError(again.kind === 'invalid' ? again : existing);
 }
 
 function existingBlobError(state: ExistingBlob): Error {
@@ -317,6 +406,8 @@ async function publishByRename(
 
   const published = await inspectExistingBlob(dest, expectedHash, expectedSize);
   if (published.kind === 'ok') return;
+  const once = await inspectExistingBlob(dest, expectedHash, expectedSize);
+  if (once.kind === 'ok') return;
   throw new Error('cindy-media: blob destination changed during publish');
 }
 

@@ -7,12 +7,14 @@
 
 import { describe, it, expect, vi, beforeAll, afterAll, afterEach } from 'vitest';
 import { createHash } from 'node:crypto';
+import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
 let tmpUserData = '';
+let scratchRoot = '';
 
 vi.mock('electron', () => ({
   app: { getPath: () => tmpUserData },
@@ -25,10 +27,12 @@ const PNG_HASH = createHash('sha256').update(PNG_BYTES).digest('hex');
 
 beforeAll(() => {
   tmpUserData = fs.mkdtempSync(path.join(os.tmpdir(), 'cindy-media-test-'));
+  scratchRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cindy-media-scratch-'));
 });
 
 afterAll(() => {
   fs.rmSync(tmpUserData, { recursive: true, force: true });
+  fs.rmSync(scratchRoot, { recursive: true, force: true });
 });
 
 afterEach(() => {
@@ -40,6 +44,10 @@ function hashedPng(label: string) {
   const hash = createHash('sha256').update(buffer).digest('hex');
   const dest = path.join(tmpUserData, 'cindy-media', 'blobs', hash.slice(0, 2), `${hash}.png`);
   return { buffer, hash, dest, shard: path.dirname(dest) };
+}
+
+function scratchDir(label: string): string {
+  return fs.mkdtempSync(path.join(scratchRoot, `${label}-`));
 }
 
 function seedDest(dest: string, contents: Buffer | 'dir' | { symlink: string }) {
@@ -143,17 +151,14 @@ describe('writeBlob(已存在副本核验与自愈)', () => {
 
   it.each(['link', 'rename'] as const)('%s 分支:symlink 不当成去重成功', async (mode) => {
     const sample = hashedPng(`symlink-${mode}`);
-    const outside = path.join(os.tmpdir(), `cindy-media-outside-${mode}-${process.pid}`);
+    const outsideDir = scratchDir(`outside-${mode}`);
+    const outside = path.join(outsideDir, 'payload.bin');
     fs.writeFileSync(outside, sample.buffer);
-    try {
-      seedDest(sample.dest, { symlink: outside });
-      const run = () => blobStore.writeBlob({ buffer: sample.buffer, mimeType: 'image/png' });
-      await expect(mode === 'rename' ? withUnsupportedLink(run) : run()).rejects.toThrow(/symlink/);
-      expect(fs.lstatSync(sample.dest).isSymbolicLink()).toBe(true);
-      expect(fs.readFileSync(outside)).toEqual(sample.buffer);
-    } finally {
-      fs.rmSync(outside, { force: true });
-    }
+    seedDest(sample.dest, { symlink: outside });
+    const run = () => blobStore.writeBlob({ buffer: sample.buffer, mimeType: 'image/png' });
+    await expect(mode === 'rename' ? withUnsupportedLink(run) : run()).rejects.toThrow(/symlink/);
+    expect(fs.lstatSync(sample.dest).isSymbolicLink()).toBe(true);
+    expect(fs.readFileSync(outside)).toEqual(sample.buffer);
   });
 
   it.each(['link', 'rename'] as const)('%s 分支:目录不当成去重成功', async (mode) => {
@@ -167,7 +172,8 @@ describe('writeBlob(已存在副本核验与自愈)', () => {
   it.each(['link', 'rename'] as const)('%s 分支:检查期间替换不当成去重成功', async (mode) => {
     const sample = hashedPng(`swap-${mode}`);
     seedDest(sample.dest, sample.buffer);
-    const outside = path.join(os.tmpdir(), `cindy-media-swap-${mode}-${process.pid}`);
+    const outsideDir = scratchDir(`swap-${mode}`);
+    const outside = path.join(outsideDir, 'not-the-blob.bin');
     fs.writeFileSync(outside, Buffer.from('not-the-blob'));
     const originalOpen = fsp.open.bind(fsp);
     const spy = vi.spyOn(fsp, 'open').mockImplementation(async (target, flags, perm) => {
@@ -184,7 +190,71 @@ describe('writeBlob(已存在副本核验与自愈)', () => {
       expect(fs.readFileSync(outside).toString()).toBe('not-the-blob');
     } finally {
       spy.mockRestore();
-      fs.rmSync(outside, { force: true });
+    }
+  });
+
+  it('bucket 被换成指向仓外的 symlink 时 fail closed,不追随写入', async () => {
+    const sample = hashedPng('bucket-symlink');
+    const outsideDir = scratchDir('bucket-outside');
+    fs.mkdirSync(sample.shard, { recursive: true });
+    fs.rmSync(sample.shard, { recursive: true, force: true });
+    fs.symlinkSync(outsideDir, sample.shard);
+    await expect(
+      blobStore.writeBlob({ buffer: sample.buffer, mimeType: 'image/png' }),
+    ).rejects.toThrow(/symlink|out of bounds/);
+    expect(fs.lstatSync(sample.shard).isSymbolicLink()).toBe(true);
+    expect(fs.readdirSync(outsideDir)).toEqual([]);
+  });
+
+  it('blobs 根被换成指向仓外的 symlink 时 fail closed,不追随写入', async () => {
+    const sample = hashedPng('root-symlink');
+    const blobsRoot = path.join(tmpUserData, 'cindy-media', 'blobs');
+    const outsideDir = scratchDir('root-outside');
+    fs.mkdirSync(blobsRoot, { recursive: true });
+    fs.rmSync(blobsRoot, { recursive: true, force: true });
+    fs.symlinkSync(outsideDir, blobsRoot);
+    try {
+      await expect(
+        blobStore.writeBlob({ buffer: sample.buffer, mimeType: 'image/png' }),
+      ).rejects.toThrow(/symlink|out of bounds/);
+      expect(fs.lstatSync(blobsRoot).isSymbolicLink()).toBe(true);
+      expect(fs.readdirSync(outsideDir)).toEqual([]);
+    } finally {
+      fs.rmSync(blobsRoot, { recursive: true, force: true });
+      fs.mkdirSync(blobsRoot, { recursive: true });
+    }
+  });
+
+  it('Windows 上 path/fd stat 一侧 dev=0 时仍识别同一正确副本', async () => {
+    const sample = hashedPng('win-dev');
+    seedDest(sample.dest, sample.buffer);
+    const originalLstat = fsp.lstat.bind(fsp);
+    const originalOpen = fsp.open.bind(fsp);
+    vi.spyOn(fsp, 'lstat').mockImplementation(async (target, opts) => {
+      const st = await originalLstat(target, opts);
+      if (path.resolve(String(target)) === path.resolve(sample.dest)) {
+        return Object.assign(Object.create(Object.getPrototypeOf(st)), st, { dev: 0 });
+      }
+      return st;
+    });
+    vi.spyOn(fsp, 'open').mockImplementation(async (target, flags, perm) => {
+      const handle = await originalOpen(target, flags, perm);
+      if (path.resolve(String(target)) !== path.resolve(sample.dest)) return handle;
+      const originalStat = handle.stat.bind(handle);
+      handle.stat = async () => {
+        const st = await originalStat();
+        return Object.assign(Object.create(Object.getPrototypeOf(st)), st, { dev: 42 });
+      };
+      return handle;
+    });
+    const previous = process.platform;
+    Object.defineProperty(process, 'platform', { value: 'win32' });
+    try {
+      const written = await blobStore.writeBlob({ buffer: sample.buffer, mimeType: 'image/png' });
+      expect(written.deduplicated).toBe(true);
+      expect(fs.readFileSync(sample.dest)).toEqual(sample.buffer);
+    } finally {
+      Object.defineProperty(process, 'platform', { value: previous });
     }
   });
 });
@@ -215,61 +285,125 @@ describe('writeBlob(串行与原子发布)', () => {
     expect(fs.readdirSync(sample.shard).some((name) => name.startsWith('.tmp-'))).toBe(false);
   });
 
-  it('跨进程同 hash 并发发布后读回验证,正确即幂等收敛', async () => {
-    const sample = hashedPng('cross-proc');
+  it.each(['link', 'rename'] as const)('%s 分支:跨进程同 hash 并发发布后读回验证,正确即幂等收敛', async (mode) => {
+    const sample = hashedPng(`cross-proc-${mode}`);
     seedDest(sample.dest, Buffer.from('poison'));
-    const { spawnSync } = await import('node:child_process');
-    const helper = path.join(sample.shard, 'cross-proc-helper.mjs');
+    const workDir = scratchDir(`cross-proc-${mode}`);
+    const helper = path.join(workDir, 'write-blob-child.mjs');
+    const childReady = path.join(workDir, 'child-ready');
+    const parentReady = path.join(workDir, 'parent-ready');
+    const goFile = path.join(workDir, 'go');
+    const resultFile = path.join(workDir, 'result.json');
+    const payloadB64 = sample.buffer.toString('base64');
     fs.writeFileSync(
       helper,
       `
-        import { writeFileSync } from 'node:fs';
-        writeFileSync(${JSON.stringify(sample.dest)}, Buffer.from(${JSON.stringify(sample.buffer.toString('base64'))}), 'base64');
+        import { createHash, randomUUID } from 'node:crypto';
+        import { writeFileSync, existsSync, mkdirSync, lstatSync } from 'node:fs';
+        import { writeFile, link, rename, rm, lstat } from 'node:fs/promises';
+        const dest = ${JSON.stringify(sample.dest)};
+        const shard = ${JSON.stringify(sample.shard)};
+        const buffer = Buffer.from(${JSON.stringify(payloadB64)}, 'base64');
+        const hash = createHash('sha256').update(buffer).digest('hex');
+        mkdirSync(shard, { recursive: true });
+        const tmpPath = ${JSON.stringify(path.join(sample.shard, `.tmp-${sample.hash}-child-`))} + randomUUID();
+        await writeFile(tmpPath, buffer, { flag: 'wx' });
+        writeFileSync(${JSON.stringify(childReady)}, 'ready');
+        const waitUntil = async (file) => {
+          const deadline = Date.now() + 5000;
+          while (!existsSync(file)) {
+            if (Date.now() > deadline) throw new Error('timeout waiting ' + file);
+            await new Promise((resolve) => setTimeout(resolve, 5));
+          }
+        };
+        await waitUntil(${JSON.stringify(parentReady)});
+        writeFileSync(${JSON.stringify(goFile)}, 'go');
+        try {
+          try {
+            await link(tmpPath, dest);
+          } catch {
+            const st = await lstat(dest).catch((err) => (err.code === 'ENOENT' ? null : Promise.reject(err)));
+            if (st && (st.isSymbolicLink() || st.isDirectory() || !st.isFile())) {
+              throw Object.assign(new Error('child refused non-regular dest'), { code: 'EINVAL' });
+            }
+            try {
+              await rename(tmpPath, dest);
+            } catch {
+              const again = await lstat(dest);
+              if (!again.isFile() || again.size !== buffer.length) throw new Error('child publish did not converge');
+            }
+          }
+        } finally {
+          await rm(tmpPath, { force: true }).catch(() => {});
+        }
+        writeFileSync(${JSON.stringify(resultFile)}, JSON.stringify({ hash, bytes: buffer.length }));
       `,
     );
-    const racing = blobStore.writeBlob({ buffer: sample.buffer, mimeType: 'image/png' });
-    const child = spawnSync(process.execPath, [helper], { encoding: 'utf8' });
-    expect(child.status).toBe(0);
-    const written = await racing;
-    expect(written.hash).toBe(sample.hash);
-    expect(fs.readFileSync(sample.dest)).toEqual(sample.buffer);
-    fs.rmSync(helper, { force: true });
-  });
-
-  it('权限拒绝不追随链接改仓外路径', async () => {
-    const sample = hashedPng('eacces');
-    seedDest(sample.dest, Buffer.from('bad'));
-    const spy = vi.spyOn(fsp, 'rename').mockRejectedValue(
-      Object.assign(new Error('permission denied'), { code: 'EACCES' }),
-    );
-    const originalOpen = fsp.open.bind(fsp);
-    vi.spyOn(fsp, 'open').mockImplementation(async (target, flags, perm) => {
-      if (path.resolve(String(target)) === path.resolve(sample.dest)) {
-        throw Object.assign(new Error('permission denied'), { code: 'EACCES' });
+    const child = spawn(process.execPath, [helper], { stdio: 'pipe' });
+    const waitFor = async (file: string) => {
+      const deadline = Date.now() + 5000;
+      while (!fs.existsSync(file)) {
+        if (Date.now() > deadline) throw new Error(`missing ${path.basename(file)}`);
+        await new Promise((resolve) => setTimeout(resolve, 5));
       }
-      return originalOpen(target, flags, perm);
-    });
+    };
     try {
-      await expect(
-        blobStore.writeBlob({ buffer: sample.buffer, mimeType: 'image/png' }),
-      ).rejects.toMatchObject({ code: 'EACCES' });
-      expect(fs.readFileSync(sample.dest).toString()).toBe('bad');
+      await waitFor(childReady);
+      const parentPromise =
+        mode === 'rename'
+          ? withUnsupportedLink(() => blobStore.writeBlob({ buffer: sample.buffer, mimeType: 'image/png' }))
+          : blobStore.writeBlob({ buffer: sample.buffer, mimeType: 'image/png' });
+      fs.writeFileSync(parentReady, 'ready');
+      const [parent, childCode] = await Promise.all([
+        parentPromise,
+        new Promise((resolve, reject) => {
+          child.once('error', reject);
+          child.once('exit', (code) => resolve(code));
+        }),
+      ]);
+      expect(childCode).toBe(0);
+      const childWritten = JSON.parse(fs.readFileSync(resultFile, 'utf8'));
+      expect(parent.hash).toBe(sample.hash);
+      expect(childWritten.hash).toBe(sample.hash);
+      expect(fs.readFileSync(sample.dest)).toEqual(sample.buffer);
+      expect(fs.readdirSync(sample.shard).some((name) => name.startsWith('.tmp-'))).toBe(false);
     } finally {
-      spy.mockRestore();
-      vi.restoreAllMocks();
+      if (child.exitCode === null && child.signalCode === null) child.kill();
     }
   });
 
-  it('磁盘满时失败且不把半截内容当成功', async () => {
-    const sample = hashedPng('enospc');
+  it.each(['link', 'rename'] as const)('%s 分支:发布失败后读回仍错误且清理自建 temp', async (mode) => {
+    const sample = hashedPng(`publish-fail-${mode}`);
+    seedDest(sample.dest, Buffer.from('still-bad'));
+    const spy = vi.spyOn(fsp, 'rename').mockRejectedValue(
+      Object.assign(new Error('permission denied'), { code: 'EACCES' }),
+    );
+    try {
+      const run = () => blobStore.writeBlob({ buffer: sample.buffer, mimeType: 'image/png' });
+      await expect(mode === 'rename' ? withUnsupportedLink(run) : run()).rejects.toMatchObject({
+        code: 'EACCES',
+      });
+      expect(fs.readFileSync(sample.dest).toString()).toBe('still-bad');
+      expect(fs.readdirSync(sample.shard).some((name) => name.startsWith('.tmp-'))).toBe(false);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it.each(['link', 'rename'] as const)('%s 分支:磁盘满时失败且不把半截内容当成功', async (mode) => {
+    const sample = hashedPng(`enospc-${mode}`);
     const spy = vi.spyOn(fsp, 'writeFile').mockRejectedValue(
       Object.assign(new Error('no space left'), { code: 'ENOSPC' }),
     );
     try {
-      await expect(
-        blobStore.writeBlob({ buffer: sample.buffer, mimeType: 'image/png' }),
-      ).rejects.toMatchObject({ code: 'ENOSPC' });
+      const run = () => blobStore.writeBlob({ buffer: sample.buffer, mimeType: 'image/png' });
+      await expect(mode === 'rename' ? withUnsupportedLink(run) : run()).rejects.toMatchObject({
+        code: 'ENOSPC',
+      });
       expect(fs.existsSync(sample.dest)).toBe(false);
+      if (fs.existsSync(sample.shard)) {
+        expect(fs.readdirSync(sample.shard).some((name) => name.startsWith('.tmp-'))).toBe(false);
+      }
     } finally {
       spy.mockRestore();
     }
@@ -332,6 +466,7 @@ describe('parseBlobUrl / resolveSafe(取件形状校验)', () => {
 
 describe('readFile(读回一致性)', () => {
   it('读回的字节与写入完全一致', async () => {
+    await blobStore.writeBlob({ buffer: PNG_BYTES, mimeType: 'image/png' });
     const { buffer, mimeType } = await blobStore.readFile(
       `cindy-media://blobs/${PNG_HASH}.png`,
     );

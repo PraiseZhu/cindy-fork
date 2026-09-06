@@ -241,7 +241,8 @@ describe('ingestMedia(全局去重)', () => {
 
   it('symlink 拒绝后账本零副作用,不追随链接改仓外文件', async () => {
     const dest = blobPathOf(PNG_HASH, '.png');
-    const outside = path.join(os.tmpdir(), `cindy-media-ingest-outside-${process.pid}`);
+    const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cindy-media-ingest-outside-'));
+    const outside = path.join(outsideDir, 'leave-me-alone.bin');
     fs.writeFileSync(outside, Buffer.from('leave-me-alone'));
     try {
       fs.mkdirSync(path.dirname(dest), { recursive: true });
@@ -263,7 +264,7 @@ describe('ingestMedia(全局去重)', () => {
       expect(db.select().from(schema.mediaRefs).all()).toHaveLength(0);
     } finally {
       fs.rmSync(dest, { force: true });
-      fs.rmSync(outside, { force: true });
+      fs.rmSync(outsideDir, { recursive: true, force: true });
     }
   });
 });
