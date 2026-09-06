@@ -1163,8 +1163,8 @@ describe('startup update relaunch safety', () => {
       enabled: true,
       manifest: updateManifest('0.0.65', sharedHotfix),
     });
-    vi.useRealTimers();
     service.stopUpdateService();
+    vi.useRealTimers();
     let releaseProbe: ((busy: boolean) => void) | undefined;
     const probeStarted = new Promise<void>((resolveStarted) => {
       service.setUpdateAutoRelaunchBusyProbe(
@@ -1193,10 +1193,8 @@ describe('startup update relaunch safety', () => {
       const destPath = path.join(TEST_USER_DATA, 'updates', path.basename(sharedHotfix));
       const patchInfoPath = path.join(TEST_USER_DATA, 'updates', 'patch-info.json');
       expect(fs.existsSync(destPath)).toBe(true);
-      await vi.waitFor(() => {
-        expect(fs.existsSync(patchInfoPath)).toBe(true);
-        expect(fs.readFileSync(patchInfoPath, 'utf-8')).toContain('0.0.66');
-      });
+      expect(fs.existsSync(patchInfoPath)).toBe(true);
+      expect(fs.readFileSync(patchInfoPath, 'utf-8')).toContain('0.0.66');
 
       releaseProbe?.(true);
       await vi.waitFor(() => {
@@ -1250,8 +1248,8 @@ describe('startup update relaunch safety', () => {
       enabled: true,
       manifest: updateManifest('0.0.65', sharedHotfix),
     });
-    vi.useRealTimers();
     service.stopUpdateService();
+    vi.useRealTimers();
     let releaseProbe: ((busy: boolean) => void) | undefined;
     const probeStarted = new Promise<void>((resolveStarted) => {
       service.setUpdateAutoRelaunchBusyProbe(
@@ -1263,7 +1261,12 @@ describe('startup update relaunch safety', () => {
       );
     });
     let finishDownload: (() => void) | undefined;
+    let downloadEntered: (() => void) | undefined;
+    const downloadStarted = new Promise<void>((resolve) => {
+      downloadEntered = resolve;
+    });
     download.mockImplementation(async ({ targetPath }: { targetPath: string }) => {
+      downloadEntered?.();
       await new Promise<void>((resolve) => {
         finishDownload = resolve;
       });
@@ -1281,13 +1284,9 @@ describe('startup update relaunch safety', () => {
       });
       fetchManifest.mockResolvedValue(updateManifest('0.0.66', sharedHotfix));
       const checkPromise = service.checkForUpdate();
-      await vi.waitFor(() => {
-        expect(finishDownload).toBeTypeOf('function');
-      });
+      await downloadStarted;
+      expect(service.getUpdateStatus()).toBe('superseding');
       releaseProbe?.(true);
-      await vi.waitFor(() => {
-        expect(service.getUpdateStatus()).toBe('superseding');
-      });
       finishDownload?.();
       await expect(checkPromise).resolves.toBe('ready');
       expect(service.getUpdateStatus()).toBe('ready');
@@ -1319,6 +1318,8 @@ describe('startup update relaunch safety', () => {
   it('does not restore a superseded patch after a channel change', async () => {
     const { DownloadError } = await import('../downloader/index');
     const service = await bootWithStagedPatch({ enabled: true });
+    service.stopUpdateService();
+    vi.useRealTimers();
     let releaseProbe: ((busy: boolean) => void) | undefined;
     const probeStarted = new Promise<void>((resolveStarted) => {
       service.setUpdateAutoRelaunchBusyProbe(
@@ -1330,9 +1331,16 @@ describe('startup update relaunch safety', () => {
       );
     });
     let failDownload: ((error: Error) => void) | undefined;
-    download.mockImplementation(() => new Promise((_, reject) => {
-      failDownload = reject;
-    }));
+    let downloadEntered: (() => void) | undefined;
+    const downloadStarted = new Promise<void>((resolve) => {
+      downloadEntered = resolve;
+    });
+    download.mockImplementation(() => {
+      downloadEntered?.();
+      return new Promise((_, reject) => {
+        failDownload = reject;
+      });
+    });
     try {
       await probeStarted;
       await expect(service.enableUncustomizedBetaChannel()).resolves.toBe(true);
@@ -1343,18 +1351,15 @@ describe('startup update relaunch safety', () => {
       });
       fetchManifest.mockResolvedValue(updateManifest('0.0.66'));
       const checkPromise = service.checkForUpdate();
-      await vi.waitFor(() => {
-        expect(failDownload).toBeTypeOf('function');
-      });
+      await downloadStarted;
+      expect(service.getUpdateStatus()).toBe('superseding');
       releaseProbe?.(true);
-      await vi.waitFor(() => {
-        expect(service.getUpdateStatus()).toBe('superseding');
-      });
       failDownload?.(new DownloadError('NETWORK', 'boom'));
       await expect(checkPromise).resolves.toBe('idle');
       expect(service.getUpdateStatus()).toBe('idle');
       expect(fs.existsSync(path.join(TEST_USER_DATA, 'updates', 'patch-info.json'))).toBe(false);
     } finally {
+      releaseProbe?.(true);
       service.stopUpdateService();
     }
   });
