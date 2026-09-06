@@ -118,6 +118,12 @@ backups）对插件不可达——路径语法段首不许点，协议层天然�
 
     // 新版拒权：能力查询与实际操作都不得越过资格审
     { ok: false, errorCode: 'NOT_DECLARED', reason: 'PERMISSION_DENIED' }
+
+    // 错类型：数组内混入非字符串，整体 unknown，不得把其中合法项当有效 v1
+    classifyGhostLibraryOperationSupport(
+      { ok: true, op: 'capabilities', capabilities: { version: 1, operations: ['saveAs', 123] } },
+      'saveAs',
+    ) === 'unknown'
     ```
 
 ## Review 清单

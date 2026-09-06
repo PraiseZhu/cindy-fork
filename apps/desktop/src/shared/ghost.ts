@@ -8290,10 +8290,11 @@ export function classifyGhostLibraryOperationSupport(
   if (!caps || typeof caps !== 'object' || Array.isArray(caps)) return 'unknown';
   const body = caps as Record<string, unknown>;
   if (body.version !== 1 || !Array.isArray(body.operations)) return 'unknown';
+  if (!body.operations.every((item) => typeof item === 'string')) return 'unknown';
   const known = new Set<string>(GHOST_LIBRARY_CAPABILITY_OPERATIONS);
   const listed = new Set<string>();
   for (const item of body.operations) {
-    if (typeof item === 'string' && known.has(item)) listed.add(item);
+    if (known.has(item)) listed.add(item);
   }
   return listed.has(operation) ? 'supported' : 'unsupported';
 }

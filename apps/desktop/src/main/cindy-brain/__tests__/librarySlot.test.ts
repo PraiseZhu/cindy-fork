@@ -188,6 +188,21 @@ describe('GhostLibrarySlot', () => {
       { ok: true, op: 'capabilities', capabilities: { version: 1, operations: 'clipboardWrite' } },
       'clipboardWrite',
     )).toBe('unknown');
+    const mixedTypes = {
+      ok: true,
+      op: 'capabilities',
+      capabilities: { version: 1, operations: ['saveAs', 123] },
+    };
+    expect(classifyGhostLibraryOperationSupport(mixedTypes, 'clipboardWrite')).toBe('unknown');
+    expect(classifyGhostLibraryOperationSupport(mixedTypes, 'saveAs')).toBe('unknown');
+    expect(classifyGhostLibraryOperationSupport(
+      { ok: true, op: 'capabilities', capabilities: { version: 1, operations: [123] } },
+      'saveAs',
+    )).toBe('unknown');
+    expect(classifyGhostLibraryOperationSupport(
+      { ok: true, op: 'capabilities', capabilities: { version: 1, operations: ['clipboardWrite', null] } },
+      'clipboardWrite',
+    )).toBe('unknown');
     expect(sessionCount()).toBe(0);
     expect(captureOwnerScope).not.toHaveBeenCalled();
     expect(resolveLibraryRoot).not.toHaveBeenCalled();
