@@ -171,19 +171,11 @@ export async function writeBlob(params: {
 async function withDestLock<T>(dest: string, fn: () => Promise<T>): Promise<T> {
   const previous = destLocks.get(dest) ?? Promise.resolve();
   let release!: () => void;
-  const done = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-  const next = previous.then(
-    () => done,
-    () => done,
-  );
+  const done = new Promise<void>((resolve) => { release = resolve; });
+  const next = previous.then(() => done, () => done);
   destLocks.set(dest, next);
   try {
-    await previous.then(
-      () => undefined,
-      () => undefined,
-    );
+    await previous.catch(() => undefined);
     return await fn();
   } finally {
     release();
@@ -231,48 +223,46 @@ async function ensureContainedDir(absPath: string, parent: string): Promise<Stat
   return st;
 }
 
-async function prepareBlobDestination(hash: string, ext: string): Promise<{ dir: string; dest: string }> {
-  const root = path.resolve(getBlobsRoot());
-  const rootStat = await (async () => {
-    try {
-      return await lstatRegularDir(root);
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException)?.code !== 'ENOENT') throw err;
-      await fs.mkdir(root, { recursive: true });
-      return lstatRegularDir(root);
-    }
-  })();
-  const dir = path.join(root, hash.slice(0, 2));
+async function ensureChildDir(parent: string, name: string): Promise<string> {
+  const child = path.join(parent, name);
   try {
-    await ensureContainedDir(dir, root);
+    await ensureContainedDir(child, parent);
   } catch (err) {
     if ((err as NodeJS.ErrnoException)?.code !== 'ENOENT') throw err;
-    try {
-      await fs.mkdir(dir, { recursive: false });
-    } catch (mkdirErr) {
-      if ((mkdirErr as NodeJS.ErrnoException)?.code !== 'EEXIST') throw mkdirErr;
-    }
-    await ensureContainedDir(dir, root);
+    try { await fs.mkdir(child, { recursive: false }); }
+    catch (mkdirErr) { if ((mkdirErr as NodeJS.ErrnoException)?.code !== 'EEXIST') throw mkdirErr; }
+    await ensureContainedDir(child, parent);
   }
+  return child;
+}
+
+async function prepareBlobDestination(hash: string, ext: string): Promise<{ dir: string; dest: string }> {
+  const userData = path.resolve(app.getPath('userData'));
+  await lstatRegularDir(userData);
+  const mediaRoot = await ensureChildDir(userData, 'cindy-media');
+  const root = await ensureChildDir(mediaRoot, 'blobs');
+  const dir = await ensureChildDir(root, hash.slice(0, 2));
   const dest = path.join(dir, `${hash}${ext}`);
   if (!path.resolve(dest).startsWith(root + path.sep)) {
     throw new Error('cindy-media: blob path out of bounds');
   }
-  void rootStat;
   return { dir, dest };
 }
 
 async function assertBlobPathContained(absPath: string): Promise<void> {
+  const userData = path.resolve(app.getPath('userData'));
   const root = path.resolve(getBlobsRoot());
-  await lstatRegularDir(root);
-  const dir = path.dirname(absPath);
-  await ensureContainedDir(dir, root);
-  const destStat = await fs.lstat(absPath);
-  if (destStat.isSymbolicLink()) {
-    throw Object.assign(new Error('cindy-media: blob destination is a symlink'), { code: 'ELOOP' });
-  }
   if (!path.resolve(absPath).startsWith(root + path.sep)) {
     throw new Error('cindy-media: blob path out of bounds');
+  }
+  const destStat = await fs.lstat(absPath);
+  if (destStat.isSymbolicLink()) throw Object.assign(new Error('cindy-media: blob destination is a symlink'), { code: 'ELOOP' });
+  let current = path.resolve(absPath);
+  while (current !== userData) {
+    const parent = path.dirname(current);
+    if (parent === current) break;
+    await lstatRegularDir(parent);
+    current = parent;
   }
 }
 
@@ -330,7 +320,9 @@ async function inspectExistingBlob(
       !sameFileIdentity(opened, afterHandle) ||
       !sameFileIdentity(opened, afterPath) ||
       afterPath.isSymbolicLink() ||
-      !afterPath.isFile()
+      !afterPath.isFile() ||
+      afterHandle.size !== expectedSize ||
+      afterPath.size !== expectedSize
     ) {
       return { kind: 'invalid', reason: 'replaced' };
     }

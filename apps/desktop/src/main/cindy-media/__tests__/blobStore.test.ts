@@ -206,23 +206,35 @@ describe('writeBlob(已存在副本核验与自愈)', () => {
     expect(fs.readdirSync(outsideDir)).toEqual([]);
   });
 
-  it('blobs 根被换成指向仓外的 symlink 时 fail closed,不追随写入', async () => {
-    const sample = hashedPng('root-symlink');
-    const blobsRoot = path.join(tmpUserData, 'cindy-media', 'blobs');
-    const outsideDir = scratchDir('root-outside');
-    fs.mkdirSync(blobsRoot, { recursive: true });
-    fs.rmSync(blobsRoot, { recursive: true, force: true });
-    fs.symlinkSync(outsideDir, blobsRoot);
-    try {
-      await expect(
-        blobStore.writeBlob({ buffer: sample.buffer, mimeType: 'image/png' }),
-      ).rejects.toThrow(/symlink|out of bounds/);
-      expect(fs.lstatSync(blobsRoot).isSymbolicLink()).toBe(true);
-      expect(fs.readdirSync(outsideDir)).toEqual([]);
-    } finally {
-      fs.rmSync(blobsRoot, { recursive: true, force: true });
-      fs.mkdirSync(blobsRoot, { recursive: true });
-    }
+  it.each(['cindy-media', 'blobs'] as const)('%s 祖先 symlink fail closed', async (kind) => {
+    const sample = hashedPng(`anc-${kind}`);
+    const target = path.join(tmpUserData, 'cindy-media', ...(kind === 'blobs' ? ['blobs'] : []));
+    const outside = scratchDir(`anc-${kind}`);
+    fs.rmSync(target, { recursive: true, force: true });
+    fs.symlinkSync(outside, target);
+    await expect(blobStore.writeBlob({ buffer: sample.buffer, mimeType: 'image/png' })).rejects.toThrow(/symlink|out of bounds/);
+    expect(fs.lstatSync(target).isSymbolicLink()).toBe(true);
+    expect(fs.readdirSync(outside)).toEqual([]);
+    fs.rmSync(target, { recursive: true, force: true });
+    fs.mkdirSync(path.join(tmpUserData, 'cindy-media', 'blobs'), { recursive: true });
+  });
+
+  it('hash 后 size 变化视为替换,不得去重成功', async () => {
+    const sample = hashedPng('size-drift');
+    seedDest(sample.dest, sample.buffer);
+    const originalOpen = fsp.open.bind(fsp);
+    let n = 0;
+    vi.spyOn(fsp, 'open').mockImplementation(async (target, flags, perm) => {
+      const handle = await originalOpen(target, flags, perm);
+      if (path.resolve(String(target)) !== path.resolve(sample.dest)) return handle;
+      const originalStat = handle.stat.bind(handle);
+      handle.stat = async () => {
+        const st = await originalStat();
+        return ++n < 2 ? st : Object.assign(Object.create(Object.getPrototypeOf(st)), st, { size: st.size + 1 });
+      };
+      return handle;
+    });
+    await expect(blobStore.writeBlob({ buffer: sample.buffer, mimeType: 'image/png' })).rejects.toThrow(/not a regular file|did not match input hash/);
   });
 
   it('Windows 上 path/fd stat 一侧 dev=0 时仍识别同一正确副本', async () => {
@@ -292,7 +304,6 @@ describe('writeBlob(串行与原子发布)', () => {
     const helper = path.join(workDir, 'write-blob-child.mjs');
     const childReady = path.join(workDir, 'child-ready');
     const parentReady = path.join(workDir, 'parent-ready');
-    const goFile = path.join(workDir, 'go');
     const resultFile = path.join(workDir, 'result.json');
     const payloadB64 = sample.buffer.toString('base64');
     fs.writeFileSync(
@@ -317,7 +328,6 @@ describe('writeBlob(串行与原子发布)', () => {
           }
         };
         await waitUntil(${JSON.stringify(parentReady)});
-        writeFileSync(${JSON.stringify(goFile)}, 'go');
         try {
           try {
             await link(tmpPath, dest);
