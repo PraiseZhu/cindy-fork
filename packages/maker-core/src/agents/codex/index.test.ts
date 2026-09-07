@@ -7709,6 +7709,43 @@ describe('CodexAgent MCP thread context hooks', () => {
     await agent.dispose();
   });
 
+  it('reuses an active host for concurrent compatible provider OAuth sessions', async () => {
+    const prepareCodexLocalCredentialModeSwitch = vi.fn(async () => {});
+    const prepareCodexExtraSpawnConfig: NonNullable<AgentDeps['prepareCodexExtraSpawnConfig']> =
+      vi.fn(async () => ({
+        extraArgs: [],
+        extraEnv: {},
+        codexProxyActive: true,
+        codexSubagentRoutingProfile: 'default' as const,
+      }));
+    const agent = new CodexAgent(createDeps({}, {
+      prepareCodexExtraSpawnConfig,
+      prepareCodexLocalCredentialModeSwitch,
+    }));
+
+    const first = await agent.startSession({
+      sessionId: 'session-provider-oauth-concurrent-1',
+      providerId: 'xai',
+      model: 'xai/grok-4.3',
+      workingDir: '/repo-xai-1',
+    });
+    const second = await agent.startSession({
+      sessionId: 'session-provider-oauth-concurrent-2',
+      providerId: 'xai',
+      model: 'xai/grok-4.3',
+      workingDir: '/repo-xai-2',
+    });
+
+    expect(createdTransports).toHaveLength(1);
+    expect(createdTransports[0].closed).toBe(false);
+    expect(prepareCodexLocalCredentialModeSwitch).not.toHaveBeenCalled();
+
+    await second.close();
+    expect(createdTransports[0].closed).toBe(false);
+    await first.close();
+    await agent.dispose();
+  });
+
   it('rebuilds an idle smart host when its routing signature changes', async () => {
     let routingSignature = 'smart:1';
     const prepareCodexExtraSpawnConfig: NonNullable<AgentDeps['prepareCodexExtraSpawnConfig']> =
