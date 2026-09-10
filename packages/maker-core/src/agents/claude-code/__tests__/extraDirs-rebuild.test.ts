@@ -199,6 +199,8 @@ describe('Claude extraDirs mid-session rebuild', () => {
     expect(source).toContain('pendingRewindTo = sdkSessionId');
     expect(source).toContain('directoryGrantRebuild ? {} : { resumeSessionAt: resumeAt }');
     expect(source).toContain('extraDirsCopyFallbackEnabled = false');
+    expect(source).toContain('下一 turn 生效,不用 fresh:true');
+    expect(source).not.toContain('每 turn 读最新值传给 SDK options.additionalDirectories — 即时生效');
 
     await handle.close();
   });

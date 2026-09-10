@@ -55,7 +55,7 @@ library 根作为会话级只读引用目录（extraDirs / readOnlyRoots）授�
 ### D7 两步变一步的口径
 - 对用户：成立。不再需要「选中 → 送进 cindy-media → Agent 才能看」。
 - 对 Agent 内部：仍是两类工具（插件 MCP 给节点/坐标，Read 给像素），少掉的是 cindy-media 中转那一跳。
-- **只对 confirmed 放开。** 判据只认宿主 `librarySlot.writeCommit` ACK 的 64-hex sha256（`library-write` / `writeCommit` 回执）。仓内无 `libraryConfirmed.ts`（不存在），不得发明该文件。`writing` / `unconfirmed` / `unavailable` 不放开。cindy-media 短指纹（16–128 位）不得升格。
+- **只对 confirmed 放开。** 判据只认宿主 `librarySlot.write` / `writeCommit` ACK 的 64-hex sha256（`library-write` / `writeCommit` 回执）。成功回执兼容可选 `libraryGeneration` / `libraryIdentity`，由实际写入 session 或 stream 捕获，不能事后拼当前全局身份；identity 须区分 owner / 迁根 / 自定义 A→B→A 且不暴露 owner 原值。默认 D→C→D 与 owner X→Y→X 回到同一默认 binding 时两端可复用同一二元组，这只证明绑定身份，不证明当前激活；插件须在见到不同握手后拒绝旧回执。仓内无 `libraryConfirmed.ts`（不存在），不得发明该文件。`writing` / `unconfirmed` / `unavailable` 不放开。cindy-media 短指纹（16–128 位）不得升格。
 - 未进 library 的图、以及未 confirmed 的图，Agent 仍读不到——这是设计而非缺陷。
 - SVG：G2 的新增能力。直读原文字节，不再要求 cindy-media 加 `image/svg+xml`。定位必须经别名索引（节点是 `mivo-asset:<uuid>`，不含 hash）。**未授权时 SVG 没有 cindy-media 备胎**，维持读不到。
 

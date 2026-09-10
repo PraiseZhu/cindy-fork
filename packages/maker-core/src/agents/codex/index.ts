@@ -13233,6 +13233,7 @@ export class CodexAgent extends BaseAgent {
 
       async setExtraDirs(newDirs: string[]) {
         if (reviewMode) return;
+        // 低版本不得假授权:setExtraDirs 非空必须闸 app-server ≥0.144.6,抛错留给宿主记 not-granted。
         if (newDirs.length > 0 && !readonlyReferenceDirsSupported) {
           throw new Error(
             `Codex reference directories require app-server 0.144.6 or newer (current: ${initResp.userAgent ?? 'unknown'})`,

@@ -2590,8 +2590,9 @@ export class ClaudeCodeAgent extends BaseAgent {
     // Fast 模式运行时态:启动取 opts.fastMode 快照,setFastMode 覆盖。buildSettings 每次读最新值;
     // host 只在「该 model 支持 + 走官方供应商」时才传 true(renderer 配置门控),agent 忠实消费。
     let mutableFastMode = opts.fastMode === true;
-    // 附加只读引用目录: 启动时取 opts.extraDirs 快照, setExtraDirs 覆盖, buildQuery
-    // 每 turn 读最新值传给 SDK options.additionalDirectories — 即时生效。
+    // 附加只读引用目录: 启动时取 opts.extraDirs 快照, setExtraDirs 覆盖。
+    // SDK additionalDirectories 在 Query 创建时冻结;代际不一致时下一次 send
+    // 走 rewind 同款 resume+fork 重建,下一 turn 生效,不用 fresh:true。
     let mutableExtraDirs: string[] = Array.isArray(opts.extraDirs) ? [...opts.extraDirs] : [];
     let mutableWritableDirs: string[] = Array.isArray(opts.writableDirs) ? [...opts.writableDirs] : [];
     let autoReviewDirectoryGeneration = 0;

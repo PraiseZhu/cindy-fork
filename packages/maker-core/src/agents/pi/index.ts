@@ -1165,7 +1165,7 @@ function piExtraDirsPrompt(readOnlyDirs: readonly string[], writableDirs: readon
     const labels = [...new Set(readOnlyDirs.map(extraDirBasename))];
     sections.push(
       '<cindy-extra-reference-directories>',
-      'This task can read the plugin library and extra references as read-only. Do not modify them:',
+      'This task can read extra references as read-only. If a plugin library root is authorized as a host-owned extraDir, resolve the latest library:assets/<2>/<hash>/blob.<ext> relative key against that root; do not cache roots across directory changes. Do not modify them.',
       ...labels.map((label) => `- ${label}`),
       '</cindy-extra-reference-directories>',
     );
