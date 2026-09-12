@@ -91,7 +91,12 @@ backups）对插件不可达——路径语法段首不许点，协议层天然�
     字段旧回执由 PR4 安全恢复，禁止因此要求重装或重授权。仓内无 `libraryConfirmed.ts`（不
     存在），不得发明该文件。
     宿主用当前已授权 extraDir 绝对根解析 `library:assets/<2>/<hash>/blob.<ext>`；插件
-    open/status/MCP 回执不得带绝对根。Claude 中途授权下一 turn resume+fork 生效；Codex
+    open/status/MCP 回执不得带绝对根。Host-only `LIBRARY_READ_ROOT` 元数据随任务 extraDirs
+    保留专用槽身份，不能从普通用户目录猜根或由 Renderer JSON 提供。三 harness 只向当前
+    任务投影实际授权根；Pi 当轮在工具结果后从权限快照补映射。解析实现位于 maker-core 的
+    `agents/shared/library-native-read.ts`，由生产发送上下文消费；native 工具仍负责实际读取
+    与权限执行，映射本身不授予权限。bootstrap 校验及收窄持久记录仍保留专用槽和 10 个用户目录。
+    Claude 中途授权下一 turn resume+fork 生效；Codex
     低于 0.144.6 不得假授权；Pi 当轮热更新权限文件。
 12. **切根像素与限额**：正本文件名是 `blob`（路径 `assets/<2>/<hash>/blob.<ext>`），
     不是 `<hash>.<ext>`。同目录 sidecar `meta.json` / `preview.webp` 禁止当像素。

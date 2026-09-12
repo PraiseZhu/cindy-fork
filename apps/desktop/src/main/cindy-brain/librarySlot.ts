@@ -133,27 +133,8 @@ export function libraryAvailableRef(input: {
   return `cindy-media://blobs/${input.hash}.${ext}`;
 }
 
-const LIBRARY_ASSET_REF_RE = /^library:(assets\/[0-9a-f]{2}\/[0-9a-f]{64}\/blob\.[A-Za-z0-9]+)$/i;
+export { parseLibraryAssetRef, resolveLibraryAssetPath } from '@cindy/maker-core';
 const LIBRARY_EPOCH_IDENTITY_NS = 'cindy-library-epoch-v1';
-
-/** 插件相对引用 → 库内相对键。sidecar / cindy-media / 绝对路径一律拒绝。 */
-export function parseLibraryAssetRef(ref: string): string | null {
-  if (typeof ref !== 'string') return null;
-  const m = LIBRARY_ASSET_REF_RE.exec(ref.trim());
-  if (!m) return null;
-  return isLibraryBlobRelPath(m[1]) ? m[1] : null;
-}
-
-/**
- * 宿主上下文:用当前已授权 library 根解析相对引用。
- * 根必须是绝对路径;目录变更后调用方必须换最新根,本函数不缓存。
- */
-export function resolveLibraryAssetPath(root: string, ref: string): string | null {
-  if (typeof root !== 'string' || !path.isAbsolute(root)) return null;
-  const rel = parseLibraryAssetRef(ref);
-  if (!rel) return null;
-  return path.join(root, ...rel.split('/'));
-}
 
 /** opaque 库身份:区分 owner / 迁根 / A→B→A,回执不出现 owner 原值或绝对根。 */
 export function mintLibraryEpochIdentity(input: {
