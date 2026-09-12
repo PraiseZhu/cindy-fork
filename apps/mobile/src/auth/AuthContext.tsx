@@ -119,7 +119,9 @@ import { resetComposerPaletteCache } from '@/session/composerPaletteCache';
 import { clearRemoteResourceCache } from '@/device-link/remoteResourceCache';
 import { clearCachedHomeListSnapshot } from '@/session/mobileHomeListCache';
 import { setMobileAuthOwner } from '@/auth/authOwnerGeneration';
+import { updateCredentialAccessToken } from '@/remote-desktop/credentialIdentity';
 import { clearCachedSessionMessages } from '@/session/mobileSessionMessageCache';
+import { clearHistoryDisk } from '@/session/remoteHistoryDiskCache';
 import { clearAllMobileVoiceCredentials } from '@/session/mobileVoiceCredentialStore';
 import {
   clearAllMobileVoiceDictionaryCaches,
@@ -806,6 +808,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const setToken = useCallback((token: string | null) => {
     accessTokenRef.current = token;
+    updateCredentialAccessToken(token);
     setAccessToken(token);
   }, []);
 
@@ -817,7 +820,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         ? accountVaultKey(activeAuthRealmRef.current, next.id)
         : null;
       setDeferredSessionRecovery(false);
-      setMobileAuthOwner(next?.id);
+      setMobileAuthOwner(next?.id, activeAuthRealmRef.current);
       userRef.current = next;
       setUser(next);
       void serializeUserProfileMutation(() =>
@@ -850,6 +853,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       clearAllMobileVoiceInputHistories().catch(() => undefined),
       clearAllMobileVoiceDictionaryCaches().catch(() => undefined),
       clearCachedSessionMessages().catch(() => undefined),
+      clearHistoryDisk(),
       clearRemoteResourceCache().catch(() => undefined),
       clearCachedHomeListSnapshot().catch(() => undefined),
     ]);
@@ -1072,7 +1076,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             // old owner and advance its generation after cleanup settles so
             // account-scoped effects reconnect from the restored session.
             activateMobileSessionRealm(previousRealm);
-            setMobileAuthOwner(userRef.current?.id ?? null);
+            setMobileAuthOwner(userRef.current?.id ?? null, previousRealm);
             setAccountGeneration((value) => value + 1);
           }
           throw error;
@@ -1436,7 +1440,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             activateMobileSessionRealm(storedSession.realm);
             activeAuthRealmRef.current = storedSession.realm;
             userRef.current = cachedUser;
-            setMobileAuthOwner(cachedUser.id);
+            setMobileAuthOwner(cachedUser.id, storedSession.realm);
             setUser(cachedUser);
             if (cachedProfile.accountKey === null) {
               void serializeUserProfileMutation(() =>
@@ -2472,14 +2476,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
                 authGenerationRef.current === generation
               ) {
                 activateMobileSessionRealm(previousRealm);
-                setMobileAuthOwner(userRef.current?.id ?? null);
+                setMobileAuthOwner(userRef.current?.id ?? null, previousRealm);
                 setAccountGeneration((value) => value + 1);
               }
               throw error;
             }
           });
         } catch (error) {
-          setMobileAuthOwner(userRef.current?.id ?? null);
+          setMobileAuthOwner(userRef.current?.id ?? null, activeAuthRealmRef.current);
           throw error;
         }
 
@@ -2535,7 +2539,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     sessionRecoverySuspendedRef.current = false;
     await deleteSecureItem(PENDING_OAUTH_KEY).catch(() => undefined);
     activateMobileSessionRealm(activeAuthRealmRef.current);
-    setMobileAuthOwner(userRef.current?.id ?? null);
+    setMobileAuthOwner(userRef.current?.id ?? null, activeAuthRealmRef.current);
     updateLoginState(null);
     setAuthError(null);
   }, [updateLoginState]);
@@ -2580,6 +2584,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // deviceId,不清就会让下一个账号读到上一个账号的词条并发给润色模型。
     await clearAllMobileVoiceDictionaryCaches().catch(() => undefined);
     await clearCachedSessionMessages().catch(() => undefined);
+    await clearHistoryDisk();
     // 首页设备+会话快照与消息缓存一样属于账号数据,登出必须清掉。
     await clearRemoteResourceCache().catch(() => undefined);
     await clearCachedHomeListSnapshot().catch(() => undefined);

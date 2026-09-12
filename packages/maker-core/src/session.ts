@@ -53,6 +53,7 @@ import type {
   AgentSessionTeardownOptions,
   BackgroundTaskSnapshot,
   SendOptions,
+  StartSessionOptions,
   TurnContinuationState,
 } from './agents/base-agent.js';
 import {
@@ -143,7 +144,12 @@ function parseTurnStallMs(raw: string | undefined): number {
   return Math.floor(n);
 }
 
+/** Launch-only caller preferences. Live controls and grants have separate authorities. */
+export type SessionStartupPreferences = Readonly<Pick<StartSessionOptions,
+  'userPrompt' | 'makerMemoryEnabled' | 'displayReasoning'>>;
+
 export interface SessionOptions {
+  hostStartupPreferences?: SessionStartupPreferences;
   id: string;
   /** 与 Agent MCP context 同源的本次内存实例代号；省略时由 Session 自铸。 */
   sessionInstanceId?: string;
@@ -389,6 +395,8 @@ function createSendReservation(generation: number): SendReservation {
 }
 
 export class Session {
+  /** Caller preferences before generated context; memory-only recovery input. */
+  readonly hostStartupPreferences?: SessionStartupPreferences;
   readonly id: string;
   /** business id 可复用；instanceId 精确标识本次内存 Session incarnation。 */
   readonly instanceId: string;
@@ -405,12 +413,16 @@ export class Session {
   private permissionModeStateValue: PermissionModeState;
   private permissionModeChangeChain: Promise<void> = Promise.resolve();
   private permissionModeChangesInFlight = 0;
+  /** Invalidation only; the provider remains the sole owner of the live Plan flag. */
+  private planModeGeneration = 0;
+  private planModeChangesInFlight = 0;
   /** User/API permission changes, serialized separately so host restores cannot deadlock. */
   private externalPermissionModeChangeChain: Promise<void> = Promise.resolve();
   private externalPermissionModeChangesInFlight = 0;
   /** Host-owned logical turn leases that outlive a vendor's transient idle edge. */
   private readonly hostTurnLeases = new Set<Promise<void>>();
   private readonly eventListeners = new Set<SessionEventListener>();
+  private readonly runtimeRecoveryListeners = new Set<SessionEventListener>();
   private readonly statusListeners = new Set<SessionStatusListener>();
   private interactionListener: InteractionRequestListener | null = null;
   private turnLifecycleObserver: SessionTurnLifecycleObserver | null = null;
@@ -516,6 +528,8 @@ export class Session {
   private turnControlState: TurnControlState | null = null;
 
   constructor(opts: SessionOptions) {
+    this.hostStartupPreferences = opts.hostStartupPreferences
+      ? Object.freeze({ ...opts.hostStartupPreferences }) : undefined;
     this.id = opts.id;
     this.instanceId = opts.sessionInstanceId ?? generateSessionId();
     this.agentKind = opts.agentKind;
@@ -686,6 +700,26 @@ export class Session {
   }
 
   async send(message: UserMessage | string, opts?: SessionSendOptions): Promise<SessionSendResult> {
+    return this.dispatchSend(message, opts, false);
+  }
+
+  /**
+   * Host-owned silent-stop continuation. This is the only send admitted while a
+   * retiring runtime has claimed the current generation; ordinary `send()` stays
+   * rejected so queued/user work cannot run on the snapshot being retired.
+   */
+  async sendHostTurnContinuation(
+    message: UserMessage | string,
+    opts?: SessionSendOptions,
+  ): Promise<SessionSendResult> {
+    return this.dispatchSend(message, opts, true);
+  }
+
+  private async dispatchSend(
+    message: UserMessage | string,
+    opts: SessionSendOptions | undefined,
+    allowRetirementContinuation: boolean,
+  ): Promise<SessionSendResult> {
     const {
       afterTurnReserved,
       beforeProviderStart,
@@ -728,6 +762,14 @@ export class Session {
       : message;
     this.logger.debug('send', summarizeUserMessage(msg));
     this.ensureActive();
+    // A silent-stop claim keeps this generation alive for Host continuation only.
+    // Any other sender (user, queue, Goal, IM) must not start new work on a
+    // runtime that is already marked to retire after the current product turn.
+    if (this.retirementRequested
+      && (this.retirementContinuationGeneration !== this.turnGeneration
+        || !allowRetirementContinuation)) {
+      throw new Error(`Session ${this.id} is closing`);
+    }
     if (this.terminalErrorDrainGeneration !== null) {
       throw this.createSessionRunningError();
     }
@@ -812,7 +854,7 @@ export class Session {
       // 层 B：用户贴图主动调视觉（视觉桥钩子）。此时 turn guard 已通过、reservation 已
       // 建立——并发 send 已被 isTurnRunning 挡住，不会在 guard 前浪费视觉调用；取消时
       // reservation.abortController.signal 可中止视觉请求。钩子失败/未生效 → 原样透传。
-      const autoReviewSourceContent = msg.content;
+      const autoReviewSourceContent = handleOpts[AUTO_REVIEW_SOURCE_CONTENT] ?? msg.content;
       if (this.visionBridge) {
         // 传入 reservation abort signal：用户 Stop / 外部取消时中止视觉请求，避免浪费
         // 外部视觉调用（多图最坏 图片数×timeout 才返回）。
@@ -1005,6 +1047,7 @@ export class Session {
       reservation.settle(
         turnDispatched ? 'accepted' : dispatchUnconfirmed ? 'unconfirmed' : 'undispatched',
       );
+      this.finishRetirementIfSettled();
     }
   }
 
@@ -1052,7 +1095,7 @@ export class Session {
     // 的 turn（跨 turn 串线）。记录发起时代号，转换后必须「同一 generation 且仍
     // 在跑」才投递。
     const steerTurnGeneration = this.getTurnGeneration();
-    const autoReviewSourceContent = msg.content;
+    const autoReviewSourceContent = opts?.[AUTO_REVIEW_SOURCE_CONTENT] ?? msg.content;
     // 层 B：steer 追加图片同样走视觉桥（与 send 一致），否则纯文本模型收到的
     // 原始 image block 会被后端忽略或拒绝（Greptile P1）。
     msg = await this.bridgedVisionMessage(msg, opts?.signal);
@@ -1069,6 +1112,7 @@ export class Session {
   async abort(): Promise<void> {
     if (this.status === 'closed') return;
     if (this.status === 'error') return;
+    const abortGeneration = this.turnGeneration;
     this.cancelSendReservation(this.sendReservation);
     // 中断已在进行:不再计 stall 额度(下一个 turn 的 send 会重新起表)。
     this.clearTurnStallWatchdog();
@@ -1084,12 +1128,17 @@ export class Session {
     this.scheduleAbortRecoveryCheck(MANUAL_ABORT_RECOVERY_GRACE_MS, 'manual-abort');
     this.setStatus('aborting');
     try {
-      await this.handle.abort();
+      const aborting = this.handle.abort();
+      // Stop revokes Host continuation immediately. The RPC may never settle;
+      // do not let its acknowledgement own an already-settled turn's retirement.
+      this.settleHostTurnContinuation(abortGeneration);
+      await aborting;
     } finally {
       this.releaseSendReservationIfObserved();
       if (this.status === 'aborting') {
         this.setStatus('active');
       }
+      this.settleHostTurnContinuation(abortGeneration);
     }
   }
 
@@ -1277,6 +1326,11 @@ export class Session {
     return this.handle.onTurnContinuationChange?.(listener) ?? (() => undefined);
   }
 
+  /** True once teardown has started, including an unconfirmed failed close. */
+  hasStartedClosing(): boolean {
+    return this.terminationStarted;
+  }
+
   /**
    * Ordinary close. Without an explicit reason this is navigation: the account
    * and its database are unchanged, so an adapter's detached work survives.
@@ -1287,8 +1341,72 @@ export class Session {
     if (this.status === 'closed') return Promise.resolve();
 
     this.terminationStarted = true;
-    this.closePromise = this.performClose(opts ?? { reason: 'navigation' });
-    return this.closePromise;
+    // Reserve before synchronous terminal listeners run, but begin transport
+    // shutdown now: a pending send must see its cancellation in this tick.
+    let resolve!: () => void;
+    let reject!: (error: unknown) => void;
+    const closing = new Promise<void>((onResolve, onReject) => {
+      resolve = onResolve;
+      reject = onReject;
+    });
+    this.closePromise = closing;
+    void this.performClose(opts ?? { reason: 'navigation' }).then(resolve, reject);
+    return closing;
+  }
+
+  /** Retire this runtime at its product terminal boundary, without replaying work. */
+  async closeAfterCurrentTurn(opts?: { failureEvent?: () => AgentEvent }): Promise<'closed' | 'deferred'> {
+    this.retirementRequested = true;
+    if (!this.retirementFailureEvent && opts?.failureEvent) {
+      const createEvent = opts.failureEvent;
+      const generation = this.turnGeneration;
+      this.retirementFailureEvent = () => ({
+        ...createEvent(),
+        runtimeRecovery: true,
+        sessionInstanceId: this.instanceId,
+        sessionTurnGeneration: generation,
+      });
+    }
+    if (this.hasUnsettledTurn() || this.sendReservation !== null
+      || this.hostTurnLeases.size > 0
+      || this.retirementContinuationGeneration === this.turnGeneration) {
+      return 'deferred';
+    }
+    await this.close();
+    return 'closed';
+  }
+
+  private retirementRequested = false;
+  private retirementContinuationGeneration: number | null = null;
+  private retirementFailureEvent: (() => AgentEvent) | undefined;
+
+  /** The Host has actually scheduled bounded continuation for this terminal. */
+  claimHostTurnContinuation(generation: number): void {
+    if (this.terminationStarted || generation !== this.turnGeneration
+      || this.terminalEventObservedGeneration !== generation) return;
+    this.retirementContinuationGeneration = generation;
+  }
+
+  /** The Host declined/exhausted continuation or released its observer ownership. */
+  settleHostTurnContinuation(generation: number): void {
+    if (generation !== this.turnGeneration || this.retirementContinuationGeneration !== generation) return;
+    this.retirementContinuationGeneration = null;
+    this.finishRetirementIfSettled();
+  }
+
+  /** Provider idle/exit is not evidence that the product terminal was delivered. */
+  private hasUnsettledTurn(): boolean {
+    return this.turnControlState?.generation === this.turnGeneration
+      && this.terminalEventObservedGeneration !== this.turnGeneration;
+  }
+
+  private finishRetirementIfSettled(): void {
+    if (this.terminationStarted || !this.retirementRequested || this.hasUnsettledTurn()
+      || this.sendReservation !== null || this.hostTurnLeases.size > 0
+      || this.retirementContinuationGeneration === this.turnGeneration) return;
+    void this.close().catch((error) => {
+      this.logger.warn('runtime retirement close failed', { error: String(error) });
+    });
   }
 
   /**
@@ -1297,22 +1415,37 @@ export class Session {
    * and keeps the session open, or observes closePromise and is rejected.
    */
   closeIfIdle(): Promise<boolean> {
-    if (this.status !== 'active' || this.closePromise || this.isTurnRunning()) {
+    if (this.status !== 'active' || this.closePromise || this.isTurnRunning() || this.hasUnsettledTurn()
+      || this.retirementContinuationGeneration === this.turnGeneration) {
       return Promise.resolve(false);
     }
-    this.terminationStarted = true;
-    this.closePromise = this.performClose({ reason: 'navigation' });
-    return this.closePromise.then(() => true);
+    return this.close().then(() => true);
   }
 
   private async performClose(teardown: AgentSessionTeardownOptions): Promise<void> {
     let closeSucceeded = false;
     try {
+      // close() fences late provider events before entering here. Settle the
+      // owned product turn ourselves before listeners and its claim are lost.
+      // Never retry: tools may already have performed external side effects.
+      this.settleUnfinishedTurn('Session closed before the current turn delivered a terminal event');
       this.clearTurnStallWatchdog();
       this.clearTerminalErrorDrain();
       this.cancelSendReservation(this.sendReservation);
       await this.handle.close(teardown);
       closeSucceeded = true;
+    } catch (error) {
+      const failureEvent = this.retirementFailureEvent;
+      this.retirementFailureEvent = undefined;
+      if (failureEvent) {
+        // The provider queue is already fenced. Dispatch the Host's recovery
+        // receipt on the dedicated channel before clearing listeners, without
+        // changing a successful turn or re-entering product listeners.
+        try { this.dispatchRuntimeRecovery(failureEvent()); } catch (notificationError) {
+          this.logger.warn('runtime retirement recovery receipt failed', { error: String(notificationError) });
+        }
+      }
+      throw error;
     } finally {
       this.sendReservation = null;
       this.unacceptedSendGeneration = null;
@@ -1320,6 +1453,7 @@ export class Session {
       this.currentTurnAttemptToken = null;
       this.turnControlState = null;
       this.eventListeners.clear();
+      this.runtimeRecoveryListeners.clear();
       this.interactionListener = null;
       if (closeSucceeded) {
         this.setStatus('closed');
@@ -1330,6 +1464,17 @@ export class Session {
         this.closePromise = null;
         this.setStatus('error');
       }
+    }
+  }
+
+  private settleUnfinishedTurn(message: string): void {
+    if (!this.hasUnsettledTurn()) return;
+    if (this.abortRecoveryScheduledFor === this.turnGeneration) {
+      this.fanOutEvent({ type: 'done', data: { status: 'cancelled' }, source: this.agentKind });
+    } else {
+      this.fanOutEvent({ type: 'error', data: {
+        message, isTerminal: true, reason: 'session_event_loop_crashed',
+      }, source: this.agentKind });
     }
   }
 
@@ -1363,6 +1508,7 @@ export class Session {
       this.turnControlState = null;
       this.clearTerminalErrorDrain();
       this.eventListeners.clear();
+      this.runtimeRecoveryListeners.clear();
       this.interactionListener = null;
       if (detachSucceeded) {
         this.setStatus('closed');
@@ -1386,6 +1532,10 @@ export class Session {
   /** Return the current per-session Pi runtime capability snapshot, if exposed. */
   getRuntimeCapabilities(): PiRuntimeCapabilityManifest | undefined {
     return this.handle.getRuntimeCapabilities?.();
+  }
+
+  getDisabledSkillPaths(): readonly string[] | undefined {
+    return this.handle.disabledSkillPaths;
   }
 
   /** Subscribe to replacement of the current per-session Pi runtime catalog. */
@@ -1472,10 +1622,24 @@ export class Session {
     return this.permissionModeState;
   }
 
+  /** Host side effects must not use an unknown or in-flight Plan state. */
+  get stablePlanModeState(): { enabled: boolean; generation: number } | null {
+    if (this.status !== 'active' || this.terminationStarted || this.planModeChangesInFlight > 0) return null;
+    const enabled = this.capabilities.planMode?.supported
+      ? (this.handle.getExecutionPlanMode ? this.handle.getExecutionPlanMode() : this.getPlanMode())
+      : false;
+    return enabled === null ? null : { enabled, generation: this.planModeGeneration };
+  }
+
   /** Review a Host-side tool step without reconstructing or persisting another copy of user intent. */
   async reviewHostPermissionAction(action: ReviewableAction): Promise<AutoReviewDecision> {
     const permission = this.stablePermissionModeState;
     if (!permission) return { verdict: 'block', reason: 'Session permissions are changing or the task has closed.' };
+    const plan = this.stablePlanModeState;
+    if (!plan || plan.enabled || permission.mode === 'plan') {
+      return { verdict: 'block', reason: 'Plan mode is active or changing; Host side effects are not allowed.' };
+    }
+    if (permission.mode === 'bypassPermissions') return { verdict: 'allow' };
     if (permission.mode !== 'auto') return { verdict: 'ask' };
     // Host steps can belong to a still-active descendant after the foreground
     // turn finishes. Guard Session authority here; root-turn generation is not
@@ -1495,7 +1659,9 @@ export class Session {
       unsubscribe();
     }
     const current = this.stablePermissionModeState;
+    const currentPlan = this.stablePlanModeState;
     if (invalidated || !current || current.generation !== permission.generation
+      || !currentPlan || currentPlan.enabled || currentPlan.generation !== plan.generation
       || (turnControl?.gracefulStopState ?? 'none') !== gracefulStop
       || (this.turnControlState?.gracefulStopState ?? 'none') !== gracefulStop) {
       return { verdict: 'block', reason: 'Task or permissions changed; retry with the current scope.' };
@@ -1519,6 +1685,7 @@ export class Session {
       released = true;
       this.hostTurnLeases.delete(gate);
       resolveGate();
+      this.finishRetirementIfSettled();
     };
   }
 
@@ -1692,7 +1859,16 @@ export class Session {
     if (!this.handle.setPlanMode) {
       throw new NotSupportedError('planMode', { supported: false, reason: 'not-implemented' });
     }
-    await this.handle.setPlanMode(enabled);
+    if (this.planModeChangesInFlight === 0 && this.getPlanMode() === enabled) return;
+    // Invalidate before awaiting the provider (Pi may queue its RPC). A switch
+    // back, or a failed switch, must not revive an earlier Host approval.
+    this.planModeGeneration += 1;
+    this.planModeChangesInFlight += 1;
+    try {
+      await this.handle.setPlanMode(enabled);
+    } finally {
+      this.planModeChangesInFlight -= 1;
+    }
   }
 
   getPlanMode(): boolean | null {
@@ -1891,6 +2067,15 @@ export class Session {
     return () => this.eventListeners.delete(listener);
   }
 
+  /**
+   * Host-only post-terminal recovery. Persistent product listeners (Orca, Learn,
+   * Goal, IM turn text) must not observe these as a new turn.
+   */
+  onRuntimeRecovery(listener: SessionEventListener): () => void {
+    this.runtimeRecoveryListeners.add(listener);
+    return () => this.runtimeRecoveryListeners.delete(listener);
+  }
+
   onStatusChange(listener: SessionStatusListener): () => void {
     this.statusListeners.add(listener);
     return () => this.statusListeners.delete(listener);
@@ -1918,6 +2103,7 @@ export class Session {
   }
 
   setTurnLifecycleObserver(observer: SessionTurnLifecycleObserver | null): void {
+    if (this.turnLifecycleObserver !== observer) this.settleHostTurnContinuation(this.turnGeneration);
     this.turnLifecycleObserver = observer;
   }
 
@@ -1927,7 +2113,7 @@ export class Session {
     if (this.status === 'closed') {
       throw new Error(`Session ${this.id} is closed`);
     }
-    if (this.closePromise) {
+    if (this.closePromise || this.terminationStarted) {
       throw new Error(`Session ${this.id} is closing`);
     }
     if (this.status === 'error') {
@@ -2284,11 +2470,30 @@ export class Session {
     return attributed(waitStartGeneration);
   }
 
+  private dispatchRuntimeRecovery(event: AgentEvent): void {
+    if (event.sessionInstanceId === undefined) {
+      event.sessionInstanceId = this.instanceId;
+    }
+    if (event.sessionTurnGeneration === undefined) {
+      event.sessionTurnGeneration = this.turnGeneration;
+    }
+    const listenerEvent = redactEventForListeners(event);
+    for (const listener of this.runtimeRecoveryListeners) {
+      try { listener(listenerEvent); } catch (e) {
+        this.logger.error('runtime recovery listener threw', { error: String(e) });
+      }
+    }
+  }
+
   private fanOutEvent(
     event: AgentEvent,
     observedGeneration = this.turnGeneration,
     queuedGeneration = observedGeneration,
   ): void {
+    if (event.runtimeRecovery) {
+      this.dispatchRuntimeRecovery(event);
+      return;
+    }
     const isBackgroundEvent = event.turnScope === 'background';
     if (!isBackgroundEvent) this.lastEventAt = Date.now();
     this.lastEventType = event.type;
@@ -2443,6 +2648,7 @@ export class Session {
       this.rememberReservationWindowPriorTerminal(event, listenerEvent);
     }
     if (isCurrentGeneration && isTerminal && !isBackgroundEvent && !lateErrorAfterDoneSnapshot && !reservationWindowLeftover) {
+      if (!this.isSilentStopDoneEvent(event)) this.retirementContinuationGeneration = null;
       this.clearTurnControl(resolvedGeneration);
     }
     const isLeftoverProductTerminal =
@@ -2502,6 +2708,9 @@ export class Session {
       this.currentTurnAttemptToken = null;
       // 终态之后不再计 stall 额度。
       this.clearTurnStallWatchdog();
+      // Only an actual Host claim keeps the executor available for bounded
+      // silent-stop continuation; an unowned terminal can retire normally.
+      this.finishRetirementIfSettled();
     } else if (isCurrentGeneration) {
       this.armTurnStallWatchdog();
     }
@@ -2556,7 +2765,7 @@ export class Session {
     if (this.turnStallMs <= 0) return;
     if (this.status !== 'active') return;
     if (this.closePromise) return;
-    if (!this.isTurnRunning()) return;
+    if (!this.isTurnRunning() && !this.hasUnsettledTurn()) return;
     if (this.pendingInteractions > 0) return;
     if (this.hasRunningBackgroundTasks()) return;
     this.turnStallRemainingMs = this.turnStallMs;
@@ -2627,7 +2836,7 @@ export class Session {
   private onTurnStallTimeout(): void {
     // 触发前复核:定时器排上队之后可能已经收到事件 / turn 已结束 / 冒出交互等待。
     if (this.status !== 'active' || this.closePromise) return;
-    if (!this.isTurnRunning()) return;
+    if (!this.isTurnRunning() && !this.hasUnsettledTurn()) return;
     if (this.pendingInteractions > 0) return;
     if (this.hasRunningBackgroundTasks()) return;
     const now = Date.now();
@@ -2740,7 +2949,15 @@ export class Session {
       });
       return;
     }
-    if (!this.isTurnRunning()) return; // abort 生效了,会话仍可用,什么都不做
+    if (!this.isTurnRunning() && !this.hasUnsettledTurn()) {
+      // Watchdog may already have synthesized the missing terminal, which clears
+      // turnControlState. If abort() never returns, status stays aborting and a
+      // naive idle check would no-op — bypassing bounded recovery. Keep that
+      // in-flight abort as evidence this diagnosed generation must close.
+      if (this.status !== 'aborting' || this.abortRecoveryScheduledFor !== stalledGeneration) {
+        return;
+      }
+    }
     this.logger.error(
       'turn still running after abort — closing session so the next send can rebuild it',
       { trigger: ctx.trigger, graceMs: ctx.graceMs },
@@ -2799,7 +3016,7 @@ export class Session {
       this.logger.error('event loop crashed', { error: String(e) });
       if (this.closePromise || this.status === 'closed') return;
       // 先占住 closing gate，避免 terminal error listener 在死掉的 iterator 上重新 send。
-      this.closePromise = this.performClose({ reason: 'navigation' });
+      const closing = this.close();
       if (this.terminalEventObservedGeneration !== this.turnGeneration) {
         this.fanOutEvent({
           type: 'error',
@@ -2812,7 +3029,7 @@ export class Session {
         });
       }
       try {
-        await this.closePromise;
+        await closing;
       } catch (closeError) {
         this.logger.warn('event-loop crash handle close failed', { error: String(closeError) });
       }
@@ -2834,23 +3051,11 @@ export class Session {
     // 仅当当前 status 还是 'active' 时切 — 'closed' / 'error' 已经表达终态, 不覆盖。
     if (this.terminationStarted || this.status === 'closed' || this.status === 'error') return;
     const unfinishedTurn =
-      this.status === 'active' &&
-      this.isTurnRunning() &&
-      this.terminalEventObservedGeneration !== this.turnGeneration;
+      this.hasUnsettledTurn();
     this.logger.debug('event loop ended (handle dead), auto-closing session', { unfinishedTurn });
     this.terminationStarted = true;
     this.closePromise = Promise.resolve();
-    if (unfinishedTurn) {
-      this.fanOutEvent({
-        type: 'error',
-        data: {
-          message: 'Session event loop stopped unexpectedly without a terminal event',
-          isTerminal: true,
-          reason: 'session_event_loop_crashed',
-        },
-        source: this.agentKind,
-      });
-    }
+    this.settleUnfinishedTurn('Session event loop stopped unexpectedly without a terminal event');
     this.clearTurnStallWatchdog();
     this.cancelSendReservation(this.sendReservation);
     this.sendReservation = null;
@@ -2860,6 +3065,7 @@ export class Session {
     this.turnControlState = null;
     this.setStatus('closed');
     this.eventListeners.clear();
+    this.runtimeRecoveryListeners.clear();
     this.statusListeners.clear();
     this.interactionListener = null;
   }

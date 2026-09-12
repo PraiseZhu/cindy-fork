@@ -1,3 +1,5 @@
+import { normalizeBotName } from '../../../../shared/botCreation.js';
+import { inferBotTemplatePresetId } from '../../../../shared/botTemplatePreset.js';
 // inproc 回滚口：仅在 XDT_DB_INPROC=true 时使用。
 // 默认热路径走 file worker（dbWorker.ts + dispatcher），这里要和同名 tx handler 保持一致。
 
@@ -179,6 +181,14 @@ function botsCreateProfile(db: Database.Database, args: unknown): void {
   const id = expectString(p.id, 'id');
   const now = expectNumber(p.now, 'now');
   db.transaction(() => {
+    const config = JSON.parse(expectString(p.capabilitiesJson, 'capabilitiesJson'));
+    const rows = db.prepare(`SELECT p.id, p.display_name AS name, v.capabilities_json AS config, v.identity_source AS identity
+      FROM bot_profiles p JOIN bot_profile_versions v ON v.bot_id = p.id AND v.version = p.current_version
+      WHERE p.status != 'archived'`).all() as Array<{ id: string; name: string; config: string; identity: string }>;
+    if (rows.some(row => normalizeBotName(row.name) === normalizeBotName(expectString(p.displayName, 'displayName'))) ||
+        (config.templateId === 'cindy' && rows.some(row => JSON.parse(row.config).templateId === 'cindy' || inferBotTemplatePresetId(row.identity) === 'cindy'))) {
+      throw Object.assign(new Error('A matching companion already exists'), { code: 'ALREADY_EXISTS' });
+    }
     db.prepare(`INSERT INTO bot_profiles
       (id, display_name, description, avatar, avatar_color, status, current_version,
        canonical_session_id, created_at, updated_at)
@@ -224,14 +234,25 @@ function botsUpdateProfile(db: Database.Database, args: unknown): { currentVersi
     throw new Error('botAvatarRef requires an avatar address');
   }
   return db.transaction(() => {
-    const current = db.prepare('SELECT current_version AS currentVersion FROM bot_profiles WHERE id = ?')
-      .get(id) as { currentVersion: number } | undefined;
+    const current = db.prepare('SELECT current_version AS currentVersion, display_name AS displayName, avatar FROM bot_profiles WHERE id = ?')
+      .get(id) as { currentVersion: number; displayName: string; avatar: string } | undefined;
     if (!current) throw Object.assign(new Error('Bot 不存在'), { code: 'NOT_FOUND' });
     if (current.currentVersion !== expectedVersion) {
       throw Object.assign(new Error('Bot Profile 已被另一处更新，请刷新后重试'), { code: 'PRECONDITION_FAILED' });
     }
-    const fields = ['updated_at = ?'];
-    const values: unknown[] = [now];
+    if (p.expectedAvatar !== undefined && current.avatar !== expectString(p.expectedAvatar, 'expectedAvatar')) {
+      throw Object.assign(new Error('Teammate avatar changed during update'), { code: 'PRECONDITION_FAILED' });
+    }
+    if (p.displayName !== undefined && normalizeBotName(expectString(p.displayName, 'displayName')) !== normalizeBotName(current.displayName)) {
+      const name = normalizeBotName(expectString(p.displayName, 'displayName'));
+      const others = db.prepare("SELECT display_name AS name FROM bot_profiles WHERE id != ? AND status != 'archived'").all(id) as Array<{ name: string }>;
+      if (others.some(row => normalizeBotName(row.name) === name)) throw Object.assign(new Error('A companion with this name already exists'), { code: 'ALREADY_EXISTS' });
+    }
+    if (p.preserveUpdatedAt !== undefined && typeof p.preserveUpdatedAt !== 'boolean') {
+      throw new Error('preserveUpdatedAt must be a boolean');
+    }
+    const fields = p.preserveUpdatedAt === true ? ['updated_at = updated_at'] : ['updated_at = ?'];
+    const values: unknown[] = p.preserveUpdatedAt === true ? [] : [now];
     for (const [key, column] of [
       ['displayName', 'display_name'], ['description', 'description'], ['avatar', 'avatar'],
       ['avatarColor', 'avatar_color'], ['status', 'status'],
@@ -799,6 +820,10 @@ function botsReopenDelegation(
     const session = asRecord(p.session, 'session');
     insertBotSession(db, session);
     const childSessionId = expectString(p.childSessionId, 'childSessionId');
+    if (p.worktreePath != null) {
+      db.prepare('UPDATE sessions SET worktree_path = ? WHERE id = ?')
+        .run(expectString(p.worktreePath, 'worktreePath'), childSessionId);
+    }
     if (targetBotId) {
       db.prepare(`INSERT INTO bot_session_links
         (id, bot_id, session_id, profile_version, role, route_key, created_at, archived_at)
@@ -2469,11 +2494,11 @@ function forkSession(db: Database.Database, args: unknown): { messageCount: numb
       `INSERT INTO sessions (
         id, title, working_dir, model, provider_id, effort, permission_mode, status,
         sdk_session_id, total_token_usage, total_cost_usd, context_tokens,
-        context_window, fast_mode, cleared_at, pinned_at, user_send_at,
+        context_window, context_window_runtime, fast_mode, cleared_at, pinned_at, user_send_at,
         agent_kind, workspace_kind, codex_history_has_product_prompt,
         parent_session_id, forked_at_message_id,
         created_at, updated_at
-      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     ).run(
       expectString(newSession.id, 'newSession.id'),
       expectString(newSession.title, 'newSession.title'),
@@ -2488,6 +2513,7 @@ function forkSession(db: Database.Database, args: unknown): { messageCount: numb
       expectNumber(newSession.totalCostUsd, 'newSession.totalCostUsd'),
       expectNumber(newSession.contextTokens, 'newSession.contextTokens'),
       expectNumber(newSession.contextWindow, 'newSession.contextWindow'),
+      nullableNumber(newSession.contextWindowRuntime),
       newSession.fastMode ? 1 : 0,
       nullableNumber(newSession.clearedAt),
       nullableNumber(newSession.pinnedAt),

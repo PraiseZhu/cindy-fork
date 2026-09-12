@@ -12,8 +12,8 @@
  * 进了 data 之后:与正式消息同容器、同 key(`message-${clientId}`)、同一处位置,回流就是
  * 同一个列表位置上的内容替换 —— 原地变实,零跳动;listData 也不再为空,居中占位自然不出现。
  *
- * 顺序契约(与原 footer 一致):落定中(已出队、等回流)在前,排队中居中,本地 outbox 在后
- * —— outbox 是最晚发出的。
+ * 未派发条目保持队列 / outbox 顺序。已派发气泡在分组前占据本地用户消息的位置，
+ * 正式回流以同一个 clientId 原位替换，不比较控制端与主机的时钟。
  */
 import { syntheticTriggerKind } from '@cindy/maker-shared/synthetic-trigger';
 import {
@@ -27,6 +27,8 @@ import {
   type SentInlineToken,
 } from '@/session/sentMessageAtoms';
 import type { QueuedRemoteMessage } from '@/session/types';
+import type { GetSentMessageImagePreview } from '@/session/sentMessageImagePreviews';
+import type { MobileMessageRenderItem } from '@/session/messageRenderModel';
 
 export type MobilePendingSendPhase =
   /** 已确认入队,等被控端派发。 */
@@ -104,6 +106,34 @@ export function pendingSendItemKey(clientId: string): string {
 }
 
 /**
+ * History and queue snapshots can arrive independently. Deduplicate against the
+ * rows actually being rendered, even when the queue's hidden-id snapshot is stale.
+ * Duplicate keys reserve two list positions while mounting only one bubble.
+ */
+export function appendPendingSendItems<T extends { key: string }>(
+  rendered: readonly T[],
+  pending: readonly MobilePendingSendItem[],
+): readonly (T | MobilePendingSendItem)[] {
+  if (pending.length === 0) return rendered;
+  const renderedKeys = new Set(rendered.map((item) => item.key));
+  const remaining = pending.filter((item) => !renderedKeys.has(item.key));
+  return remaining.length === 0 ? rendered : [...rendered, ...remaining];
+}
+
+/** Replace only local placeholders; durable echoes win even with stale queue state. */
+export function mergePendingSendItems(
+  rendered: readonly MobileMessageRenderItem[],
+  pending: readonly MobilePendingSendItem[],
+  optimisticClientIds: ReadonlySet<string>,
+): readonly MobileMessageRenderItem[] {
+  const byId = new Map(pending.map((item) => [item.clientId, item]));
+  const replaced = optimisticClientIds.size === 0 ? rendered : rendered.map((item) =>
+    item.type === 'message' && optimisticClientIds.has(item.message.source.clientId)
+      ? byId.get(item.message.source.clientId) ?? item : item);
+  return appendPendingSendItems(replaced, pending);
+}
+
+/**
  * 气泡显示文本:合成 UI 指令行(桌面「失败后继续」等隐藏 prompt)用遮蔽标签替代原文
  * —— 裸英文指令不能给用户看(对齐桌面 PendingQueuePanel 的 i18n 遮蔽标签)。
  */
@@ -152,6 +182,7 @@ function buildPendingSentInlineTokens(input: {
 function queuedAttachmentThumbs(
   item: Pick<QueuedRemoteMessage, 'clientId' | 'files'>,
   previewByOssRef?: ReadonlyMap<string, string>,
+  getImagePreview?: GetSentMessageImagePreview,
 ): { thumbs: MobileOutboxThumb[]; fileCount: number } {
   const thumbs: MobileOutboxThumb[] = [];
   let fileCount = 0;
@@ -161,14 +192,16 @@ function queuedAttachmentThumbs(
       return;
     }
     const ossRef = file.url ?? file.path;
+    const preview = getImagePreview?.(item.clientId, thumbs.length, file.name, file.id);
     thumbs.push({
-      key: `${item.clientId}-file-${index}`,
+      key: `${item.clientId}-slot-${index}`,
       // 发送时刻抓下的本地预览优先:sentAttachmentThumbStore 那条兜底链要等「上传落定 →
       // 拷进自有目录 → AsyncStorage hydrate」全部完成才查得到,期间 getSentAttachmentThumbUri
       // 一律返回 null,排队气泡只能画空占位格(实测:兜底文件已生成,气泡仍是空方块)。
       // 乐观语义下图必须从第一帧就在,所以直接用手边的 file:// 预览,store 只作为
       // 「重开会话 / 预览已失效」时的后备。
-      uri: (ossRef && previewByOssRef?.get(ossRef)) || null,
+      uri: preview?.uri ?? ((ossRef && previewByOssRef?.get(ossRef)) || null),
+      ...(preview ? { previewRef: preview.sourceRef } : {}),
       ossRef,
       uploading: false,
     });
@@ -198,6 +231,7 @@ export interface BuildPendingSendItemsInput {
    * 排队气泡的图靠它即时显示,不等 sentAttachmentThumbStore 的拷贝 + hydrate 链。
    */
   previewByOssRef?: ReadonlyMap<string, string>;
+  getImagePreview?: GetSentMessageImagePreview;
 }
 
 /**
@@ -213,7 +247,7 @@ export function buildPendingSendItems(input: BuildPendingSendItemsInput): Mobile
   const pushQueued = (item: QueuedRemoteMessage, phase: MobilePendingSendPhase, queueIndex: number | null) => {
     if (seen.has(item.clientId) || input.hiddenClientIds.has(item.clientId)) return;
     seen.add(item.clientId);
-    const attachments = queuedAttachmentThumbs(item, input.previewByOssRef);
+    const attachments = queuedAttachmentThumbs(item, input.previewByOssRef, input.getImagePreview);
     const presentation = queueIndex === null
       ? null
       : input.presentationByClientId.get(item.clientId) ?? null;

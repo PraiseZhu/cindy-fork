@@ -12,6 +12,7 @@
  * F-MSG-DOC: document paths rendered inline as @path chips in text content
  */
 
+import { CHAT_BODY_CLASS } from './chatChrome';
 import { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Bot,
@@ -1101,8 +1102,8 @@ export function UserMessage({
   // - 胶囊(pill):软提示未兑现 → 保持原低调形态,留在气泡下方。
   const ghostCardDisplay: GhostSummonDisplay | null = ghostDirective ?? ghostSemanticDisplay;
   const ghostPillForm = ghostDirective?.kind === 'mention' && !ghostMentionFulfilled;
-  const ghostChipDisplay = ghostPillForm ? null : ghostCardDisplay;
-  const ghostPillDisplay = ghostPillForm ? ghostDirective : null;
+  const ghostChipDisplay = simplifiedBotConversation || ghostPillForm ? null : ghostCardDisplay;
+  const ghostPillDisplay = !simplifiedBotConversation && ghostPillForm ? ghostDirective : null;
   // 气泡实际显示的正文与其在原始 content 中的起点(粘贴块/斜杠命令高亮的
   // 偏移投影用):硬指令剥 $token,其余原样。
   const displayBubbleBody = ghostCmdToken ? ghostPromptBody : bubbleBody;
@@ -1543,11 +1544,11 @@ export function UserMessage({
                       // 在任意字符处断行，并把内容的 min-content 缩小到一个字符宽。
                       // min-w-0 解除 flex item 默认的 min-width:auto，否则父容器的
                       // max-w-[488px] 会被超长 token 顶穿。两者缺一不可。
-                      'relative min-w-0 max-w-full rounded-[12px]',
+                      'relative min-w-0 max-w-full rounded-xl',
                       'border border-[var(--msg-user-border)]',
                       'bg-[var(--msg-user-bg)]',
                       'px-4 py-3',
-                      'text-15 font-normal leading-[1.6]',
+                      CHAT_BODY_CLASS,
                       'text-[var(--msg-user-text)]',
                       'select-text',
                     )}

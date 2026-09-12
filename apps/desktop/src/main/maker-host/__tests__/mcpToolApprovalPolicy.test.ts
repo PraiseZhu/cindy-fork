@@ -50,6 +50,7 @@ describe('desktop Claude read-only allowlist', () => {
       'mcp__cindy__ghost_list',
       'mcp__cindy__ghost_info',
       'mcp__cindy__ghost_manual',
+      'mcp__cindy__ghost_market_search',
       'mcp__cindy__ghost_forge_guide',
       'mcp__cindy_browser__list_tools',
       'mcp__cindy_android__list_tools',
@@ -156,6 +157,8 @@ describe('desktop MCP approval policy', () => {
       // worker → lead 回报通道:执行边界在工具内部 fail-closed, 逐次弹窗
       // 会让远端 daemon 等审批超时断链。
       'orca_worker_bridge',
+      // 个人版制作任务的完成回报:执行边界在工具内部按 cindy-make 标记 fail-closed。
+      'cindy_make',
       'cindy_lsp',
     ]) {
       expect(getDesktopMcpToolApprovalPolicy({ serverName })).toBe('auto-approve');
@@ -358,6 +361,61 @@ describe('desktop MCP approval policy', () => {
     );
   });
 
+  it('auto-approves first-party Cindy Art media ghost_call tools without prompting', () => {
+    for (const tool of ['gen_image', 'edit_image', 'gen_video', 'edit_video']) {
+      expect(
+        getDesktopMcpToolApprovalPolicy({
+          serverName: 'cindy',
+          toolName: 'ghost_call',
+          toolParams: { ghost_id: 'cindy-art', tool, args: { prompt: 'a cat' } },
+        }),
+        `${tool} should be auto-approved`,
+      ).toBe('auto-approve');
+    }
+
+    // Codex elicitation 可能省略外层 toolName，仍按内层 ghost_id / tool 判定。
+    expect(
+      getDesktopMcpToolApprovalPolicy({
+        serverName: 'cindy',
+        toolParams: { ghost_id: 'cindy-art', tool: 'gen_image', args: { prompt: 'a cat' } },
+      }),
+    ).toBe('auto-approve');
+    expect(
+      getDesktopMcpToolApprovalPolicy({
+        serverName: 'cindy',
+        toolName: 'ghost_call',
+        toolParams: JSON.stringify({
+          ghost_id: 'cindy-art',
+          tool: 'gen_image',
+          args: { prompt: 'a cat' },
+        }),
+      }),
+    ).toBe('auto-approve');
+
+    // 其它插件、未知工具、缺内层身份仍 fail closed。
+    expect(
+      getDesktopMcpToolApprovalPolicy({
+        serverName: 'cindy',
+        toolName: 'ghost_call',
+        toolParams: { ghost_id: 'google-gmail', tool: 'gmail', args: { action: 'send' } },
+      }),
+    ).toBe('prompt');
+    expect(
+      getDesktopMcpToolApprovalPolicy({
+        serverName: 'cindy',
+        toolName: 'ghost_call',
+        toolParams: { ghost_id: 'cindy-art', tool: 'unknown_tool' },
+      }),
+    ).toBe('prompt');
+    expect(
+      getDesktopMcpToolApprovalPolicy({
+        serverName: 'cindy',
+        toolName: 'ghost_call',
+        toolParams: { tool: 'gen_image' },
+      }),
+    ).toBe('prompt');
+  });
+
   it('auto-approves the browser call_tool entry that Claude used to prompt for every time', () => {
     // 回归锚点: cindy_browser 的真实动作全部走 call_tool。Claude 侧过去只静态放行
     // list_tools, 于是每次 navigate / snapshot / click 都弹一次窗。
@@ -368,5 +426,13 @@ describe('desktop MCP approval policy', () => {
         toolParams: { name: 'browser', args: { action: 'navigate', url: 'https://example.com' } },
       }),
     ).toBe('auto-approve');
+  });
+});
+
+describe('Cindy market action authorization', () => {
+  it('allows catalog discovery but reviews each selected installation', () => {
+    expect(getDesktopMcpToolApprovalPolicy({serverName: 'cindy', toolName: 'ghost_market_search'})).toBe('auto-approve');
+    expect(getDesktopMcpToolApprovalPolicy({serverName: 'cindy', toolName: 'ghost_market_install'})).toBe('prompt-each-time');
+    expect(getDesktopClaudeReadOnlyAllowedTools()).not.toContain('mcp__cindy__ghost_market_install');
   });
 });

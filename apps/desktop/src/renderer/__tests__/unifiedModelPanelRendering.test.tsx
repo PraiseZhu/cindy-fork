@@ -3903,6 +3903,16 @@ describe('统一面板 · 清收藏锚点也等待回执', () => {
 });
 
 describe('global default A contract', () => {
+  it.each([false, ['pi'] as const])('hides Fast when this entry cannot dispatch it (%s)', async (fastModeConfigurable) => {
+    const select = vi.fn();
+    renderPanel({ vendorKey: 'codex', modelId: 'gpt-5.5', currentProviderId: 'xd',
+      onUnifiedSelect: select, onFastModeChange: undefined, fastModeConfigurable });
+    const flyout = await openRowFlyout('GPT-5.5');
+    expect(flyout.querySelector('[data-fast-toggle]')).toBeNull();
+    await act(async () => { fireEvent.click(rowFor('GPT-5.5')); });
+    expect(select).toHaveBeenCalledWith(expect.objectContaining({ engine: 'codex', fast: false }));
+  });
+
   it('defaults to A and limits a model-only settings field to its writable Harness', async () => {
     const change = vi.fn();
     const { container } = renderPanel({ vendorKey: 'cc', onProviderChange: change,
@@ -3945,4 +3955,60 @@ describe('settings configuration without shared memory', () => {
     expect(change).toHaveBeenLastCalledWith('xd', 'gpt-5.5', 'high', true);
     expect(dismiss).not.toHaveBeenCalled();
   });
+});
+
+// Teammate settings must use this real picker, including the portaled config.
+vi.mock('@/hooks/useAvailableAgents', () => ({ useAvailableAgents: () => ({
+  availableVendors: new Set(['cc', 'codex', 'pi']), loaded: true,
+}) }));
+vi.mock('@/features/bots/botStore', () => ({ getEffectiveBotModelSettings: () => ({
+  model: 'claude-opus-5', providerId: 'anthropic', effort: 'medium', fastMode: false,
+}) }));
+vi.mock('@/features/bots/botPronounContext', () => ({ useBotTranslation: () => ({ t: (key: string) => key }) }));
+import { BotModelChainEditor } from '@/features/bots/BotModelChainEditor';
+
+describe('Teammate settings with the real model picker', () => {
+  it('opens the real config and saves the selected source, harness, effort and Fast as one route', async () => {
+    const change = vi.fn();
+    function Editor() {
+      const [routes, setRoutes] = React.useState<React.ComponentProps<typeof BotModelChainEditor>['value']>([{
+        harness: 'claude', providerId: 'anthropic', model: 'claude-opus-5', effort: 'medium', fastMode: false,
+      }]);
+      return <BotModelChainEditor value={routes} onChange={(next) => { change(next); setRoutes(next); }} />;
+    }
+    const view = render(<Editor />);
+    fireEvent.click(view.container.querySelector('button[aria-haspopup="listbox"]')!);
+    await screen.findByRole('listbox');
+    const flyout = await openRowFlyout('GPT-5.5');
+    const fast = await within(flyout).findByRole('button', { name: 'newChat.modelSelector.unified.fastTip' });
+    await act(async () => { fireEvent.click(fast); });
+    await act(async () => { fireEvent.keyDown(within(flyout).getByRole('slider'), { key: 'ArrowLeft' }); });
+    await act(async () => { fireEvent.click(within(rowFor('GPT-5.5')).getByText('GPT-5.5')); });
+    await waitFor(() => expect(change).toHaveBeenCalled());
+    expect(change).toHaveBeenLastCalledWith([expect.objectContaining({
+      harness: 'codex', providerId: 'xd', model: 'gpt-5.5', effort: 'low', fastMode: true,
+    })]);
+  });
+});
+
+it('teammate fallback exposes supported Harness choices and preserves the primary route', async () => {
+  const primary = { harness: 'claude' as const, providerId: 'anthropic', model: 'claude-opus-5', effort: 'medium', fastMode: false };
+  const change = vi.fn();
+  function Editor() {
+    const [routes, setRoutes] = React.useState<React.ComponentProps<typeof BotModelChainEditor>['value']>([primary, { ...primary, harness: 'codex', providerId: 'xd', model: 'gpt-5.5' }]);
+    return <BotModelChainEditor value={routes} onChange={(next) => { change(next); setRoutes(next); }} />;
+  }
+  const view = render(<Editor />);
+  const details = view.container.querySelector('details')!;
+  details.open = true;
+  fireEvent(details, new Event('toggle'));
+  fireEvent.click(details.querySelector('button[aria-haspopup="listbox"]')!);
+  await screen.findByRole('listbox');
+  const flyout = await openRowFlyout('GPT-5.6');
+  const cc = flyout.querySelector('[data-engine-capsule="cc"]') as HTMLElement;
+  const codex = flyout.querySelector('[data-engine-capsule="codex"]');
+  expect(cc).toBeTruthy(); expect(codex).toBeTruthy();
+  await act(async () => { fireEvent.click(cc); });
+  await act(async () => { fireEvent.click(within(rowFor('GPT-5.6')).getByText('GPT-5.6')); });
+  expect(change).toHaveBeenLastCalledWith([primary, expect.objectContaining({ harness: 'claude', providerId: 'openai', model: 'chatgpt/gpt-5.6' })]);
 });

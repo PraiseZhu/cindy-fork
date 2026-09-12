@@ -180,6 +180,12 @@ export interface CcMeta {
    */
   goalNotice?: 'usage-resumed' | 'capacity-resumed';
 
+  /**
+   * Host-side marker:个人版制作任务里 Agent 调用 cindy_make.report_complete 后落的
+   * 完成记录(role:'assistant' + 空 content)。renderer 渲成完成卡片,不进 prompt。
+   */
+  cindyMakeCompletion?: import('../../shared/cindyMakeSession').CindyMakeCompletionMeta;
+
   /** /review 创建的独立只读审查任务及其来源卡状态。 */
   reviewRun?: ReviewRunMeta;
 
@@ -197,6 +203,7 @@ export interface CcMeta {
    */
   /** Automatic reply to a private Bot message; retained without unread attention. */
   botPrivateReply?: boolean;
+  botAuthorization?: import('../../shared/botAuthorization').BotAuthorizationCard;
   botDirectMessage?: import('../../shared/botDirectMessage').BotDirectMessageMeta;
 
   /**
@@ -299,6 +306,8 @@ export interface Session {
    * 消费方按 null 兜底(不提示)。
    */
   activeTurnStartedAt?: number | null;
+  /** Host-confirmed pre-boot interruption generation; absent on older hosts. */
+  interruptedTurnStartedAt?: number | null;
   lastTurnEndedAt?: number | null;
   /**
    * worktree-parallel-sessions: 本 session 绑定的 git worktree 绝对路径（null = 无 worktree）。

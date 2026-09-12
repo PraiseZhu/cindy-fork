@@ -32,6 +32,7 @@
 
 import { createHash, randomUUID } from 'node:crypto';
 import path from 'node:path';
+import { bindRuntimeRecoveryNotice } from './runtimeRecoveryNotice';
 
 /**
  * 群里的授权卡改投宿主私聊时, 加在卡片正文顶部的说明。
@@ -110,7 +111,10 @@ import { agentHandoffPending } from '../../maker-ipc/agentHandoffPendingSingleto
 import { prependHandoffToUserMessage, prependNoteToWireUserMessage } from '../../maker-ipc/agentHandoff';
 import { buildPlanReconcileNote, summarizeOpenPlan } from '../../maker-ipc/planReconcile';
 import { listMessagesForAgentHandoff } from '../../localDb/ipc/messages';
-import { enqueueDurableWrite } from '../../messagePersistBroadcaster';
+import {
+  enqueueDurableWrite,
+  redactToolInputForUntrustedBoundary,
+} from '../../messagePersistBroadcaster';
 import {
   cancelPending,
   registerPending,
@@ -1091,6 +1095,12 @@ export function createTurnRunner(
         },
         ...(effectiveTurnPolicy ? { turnPermissionPolicy: effectiveTurnPolicy } : {}),
         beforeProviderStart: async () => {
+          const noticeSession = state.makerSession;
+          const noticeScope = state.scopeKey;
+          bindRuntimeRecoveryNotice(noticeSession, async (text) => {
+            if (sessionStates.get(rowId)?.makerSession !== noticeSession) return false;
+            return im.sendText(userId, text, { threadTs: noticeScope });
+          }, log);
           // 策略轮持一张 host turn lease:期间 setPermissionMode 切到 agent 声明为
           // turnPermissionPolicy-unsupported 的档位(如 Pi Full Access)会被阻塞到本轮
           // 终态,堵死"热切到 bypass 让 bridge 直接放行、策略连冒泡机会都没有"的绕过。
@@ -3110,7 +3120,23 @@ export function createTurnRunner(
     scopeKey?: string,
     confirmationTimeoutMs?: number,
   ) {
-    return async (req: InteractionRequest): Promise<InteractionDecision> => {
+    return async (rawReq: InteractionRequest): Promise<InteractionDecision> => {
+      // Redact BEFORE anything channel-facing sees the request. This listener
+      // replaces the Desktop handler, which does its own redaction, so without
+      // this the card builders (interactionCardModel copies `input` verbatim)
+      // would put a credential-bearing `proxyServer` into a Telegram/Feishu
+      // card. The browser tool rejects authenticated proxies later, but the
+      // card has already left the machine by then.
+      const req: InteractionRequest =
+        rawReq.kind === 'permission'
+          ? {
+              ...rawReq,
+              input: redactToolInputForUntrustedBoundary(
+                rawReq.toolName,
+                rawReq.input,
+              ) as Record<string, unknown>,
+            }
+          : rawReq;
       log.info(
         `interaction request kind=${req.kind} requestId=...${req.requestId.slice(-8)} session=...${localSessionId.slice(-8)}`,
       );

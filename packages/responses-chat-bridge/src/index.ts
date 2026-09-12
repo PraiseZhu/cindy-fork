@@ -17,8 +17,16 @@ export {
 export { ChatBridgeToolContext, type ChatBridgeToolKind, type ChatBridgeToolSpec } from './tool-context.js';
 export {
   createResponsesCustomToolFunctionAdapter,
+  normalizeResponsesToolItemIds,
   type ResponsesCustomToolFunctionAdapter,
 } from './custom-tool-function-adapter.js';
+export {
+  chainResponseTransforms,
+  createResponsesNullArrayRepairTransform,
+  repairResponsesEventNullArrays,
+  repairResponsesItemNullArrays,
+  ResponsesNullArrayRepairTransform,
+} from './responses-null-array-repair.js';
 export {
   isResponsesImageContentPartType,
   isUnsupportedResponsesImageErrorPayload,

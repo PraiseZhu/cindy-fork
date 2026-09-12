@@ -36,6 +36,7 @@ const SESSION_SOURCES = [
   'shared',
   'plugin',
   'bot',
+  'cindy-make',
 ] as const satisfies readonly SessionSource[];
 
 export const sessions = sqliteTable(
@@ -79,6 +80,9 @@ export const sessions = sqliteTable(
       .default(false),
     contextTokens: integer('context_tokens').notNull().default(0),
     contextWindow: integer('context_window').notNull().default(0),
+    /** Last window written by the runtime snapshot writer. Equality with contextWindow
+     * proves provenance; a later legacy/import writer changing the value invalidates it. */
+    contextWindowRuntime: integer('context_window_runtime'),
     fastMode: integer('fast_mode', { mode: 'boolean' }).notNull().default(false),
     /**
      * 计划模式一级开关(与 permissionMode 正交):开启时 agent 先产出计划、经用户
@@ -1145,6 +1149,8 @@ export const schedules = sqliteTable(
      */
     intervalMs: integer('interval_ms'),
     agentKind: text('agent_kind', { enum: ['claude-code', 'codex', 'pi'] }).notNull(),
+    /** NULL preserves legacy bound-task Harness inheritance. */
+    modelAgentKind: text('model_agent_kind', { enum: ['claude-code', 'codex', 'pi'] }),
     model: text('model'),
     /**
      * 显式选定的供应商(来源)id。NULL = 回落该 agent 原生默认来源(no-break,

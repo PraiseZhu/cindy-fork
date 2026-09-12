@@ -12,6 +12,20 @@
 
 ## 2026-09
 
+- **09-12** **侧栏整理菜单收为子菜单**——用户逐轮确认 HTML 后授权实施：一级为分组、任务排序、项目排序、任务状态、筛选、显示、任务信息，右侧均显示当前选择。任务排序直接并列优先级、最近活动、创建时间；优先级列首不改变默认值。筛选维度名为 Harness，补 Pi；任务状态独立于内容筛选的计数和重置。所有菜单行配图标，分组入口按真实侧栏的组标题与缩进任务行绘制，取代网格及 FolderTree 候选。替代旧菜单的平铺区块、嵌套时间排序及部分行刻意无图标的处理。现行行为见 `docs/product-rules/sidebar-redesign-plan.md §3`，实现为 `SidebarFilterPopover.tsx`；本条记录设计批准，不代表客户端实机验收通过。
+
+- **09-09** **用量历史 pi 标记改为青绿**——所有者试用后认为 Codex 蓝色与 pi 紫色不易区分，指定 pi 改用青绿。仅用量历史 harness 表的 pi 三处标记改为 `--usage-model-1`，随 Light/Dark 使用已有青绿值；Claude 陶土橙和 Codex 蓝色保留。替代本日上一条 pi 紫色选择，不修改全局 `--engine-badge-pi` 或模型配色。
+
+- **09-09** **用量历史 harness 改用已有引擎身份色**——所有者要求 Claude 品牌偏橙、Codex 蓝色，pi 可自选但不用红色。替代本日早先的青绿 / 靛蓝 / 琥珀方案：复用 `--engine-badge-cc` / `--engine-badge-codex` / `--engine-badge-pi`，分别为陶土橙 / 蓝 / 紫；三种标记位置同步，沿用这些身份 Token 的 Light/Dark 固定值合同。仅扩展这些既有 Token 在用量历史 Agent/harness 表中的消费范围，不改 Token 值、模型配色或其他功能。当前规则见 `usage-history-charts.md`。
+
+- **09-09** **用量历史：Agent 分类上色，模型配色取消前五名上限**——所有者根据真实用量截图要求 Agent/harness 区块有颜色，且无论模型数量多少都能分配颜色。Agent 顶部占比条、行前色块和行内占比条固定对应青绿 / 靛蓝 / 琥珀；模型沿用现有五个主题色作为种子，为后续模型派生色相。完整历史模型统一登记，切换筛选不跳色，历史用量排名更新可重新分配；模型表与柱图片段保持一致，不再把第六名起的真实模型全部染灰。派生公式与当前范围见 `usage-history-charts.md`，数值来源仍为 colors.ts 的既有 Token，动态计算留在 `usageHistoryColors.ts`（治理合同 §3.4）。大量模型可能颜色近似，不承诺无限可辨识颜色；名称和 tooltip 保留。本次只优化分类颜色，不改日期筛选、几何、热力图蓝色、动效或统计口径，不扩张首页金额与任务表配色。本条为需求授权记录，不表示视觉验收已通过。
+
+- **09-08 DS-6 表单五项裁决（用户已采纳）**：输入焦点环按 soft/50% 实施，实际亮暗/错误/旧主题可辨识度仍须验收；保留 elevated 默认及有明确白面板用途的 ivory。普通确认复用标准按钮但保留中性反相/轮廓主次、排列、默认取消焦点和显式/typed 分支，不整体改为 CTA、不迁授权。必填/格式错误移到字段并定位首错，服务失败仍 Toast；真正保存时防重复并禁止关闭，成功关闭、失败恢复，独立连接测试/模型获取不被锁住。取代治理 §10 对这三组视觉项的 pending，以及 §4 对 ivory 暂留/焦点偏差和普通确认焦点的旧描述。业务规则、payload、凭证和配置语义不变。落点：`DESIGN.md §4`、治理 §10、真实 provider/MCP 表单；工程/证据/G2 状态分别见 [证据索引](../design-evidence/2026-09-08/ds6-forms.md)，批准不等于验证通过。
+
+- **09-08** **手机版操作菜单图标统一为 18 pt**——用户对照现有手机版菜单后确认「好的，统一一下，并且作为以后的规范」。消息、任务、文件操作菜单以 `iconSize.lg = 18`、`iconStroke.regular = 2` 为基线；原生菜单资源按 18 / 36 / 54 px 输出，保留桌面同名 Lucide 的 24-unit viewBox 与笔画几何。替代本次恢复图标时误选的 24 pt，以及尚未实施的 20 pt 建议。既有紧凑筛选/导航菜单的 16 档、工具栏/lightbox 的 20 档保留各自用途，不全局改尺寸。落点：`DESIGN.md §15.13 Iconography` 与消息菜单资源尺寸校验；本条记录规范裁决，不代表用户已验收最终画面。
+
+- **09-08** **同一操作的双端图标必须完全一致**——用户在手机版消息菜单图标恢复过程中明确要求「图标需要和桌面版的完全一致。这个设计原则你也要记录一下」。裁决：同一操作复用相同来源的图形与笔画几何，Lucide 使用同名 glyph，不以语义相近的 SF Symbols 替代；尺寸可适配平台，颜色继续走 Light/Dark 语义 token。消息菜单对应 `MessageSquarePlus` / `Link2` / `Undo2` / `Trash2`。本条替代原先只要求普通图标「语义等价」的宽松口径，落点为 `DESIGN.md §15.13 Iconography`；记录裁决不代表实现或实机验收已完成。
+
 - **09-07** **圆角体系改为「可见层 + 登记驱动」，新增 data mark 类目**——
   **决策依据：** 项目所有者授权本轮采用独立评审定案；条款由 AI 整理。授权记录：项目所有者 kirozeng 以 [PR #4072](https://github.com/makecindy/cindy/pull/4072) 作者身份提交并全程推进本裁决（PR 描述载明「按所有者已定案方案；所有者 2026-09-07 圆角裁决」）；2026-09-08 所有者指示补记本条并解除全部合并阻塞。PR 作者身份、描述原文与所有者本人执行的合并操作互为可核验佐证。**本条确定规范目标，不表示实现已完成或视觉验收已通过。**
   **背景：同一缺陷两次发作。** ①PR #3802（09-03 合入）给用量历史热力图与每日 token 柱图加日期点击，为可点击把图元包成 `<button>`；自动 review 据 §5「every button is a pill」连提两轮 P1，作者依次给外层按钮、再给实际可见的彩色内层加 `rounded-full`，方格变圆点、柱变胶囊；另一条 24×24 命中区 P2 促使热力图 `cellSize` 12→24、柱图容器最小宽度撑到 807px 并横向滚动。#3802 记录了筛选与点击的手工验证，但缺少可复核的完整视觉验收证据，**不能据此推断无人看过界面**。②PR #4001（09-06 合入）将快捷键外框登记为 4px 特例，但保留了与之冲突的「三档且仅此三档」和「唯一豁免」措辞。
@@ -615,3 +629,111 @@
   warning-accent 语义限定运行/警告状态表面,普通诊断事件标题不在其列。
 - R2 §4.3 Project_List 五点差异(2026-07-17 lead 裁决本轮不做,出处为设计阶段工作文件 `2026-07-17-r2-ui-specs.md` §4.3,不入仓库):① Project_List 三态拆分(active-task-pill / project-card / flat-list-row 不共用 `sidebar-item-active`);② 项目 header / list card 选中应中性底(`#312F2F`/`#F6F6F6`,非 `#DF0C27` 大红);③ 去 Project_List 选中组 `focus-ring-soft` 蓝 ring,改 card stroke `#DCDFE3`/`#434343`;④ 小箭头 `#A61629` 强调(非整行红底);⑤ 本轮收敛不扩战线,后续另开。
 - splash 渐变辉光层未实现(2026-07-18 backlog,待用户表态)。
+
+## 2026-09-11 DS-8 内置主题依据迁移
+
+本条只迁移既有依据，不批准改色。摘录自接管前 `4f03ea9a7b5f6425e517acd91071df6d397c6079` 的
+`apps/desktop/src/renderer/themes/builtin/*.ts`；原行尾 Token 说明继续随 DTCG `$description` 生成，
+以下跨 Token、分组和否决式决定保存在生成区外。现行规则以 `DESIGN.md §4/§10/§15` 为准，
+数值仍仅编辑 `packages/design-tokens/src/{reference,themes}`；兼容预期见
+`builtinThemesFreeze.test.ts` 与 `cindyThemes.test.ts`。旧常量名只用于解释历史角色，不能恢复为第二数值源。
+
+### atom-one-light
+
+> CREATE AGENT 卡片 / 顶部 pill / 分段开关 + composer pill(#607):
+> 卡片底与 surface 同值收敛(模板惯例),icon 圆底用 CHIP,send 走 tier1 反相 CTA。
+> 用 disabled(比 tertiary 更淡)而非 tertiary:亮色背景下 tertiary≈2.6:1,
+> 命中 docs/design-rules/cindy-design-system.md §4 禁用 Silver 的对比度,placeholder 需更淡才"读着像空"。
+
+### cindy-dark
+
+菜单行说明对应 model-item-hover，侧栏说明对应 surface-translucent-sidebar。
+“色阶改版”与“对侧入表”指 token-decision-table.md §9 及 cindyDecisionData.ts 的双边冻结；
+这些是历史分组依据，不授权将原 alias 改成固定色。
+
+> 下拉行 hover/选中底:必须比弹层面板(surface-elevated #312F2F)更亮才可见。
+> surface-hover(#2F2D2D)是为"压在页面底 #2A2828 上"调的,比抬起的面板还暗→行高亮隐形。
+> 故菜单行专用 token 单独抬亮一档(+12/通道),模型/权限/+ 三个菜单共用它,hover 统一可见。
+> 侧栏玻璃: 用户调参 2026-08-11(黑 5 度 85%)
+> ── 2026-08 色阶改版新增 override(原走注册表默认值,现按新阶梯定值;决策表 §9)──
+> ── 对侧入表锚定: 值 = 本侧此前的注册表解析原值(解析结果不变, 仅为决策表双边冻结)──
+
+### cindy-light
+
+菜单行说明对应 model-item-hover，侧栏说明对应 surface-translucent-sidebar。
+“色阶改版”与“对侧入表”指 token-decision-table.md §9 及 cindyDecisionData.ts 的双边冻结；
+这些是历史分组依据，不授权将原 alias 改成固定色。
+
+> 下拉行 hover/选中底:surface-hover(#F1F1F1)相对面板(#F8F8F8)只差 7,行高亮几乎看不清。
+> 菜单行专用 token 压深一档(-14/通道)使 hover 在面板上清晰,模型/权限/+ 三菜单共用。
+> 侧栏面: 独立压暗一档+85% 遮盖(用户调参 2026-08-17, 与深色对齐)
+> ── 2026-08 色阶改版新增 override(原走注册表默认值,现按新阶梯定值;决策表 §9)──
+> ── 对侧入表锚定: 值 = 本侧此前的注册表解析原值(解析结果不变, 仅为决策表双边冻结)──
+
+### eclipse
+
+> CREATE AGENT 卡片 / 顶部 pill / 分段开关 + composer pill(#607):
+> 卡片底与 surface 同值收敛(模板惯例),icon 圆底用 CHIP,send 走 tier1 反相 CTA。
+
+### github-dark
+
+> CREATE AGENT 卡片 / 顶部 pill / 分段开关 + composer pill(#607):
+> 卡片底与 surface 同值收敛(模板惯例),icon 圆底用 CHIP,send 走 tier1 反相 CTA。
+
+### material-ocean-hc
+
+> CREATE AGENT 卡片 / 顶部 pill / 分段开关 + composer pill(#607):
+> 卡片底与 surface 同值收敛(模板惯例),icon 圆底用 CHIP,send 走 tier1 反相 CTA。
+
+### monokai-pro
+
+> CREATE AGENT 卡片 / 顶部 pill / 分段开关 + composer pill(#607):
+> 卡片底与 surface 同值收敛(模板惯例),icon 圆底用 CHIP,send 走 tier1 反相 CTA。
+
+### one-dark-pro
+
+> CREATE AGENT 卡片 / 顶部 pill / 分段开关 + composer pill(#607):
+> 卡片底与 surface 同值收敛(模板惯例),icon 圆底用 CHIP,send 走 tier1 反相 CTA。
+
+### solarized-light
+
+旧常量角色：SURFACE_BG → surface（base3），CHIP_BG → surface-chip（base2），
+BORDER_BG → border-default，TEXT_PRIMARY/SECONDARY/TERTIARY → 对应 text 槽。
+下面的卡片说明对应 create-agent-control-* / create-agent-quick-card-*；placeholder 对应 text-placeholder。
+
+> base3
+> ELEVATED (Card 层) 与 Chip 同色 = base2。Solarized 官方只有两档色板,
+> docs/design-rules/cindy-design-system.md §2.54 也明文承认 Dark Mode 里 "Card layer color and chip color
+> collapse to the same value — both represent one step lifted off Surface"
+> 这里把同一惯例搬到 light 模式:Card 比 Surface 略深一档 (94% → 88% L,
+> 差 6%) 产生"下沉式抬起"视觉,与 macOS 浅色模式 input 类似。
+> base2 — Card / Chip / Hover / sidebar-active 同源
+> base2 加深,1px 分界
+> 中性灰,正文,刻意比 default-light 淡
+> label / desc
+> meta / 弱化
+> CREATE AGENT 快速开始卡片 / 顶部 pill / 分段开关(#607):
+> 卡片用 base2(CHIP)下沉式抬起,与 chat-input 同层;边框/文字走 tier1 同源常量。
+> hover 必须提亮到 base3(SURFACE):CHIP 与 HOVER 在本主题同值,沿用 HOVER 会让
+> 卡片 default/hover 同色、icon 圆底与卡片同色(codex P1 3671116833)。
+> icon 圆底 resting 提到 base3(SURFACE) 与 base2 卡片区分;hover 时卡片升到
+> base3、圆底由模板规则落回 base2(CHIP),两态均可分(codex P1 3671457570)。
+> send 不用 accent(green) 底:共享 send token 还渲染 10-12px 文本
+> (VoiceInputOverlay / SessionHandoffCard),白字仅
+> 3.20:1,不达 DESIGN.md §10 小字 4.5:1;回退 registry 反相中性(codex P1
+> 3671457561),故本主题不覆盖 send-btn-*。
+> 用 disabled(比 tertiary 更淡)而非 tertiary:亮色背景下 tertiary 偏深,
+> 命中 docs/design-rules/cindy-design-system.md §4 禁用 Silver 的对比度,placeholder 需更淡才"读着像空"。
+
+## 2026-09-11 DS-8 默认代码字体依据迁移
+
+接管前 globals.css 已明确：默认代码字体使用系统等宽字体（macOS 的 SF Mono 不以该字体名暴露给网页，实际命中 Menlo；Windows 命中 Consolas），CJK 显式回退 PingFang / 微软雅黑。JetBrains Mono 已降级为可选预设、不再是默认。DS-8 将这条依据保存在 reference/foundations.json 的 app-font-code-default.$description，字体家族、顺序和用户选字体逻辑均不变。DESIGN.md §3 的 JetBrains Mono 排版样本是历史设计样本，不能据此把默认代码字体改回 JetBrains Mono；当前默认来源为该 DTCG token，运行期字体选择仍由原适配器负责。
+
+
+## 2026-09-11 · DS-9 Desktop 范围与授权呈现
+
+- **决定人：用户/设计师。** 用户将本期余项合为 DS-9（桌面聊天、跨入口、桌面授权）与 DS-10（成熟保护、维护、最终验收），Mobile 以后独立做；内部工序不另编号或拆批。
+- 在隔离 Electron 中以真实 PermissionPrompt 制作现状/主次降低/宽松密度对照，可切换默认与 CINDY Light/Dark、窄栏；按钮回调为受控记录，不执行命令。用户分别明确选择“允许一次突出”“保持中性”“沿用当前密度”。
+- Desktop Allow once 沿用 perm-allow 局部色为主，其余为次；没有可信风险字段，不从命令名或 autoReviewUnavailable 推断高风险；保留输入区内的位置、信息顺序与密度。已有胶囊按钮、键帽 4px 决定直接实施，不重投票。授权含义、默认、顺序、快捷键、提交与恢复行为不变，Mobile 对应视觉决定后续独立处理。
+- 同批聊天按 DESIGN §5 / §14 复用现有数值链、消息与活动行呈现，补图标 Tip、键盘可见焦点、代码与附件操作一致性；业务状态仍由原组件持有。
+- 用户授权交付到本地实现与视觉测试环境，并明确免本地双审；此记录不表示提交、合并或最终人工视觉已验收。实施证据见 `docs/design-evidence/2026-09-11/ds9-desktop-core.md`。

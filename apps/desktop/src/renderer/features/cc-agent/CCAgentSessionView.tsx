@@ -1,3 +1,4 @@
+import { shouldShowFailedScheduleNotice } from '@cindy/maker-shared/schedule-model';
 /**
  * CCAgentSessionView
  * ---------------------------------------------------------------------------
@@ -855,11 +856,10 @@ export function CCAgentSessionView({
       viewVisible &&
       navigationMode !== 'sidebar-embedded' &&
       navigationMode !== 'split-pane');
-  const showComposerControlledBanner = ownsRoute || showControlledBanner;
+  const showComposerControlledBanner = viewVisible && (ownsRoute || showControlledBanner);
   const controlledBy = useControlledBy();
   const hasControlledBanner = showComposerControlledBanner && controlledBy.length > 0;
   const controlledBannerCollapsed = useComposerCollapsed(sessionId ?? null);
-  const showExpandedControlledBanner = hasControlledBanner && !controlledBannerCollapsed;
   const isMac = window.electronAPI?.platform === 'darwin';
   // messageWidth：消息流容器宽度（视觉边距 50px / compact 20px）
   // inputWidth：ChatInput / 状态栏 / workingDir 行的宽度（视觉边距 40px / compact 10px）
@@ -935,6 +935,9 @@ export function CCAgentSessionView({
   // 只有 URL 说了不算 —— 那是导航投影,不是身份。
   const botChatIdentity: BotChatIdentity | null =
     botIdentity && session?.source === 'bot' ? botIdentity : null;
+  // 伙伴没有 RunningStatusBar，折叠呼吸灯继续留在输入框上方，不能随状态行一起消失。
+  const showCenteredControlledBanner =
+    hasControlledBanner && (!controlledBannerCollapsed || Boolean(botChatIdentity));
   // assistant 气泡左侧的伙伴头像。节点在整场对话里是同一个,memo 住让 MessageItem
   // 的 memo 比较仍然成立(否则每帧新节点 = 全流重渲染)。
   const botAssistantAvatar = useMemo(
@@ -1958,12 +1961,12 @@ export function CCAgentSessionView({
   const scheduleSessionInfo = useAutomationScheduleSessionInfo(sessionId);
   const unreadFailedScheduleRunIds =
     scheduleSessionInfo?.unreadFailedRunIds ?? EMPTY_UNREAD_FAILED_RUN_IDS;
-  useReadFailedScheduleRuns(unreadFailedScheduleRunIds, viewVisible && historyLoaded);
+  useReadFailedScheduleRuns(unreadFailedScheduleRunIds, viewVisible && historyLoaded, remoteDeviceId ?? undefined);
   const currentUnreadFailedRunId =
     scheduleSessionInfo?.latestUnreadFailedRunId ?? unreadFailedScheduleRunIds[0];
   const markCurrentUnreadFailedScheduleRun = useCallback(async (): Promise<boolean> => {
     if (!currentUnreadFailedRunId) return true;
-    const { failed, firstError } = await markScheduleRunsReadAndSync([currentUnreadFailedRunId]);
+    const { failed, firstError } = await markScheduleRunsReadAndSync([currentUnreadFailedRunId], remoteDeviceId ?? undefined);
     if (failed.length === 0) return true;
     toast.error(
       t('ccAgent.layout.markAllReadFailed', {
@@ -1971,7 +1974,7 @@ export function CCAgentSessionView({
       }),
     );
     return false;
-  }, [currentUnreadFailedRunId, t]);
+  }, [currentUnreadFailedRunId, remoteDeviceId, t]);
   const errorTailMsg = useMemo(() => {
     const last = messages.length > 0 ? messages[messages.length - 1] : undefined;
     return last &&
@@ -3941,7 +3944,7 @@ export function CCAgentSessionView({
     t,
   ]);
 
-  // M35: Vendor fallback —— 会话的 model 与它(固定不变的)agent vendor 明确错配时,
+  // M35: Vendor fallback —— 仅修复未绑定 provider、且没有切换意图的历史行。
   // 回退到该 vendor 的默认模型。守的是「绕过模型选择器写入 session.model」的脏数据路径
   // (历史 DB 行 / 上古 model id),选择器主动选择的 happy path 由 provider 逻辑自己保证一致。
   //
@@ -3954,15 +3957,19 @@ export function CCAgentSessionView({
   // (别名 / 脏数据 / 目录未加载的瞬间)一律不动,避免 load race 误杀。cc / codex 统一这一套。
   const sessionAgentKind = session?.agentKind;
   const sessionModel = session?.model;
+  const sessionProviderId = session?.providerId;
   useEffect(() => {
     if (readOnly) return;
     if (!sessionAgentKind || !sessionModel || !sessionId) return;
     // device-link 远程会话:vendor↔model 一致性由被控端权威保证。控制端不能替它"纠正"——
     // 远程模型可能只存在于被控端(本地目录查不到 → 误判跨 vendor),且本地 DB 没有该会话行,
     // sessionService.update 会写错 / refreshServerSession 对远程是 no-op。直接跳过(规则:host 为准)。
-    if (getSessionDeviceId(sessionId)) return;
-    const agent = displayAgentKind;
-    if (!shouldFallbackVendorModel(providers, sessionModel, agent)) return;
+    const agent = dbToMakerAgentKind(sessionAgentKind);
+    if (!shouldFallbackVendorModel(providers, sessionModel, agent, {
+      providerId: sessionProviderId,
+      hasSwitchIntent: agentSwitchIntent != null,
+      isRemote: Boolean(isRemoteSession || remoteDeviceId || getSessionDeviceId(sessionId)),
+    })) return;
     // 用三值化后的 agent 映射选默认模型:Pi 会话必须回退到 Pi 目录默认,而不是被
     // `isCodex ? 'codex' : 'cc'` 误写成 CC 首选(可能是更贵的 Opus)(codex review)。
     const defaultModel = getDefaultModelForVendor(
@@ -3973,12 +3980,15 @@ export function CCAgentSessionView({
       .then(() => refreshServerSession())
       .catch((err) => log.warn('vendor fallback patch failed:', err));
   }, [
-    displayAgentKind,
+    agentSwitchIntent,
+    isRemoteSession,
     providers,
     refreshServerSession,
+    remoteDeviceId,
     sessionAgentKind,
     sessionId,
     sessionModel,
+    sessionProviderId,
     readOnly,
   ]);
 
@@ -4455,7 +4465,7 @@ export function CCAgentSessionView({
         // 伙伴对话不是用户经营的任务:它拿的是「跟谁说话 + 进 TA 的设置」,
         // 不是重命名/置顶/归档/导出那一套任务菜单。
         botChatIdentity ? (
-          <BotSessionContentHeaderRegistration bot={botChatIdentity} sessionId={sessionId} />
+          <BotSessionContentHeaderRegistration bot={botChatIdentity} />
         ) : (
           <SessionContentHeaderRegistration
             session={session}
@@ -4775,7 +4785,7 @@ export function CCAgentSessionView({
                   }
                   className="mb-0"
                 />
-                {showExpandedControlledBanner && (
+                {showCenteredControlledBanner && (
                   <ControlledBanner
                     placement="composer"
                     maxWidth={controlledBannerMaxWidth}
@@ -4878,17 +4888,12 @@ export function CCAgentSessionView({
                 />
               )}
 
-            {!readOnly &&
-              !errorTailMsg &&
-              !interruptedFromSession &&
-              scheduleSessionInfo?.hasFailedRun &&
-              scheduleSessionInfo.latestFailedRun &&
-              !syntheticContinuationPending &&
-              !error &&
-              !credentialSwitchWait &&
-              !isStreaming &&
-              !agentStatus.isRunning &&
-              sessionId && (
+            {sessionId && scheduleSessionInfo?.latestFailedRun && shouldShowFailedScheduleNotice({
+              latestFailedRun: scheduleSessionInfo.hasFailedRun ? scheduleSessionInfo.latestFailedRun : null,
+              readOnly, tailError: !!errorTailMsg, interrupted: !!interruptedFromSession,
+              continuationPending: !!syntheticContinuationPending, error: !!error,
+              credentialWait: !!credentialSwitchWait, streaming: isStreaming, running: agentStatus.isRunning,
+            }) && (
                 <UnreadFailedScheduleBanner
                   key={sessionId}
                   dataOwnerId={dataOwnerId}
@@ -5955,7 +5960,7 @@ function ContextCapacityRing({
         ? 'var(--warning-fg)'
         : 'var(--msg-tool-card-chevron)';
 
-  const usedTokens = Math.min(contextTokens, contextWindow || Infinity);
+  const usedTokens = Math.max(0, contextTokens);
   const tooltipText =
     contextWindow > 0
       ? `Context — ${formatTokenCount(usedTokens)} / ${formatTokenCount(contextWindow)} (${pct}%)`

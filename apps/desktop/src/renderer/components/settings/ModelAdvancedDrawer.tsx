@@ -65,7 +65,7 @@ import type {
   ProviderView,
 } from '@cindy/model-providers';
 
-import { MANAGED_OLLAMA_PROVIDER_ID } from '../../../shared/localModelRuntime';
+import { isLocalRuntimeBetaProviderId, MANAGED_OLLAMA_PROVIDER_ID } from '../../../shared/localModelRuntime';
 import { modelBrand } from './modelManagementPresentation';
 import { ModelPriceOverrideDialog } from './ModelPriceOverrideDialog';
 import type { UnionModelRow } from './UnifiedModelList';
@@ -215,19 +215,22 @@ export function ModelAdvancedDrawer({
    * 主展示引擎:该模型可用引擎里的第一个。只读事实(上下文、报价、能力)按它取 ——
    * 同一模型跨引擎的元数据可能不同,抽屉顶部标注了这一点,逐引擎差异在「引擎支持」段展开。
    */
+  const chatAgents = useMemo(() => (row?.avail ?? []).filter((agent) => {
+    const model = row?.byAgent[agent];
+    return model && isAgentSelectableModel(model, { userProvider: provider.source === 'user' });
+  }), [row, provider.source]);
+  const primaryCandidates = chatAgents?.length ? chatAgents : row?.avail;
   const primaryAgent =
-    row?.avail.find((agent) =>
+    primaryCandidates?.find((agent) =>
       provider.id === 'openai'
         ? agent === 'codex'
         : provider.id === 'anthropic'
           ? agent === 'claude-code'
           : agent === 'pi',
-    ) ??
-    row?.avail[0] ??
-    null;
+    ) ?? primaryCandidates?.[0] ?? null;
   const primaryModel = row && primaryAgent ? (row.byAgent[primaryAgent] ?? null) : null;
 
-  const contextAgent = primaryAgent;
+  const contextAgent = primaryAgent && chatAgents.includes(primaryAgent) ? primaryAgent : null;
   const contextModel = contextAgent ? row?.byAgent[contextAgent] : null;
 
   const contextTarget = useMemo(
@@ -237,7 +240,7 @@ export function ModelAdvancedDrawer({
             providerId: provider.id,
             agent: contextAgent,
             modelId: contextModel.id,
-            relatedTargets: (row?.avail ?? [])
+            relatedTargets: chatAgents
               .filter((a) => a !== contextAgent)
               .flatMap((agent) => {
                 const model = row?.byAgent[agent];
@@ -245,7 +248,7 @@ export function ModelAdvancedDrawer({
               }),
           }
         : null,
-    [contextAgent, contextModel, provider.id, row],
+    [contextAgent, contextModel, provider.id, row, chatAgents],
   );
   const ctx = useModelContextLimit(open ? contextTarget : null);
 
@@ -253,6 +256,13 @@ export function ModelAdvancedDrawer({
   const ctxDirtyRef = useRef(false);
   const defaultWindow = contextAgent === 'codex' && ctx.codexContext
     ? ctx.codexContext.contextWindow : contextModel?.contextWindow ?? 0;
+  // The editor guard is not a native request-capacity limit. Keep small/local
+  // model windows selectable and never derive this floor from a saved override.
+  // Local runtimes own their loaded window; their catalog maximum cannot set an editor floor.
+  const modelWindows = chatAgents.map((agent) => row?.byAgent[agent]?.contextWindow)
+    .filter((window): window is number => typeof window === 'number' && Number.isFinite(window) && window > 0);
+  const minimumContextK = isLocalRuntimeBetaProviderId(provider.id)
+    ? 1 : Math.max(1, Math.floor(Math.min(100_000, ...modelWindows) / 1000));
   const routeWindow = primaryModel?.contextWindowMax ?? primaryModel?.contextWindow ?? 0;
   const effectiveLimit = ctx.limit ?? (defaultWindow > 0 ? defaultWindow : null);
   useEffect(() => {
@@ -267,8 +277,8 @@ export function ModelAdvancedDrawer({
   const parsedK = Number(ctxDraft.trim());
   const parsedTokens = parsedK * 1000;
   const ctxInvalid =
-    ctxDraft.trim() !== '' &&
-    (!Number.isSafeInteger(parsedK) || parsedTokens < 1000 || parsedTokens > 100_000_000);
+    ctxDirtyRef.current && ctxDraft.trim() !== '' &&
+    (!Number.isSafeInteger(parsedK) || parsedK < minimumContextK || parsedTokens > 100_000_000);
   const commitCtxDraft = useCallback(() => {
     if (!ctxDirtyRef.current || ctxInvalid || ctx.loading) return;
     ctxDirtyRef.current = false;
@@ -312,6 +322,7 @@ export function ModelAdvancedDrawer({
             const model = row.byAgent[agent];
             return (
               model &&
+              isAgentSelectableModel(model, { userProvider: provider.source === 'user' }) &&
               !model.disabled &&
               model.status !== 'retired' &&
               model.availability !== 'requires_payment'
@@ -321,7 +332,7 @@ export function ModelAdvancedDrawer({
       : null;
   const visibilityTargets = row.avail.flatMap((agent) => {
     const model = row.byAgent[agent];
-    return model ? [{ agent, modelId: model.id }] : [];
+    return model && isAgentSelectableModel(model, { userProvider: provider.source === 'user' }) ? [{ agent, modelId: model.id }] : [];
   });
   const visibilityCustomized = visibilityTargets.some(({ agent, modelId }) =>
     isModelVisibilityCustomized(agent, provider.id, modelId),
@@ -344,21 +355,22 @@ export function ModelAdvancedDrawer({
     displayedLimit > editRouteWindow;
 
   const efforts = EFFORT_ORDER.filter((effort) =>
-    row.avail.some((a) => row.byAgent[a]?.efforts.includes(effort)),
+    chatAgents.some((a) => row.byAgent[a]?.efforts.includes(effort)),
   );
-  const commonEfforts = efforts.filter((intent) => row.avail.every((agent) => {
+  const commonEfforts = efforts.filter((intent) => chatAgents.every((agent) => {
     const model = row.byAgent[agent];
     return !model?.efforts.length ||
       clampEffortToSupported(intent, model.efforts) ===
         (getProviderModelEffort(agent, provider.id, model.id) ?? model.defaultEffort);
   }));
-  const preferredEffort = getProviderModelEffort(primaryAgent, provider.id, primaryModel.id)
-    ?? primaryModel.defaultEffort;
+  const preferredEffort = conversational
+    ? getProviderModelEffort(primaryAgent, provider.id, primaryModel.id) ?? primaryModel.defaultEffort
+    : null;
   const effortMixed = efforts.length > 0 && commonEfforts.length === 0;
   const currentEffort = preferredEffort && commonEfforts.some((effort) => effort === preferredEffort)
     ? preferredEffort : commonEfforts[0] ?? null;
   const shownEfforts = EFFORT_ORDER.filter((effort) =>
-    row.avail.some((agent) => {
+    chatAgents.some((agent) => {
       const model = row.byAgent[agent];
       return model?.efforts.includes(effort) || model?.displayEfforts?.includes(effort);
     }),
@@ -370,7 +382,7 @@ export function ModelAdvancedDrawer({
    */
   const applyEffort = (effort: Effort) => {
     if (!efforts.includes(effort)) return;
-    for (const agent of row.avail) {
+    for (const agent of chatAgents) {
       const model = row.byAgent[agent];
       if (!model) continue;
       if (!model.efforts.length) continue;
@@ -453,7 +465,8 @@ export function ModelAdvancedDrawer({
                       </div>
                       {provider.agents.map((agent) => {
                         const model = row.byAgent[agent];
-                        const supported = Boolean(model);
+                        // Missing catalog membership proves no configured route, not upstream incompatibility.
+                        const supported = Boolean(model && isAgentSelectableModel(model, { userProvider: provider.source === 'user' }));
                         const protocol = protocols.forAgent(agent);
                         const compatibility = protocol?.mode === 'compatibility';
                         const protocolId = `model-protocol-${agent}`;
@@ -523,11 +536,11 @@ export function ModelAdvancedDrawer({
                               ) : (
                                 <Tip
                                   contentClassName="z-[10002]"
-                                  text={t('settings.providers.models.advanced.engineUnsupported')}
+                                  text={t('settings.providers.models.advanced.engineNotConfigured')}
                                 >
                                   <button
                                     type="button"
-                                    aria-label={`${AGENT_LABEL[agent]} · ${t('settings.providers.models.advanced.engineUnsupported')}`}
+                                    aria-label={`${AGENT_LABEL[agent]} · ${t('settings.providers.models.advanced.engineNotConfigured')}`}
                                     className="inline-flex rounded-full p-1"
                                   >
                                     <CircleHelp size={13} aria-hidden />
@@ -545,10 +558,10 @@ export function ModelAdvancedDrawer({
                                     : false
                                 }
                                 disabled={!supported || paymentRequired || !selectionAvailable}
-                                onCheckedChange={(next) => {
+                                onCheckedChange={async (next) => {
                                   if (!model || !selectionAvailable) return;
                                   if (
-                                    setModelVisibility(agent, provider.id, model.id, next) === false
+                                    await setModelVisibility(agent, provider.id, model.id, next) === false
                                   ) {
                                     toast.error(
                                       t('settings.providers.models.visibilityWriteFailed'),
@@ -564,8 +577,8 @@ export function ModelAdvancedDrawer({
                       {visibilityCustomized && !paymentRequired && selectionAvailable && (
                         <button
                           type="button"
-                          onClick={() => {
-                            if (!resetModelVisibilities(provider.id, visibilityTargets))
+                          onClick={async () => {
+                            if (!await resetModelVisibilities(provider.id, visibilityTargets))
                               toast.error(t('settings.providers.models.visibilityWriteFailed'));
                           }}
                           className="mt-2 rounded-full px-2 py-1 text-12 text-[var(--text-secondary)] hover:bg-[var(--surface-chip)]"
@@ -611,7 +624,7 @@ export function ModelAdvancedDrawer({
                           {t('settings.providers.models.advanced.effortMixed')}
                         </p>
                       )}
-                      {row.avail.some(
+                      {chatAgents.some(
                         (a) =>
                           getProviderModelEffort(a, provider.id, row.byAgent[a]!.id) !== undefined,
                       ) && (
@@ -619,7 +632,7 @@ export function ModelAdvancedDrawer({
                           type="button"
                           disabled={paymentRequired}
                           onClick={() => {
-                            for (const a of row.avail)
+                            for (const a of chatAgents)
                               clearProviderModelEffort(a, provider.id, row.byAgent[a]!.id);
                           }}
                           className="mt-2 rounded-full px-2 py-1 text-12 text-[var(--text-secondary)] hover:bg-[var(--surface-chip)]"
@@ -694,6 +707,7 @@ export function ModelAdvancedDrawer({
                             <p role="status" className="mt-1.5 text-12 text-[var(--warning-fg)]">
                               {t(
                                 `settings.providers.models.advanced.${ctxInvalid ? 'contextInvalid' : ctx.error ? 'contextWriteFailed' : 'contextMixed'}`,
+                                { min: minimumContextK },
                               )}
                             </p>
                           )}

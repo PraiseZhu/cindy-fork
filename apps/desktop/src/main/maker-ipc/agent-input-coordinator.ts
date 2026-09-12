@@ -1,3 +1,4 @@
+import { AUTO_REVIEW_SOURCE_CONTENT, AUTO_REVIEW_USER_INTENT } from '@cindy/maker-core';
 /**
  * AgentInputCoordinator — main 侧排队输入事务协调器。
  *
@@ -28,6 +29,7 @@ import { redactSensitiveText } from '@cindy/maker-shared/error-redaction';
 import { isUnsupportedResponsesImageErrorPayload } from '@cindy/responses-chat-bridge';
 import { isPiImageInputUnsupportedError } from '../../shared/inputError.js';
 import { createLogger } from '../logger.js';
+import { readAutoReviewUserText } from './autoReviewUserIntent.js';
 import { createMessage as createDbMessage } from '../localDb/ipc/messages.js';
 import { touchUserSendInDb } from '../localDb/ipc/sessions.js';
 import type { InterruptedTurnErrorSignals } from './interruptedTurnAutoResume.js';
@@ -186,6 +188,8 @@ function hasRetryableQueuedContent(item: AgentInputQueuedMessage): boolean {
 }
 
 export interface AgentInputSendOpts {
+  readonly [AUTO_REVIEW_SOURCE_CONTENT]?: string;
+  readonly [AUTO_REVIEW_USER_INTENT]?: string;
   messageUuid?: string;
   userName?: string;
   throwOnStartFailure?: boolean;
@@ -1430,7 +1434,8 @@ export class AgentInputCoordinator {
    * 等不来、存活探测又看到项还在,run 会永久挂 running(PR #972 review)。
    */
   isQueuePaused(sessionId: string): boolean {
-    return this.getState(sessionId).queuePaused;
+    const state = this.getState(sessionId);
+    return state.queuePaused || state.queueInteractionLocks.includes('execution-pause');
   }
 
   /**
@@ -2121,8 +2126,13 @@ export class AgentInputCoordinator {
 
     try {
       const referenceContexts = await this.resolveReferenceContexts(item);
-      if (!matchesExpectedTurn()) {
-        const latest = this.getState(sessionId);
+      // A pause/Stop can arrive while references are being prepared. Recheck
+      // before crossing the provider boundary, including direct UI/IM callers.
+      const current = this.getState(sessionId);
+      if (!matchesExpectedTurn() || current.queueInteractionLocks.length > 0
+        || current.queueAbortPending || inputBoundarySignal.aborted || steerAbort.signal.aborted
+        || !this.isCurrentSteerRequest(current, item.clientId, steerGeneration, steerRequestToken)) {
+        const latest = current;
         if (
           this.clearSteeringMarker(latest, item.clientId, {
             generation: steerGeneration,
@@ -2140,6 +2150,9 @@ export class AgentInputCoordinator {
         referenceContexts,
       );
       await this.deps.steerToAgent(sessionId, buildMakerUserMessage(item, referenceContexts), {
+        [AUTO_REVIEW_SOURCE_CONTENT]: item.autoReviewUserText ?? '',
+        ...(readAutoReviewUserText(item.persistedContent) === null
+          ? { [AUTO_REVIEW_USER_INTENT]: item.autoReviewUserText ?? '' } : {}),
         messageUuid,
         userName: item.userName,
         signal: AbortSignal.any([inputBoundarySignal, steerAbort.signal]),
@@ -2484,7 +2497,7 @@ export class AgentInputCoordinator {
 
   stop(
     sessionId: string,
-    opts?: { keepQueue?: boolean; pauseQueue?: boolean },
+    opts?: { keepQueue?: boolean; pauseQueue?: boolean; resumeOnUserInput?: boolean },
   ): AgentInputProjection {
     const state = this.getState(sessionId);
     const preserveQueue = opts?.keepQueue === true;
@@ -2536,8 +2549,9 @@ export class AgentInputCoordinator {
     }
     const shouldPause = Boolean(preserveQueue && opts?.pauseQueue && state.pendingQueue.length > 0);
     state.queuePaused = shouldPause;
-    // Stop 出来的暂停是用户显式意图,不许后续新输入静默放行(区别于崩溃恢复暂停)。
-    state.queuePausedByRestore = false;
+    // Ordinary Stop remains explicit. Restart, like crash recovery, may be
+    // released by the next deliberate user input, never by background enqueue.
+    state.queuePausedByRestore = shouldPause && opts?.resumeOnUserInput === true;
     state.queueAbortPending = shouldPause && this.isDispatchBoundaryBusy(sessionId, state);
     const abortBoundaryToken = Symbol('agent-input-abort-boundary');
     const abortBoundaryGeneration = state.generation;
@@ -3166,6 +3180,18 @@ export class AgentInputCoordinator {
     return this.getProjection(sessionId);
   }
 
+  isExecutionPaused(sessionId: string): boolean {
+    return this.getState(sessionId).queueInteractionLocks.includes('execution-pause');
+  }
+
+  /** A durable owner-controlled pause survives ordinary queue Resume/Stop. */
+  setExecutionPaused(sessionId: string, paused: boolean): void {
+    this.setInteractionLock(sessionId, 'execution-pause', paused, { preserveOnStop: true });
+    // Propagate the hold through async normalization/authorization in the Host
+    // adapter and harness, including steers already admitted before the pause.
+    if (paused) this.abortSteerTransactions(sessionId);
+  }
+
   setInteractionLock(
     sessionId: string,
     lockId: string,
@@ -3783,6 +3809,7 @@ export class AgentInputCoordinator {
   private toProjectedItem(item: AgentInputQueuedMessage): AgentInputQueuedMessage {
     const projected = { ...item };
     delete projected.hostAcceptedAtMs;
+    delete projected.autoReviewUserText;
     delete projected.fromDeviceLinkClient;
     delete projected.trustedSessionReferenceContexts;
     delete projected.sessionReferencesRequireTrustedSnapshot;
@@ -4340,6 +4367,7 @@ export class AgentInputCoordinator {
       );
       const makerUserMessage = buildMakerUserMessage(head, referenceContexts);
       const result = await this.deps.sendToAgent(sessionId, makerUserMessage, head.createOpts, {
+        [AUTO_REVIEW_SOURCE_CONTENT]: head.autoReviewUserText ?? '',
         messageUuid: active.messageUuid,
         userName: head.userName,
         throwOnStartFailure: true,
@@ -5844,6 +5872,7 @@ export class AgentInputCoordinator {
           content: item.persistedContent,
           agentMeta: {
             uuid: active.messageUuid,
+            ...(item.autoReviewUserText !== undefined ? { autoReviewUserText: item.autoReviewUserText } : {}),
             sdkSessionId,
             delivery: active.delivery,
             ...(transcriptParentUuid ? { transcriptParentUuid } : {}),
