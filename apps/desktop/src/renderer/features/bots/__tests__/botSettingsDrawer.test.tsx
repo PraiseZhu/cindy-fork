@@ -1,11 +1,10 @@
 // @vitest-environment jsdom
 
-import { transferableAbortController } from 'node:util';
-
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import type { ReactNode } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createMemoryRouter, RouterProvider, useLocation } from 'react-router-dom';
+import { transferableAbortController } from 'node:util';
 
 const guard = vi.hoisted(() => vi.fn(async () => true));
 const nativeAbortController = transferableAbortController();
