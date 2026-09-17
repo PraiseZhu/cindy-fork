@@ -1002,6 +1002,35 @@ describe('GhostLibrarySlot', () => {
     expect((stB as unknown as { authorizedReadonly: boolean }).authorizedReadonly).toBe(true);
   });
 
+  it.each(['expiry', 'io', 'abort', 'dispose'] as const)('releases stream epochs on %s without commit', async (reason) => {
+    createVault.mockImplementation((d) => new LibraryVault({ ...d, now: () => clock }));
+    await slot.handleLibraryRequest(GHOST_ID, { op: 'open' });
+    const begin = await slot.handleLibraryRequest(GHOST_ID, { op: 'writeBegin', path: 'stream.txt', totalBytes: 1 });
+    if (!begin.ok || begin.op !== 'writeBegin') throw new Error(JSON.stringify(begin));
+    const epochs = (slot as unknown as { writeEpochByStream: Map<string, unknown> }).writeEpochByStream;
+    expect(epochs.has(begin.streamId)).toBe(true);
+    // A retryable protocol error must keep the captured epoch.
+    const invalid = await slot.handleLibraryRequest(GHOST_ID, { op: 'writeChunk', streamId: begin.streamId, seq: 2, content: 'x' });
+    expect(invalid.ok).toBe(false);
+    expect(epochs.has(begin.streamId)).toBe(true);
+    if (reason === 'expiry') {
+      clock += 300_001;
+      const next = await slot.handleLibraryRequest(GHOST_ID, { op: 'writeBegin', path: 'next.txt', totalBytes: 1 });
+      expect(next.ok).toBe(true);
+    } else if (reason === 'io') {
+      const open = vi.spyOn(fs.promises, 'open').mockRejectedValueOnce(new Error('task IO failure'));
+      try {
+        const failed = await slot.handleLibraryRequest(GHOST_ID, { op: 'writeChunk', streamId: begin.streamId, seq: 1, content: 'x' });
+        expect(failed.ok).toBe(false);
+      } finally { open.mockRestore(); }
+    } else if (reason === 'abort') {
+      await slot.handleLibraryRequest(GHOST_ID, { op: 'writeAbort', streamId: begin.streamId });
+    } else {
+      await slot.disposeAll();
+    }
+    expect(epochs.has(begin.streamId)).toBe(false);
+  });
+
   it('writeCommit ACK 含 64-hex sha256 与捕获的 epoch,旧插件可忽略新字段', async () => {
     const body = 'pixel-bytes';
     const sha = createHash('sha256').update(body).digest('hex');

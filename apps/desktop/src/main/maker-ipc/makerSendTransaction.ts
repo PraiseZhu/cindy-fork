@@ -38,6 +38,7 @@ import {
   directoryGrantsForRuntime,
   extraDirsForRuntime,
   libraryExtraDirSlot,
+  isLibraryExtraDirSlot,
   validateExtraDirs,
 } from './extraDirsValidator.js';
 import type { MakerSessionCreateOpts } from './sessionRequest.js';
@@ -71,8 +72,14 @@ export async function prepareDirectoryGrantsForBootstrap(
   deps: BootstrapDirectoryGrantDeps,
 ): Promise<void> {
   const libraryRoot = opts.remoteHostId ? undefined : opts[LIBRARY_READ_ROOT];
-  const requestedExtraDirs = (opts.extraDirs ?? []).map((dir) =>
-    dir === libraryRoot ? libraryExtraDirSlot(dir) : dir);
+  const runtimeDirs = opts.extraDirs ?? [];
+  if (runtimeDirs.some((dir) => isLibraryExtraDirSlot(dir.trim()))) {
+    throwIpcError('INVALID_PARAMS', 'extraDirs must not contain Host-owned library slots');
+  }
+  // Restore one Host-owned occurrence, retaining any independent user grant.
+  const libraryIndex = libraryRoot ? runtimeDirs.lastIndexOf(libraryRoot) : -1;
+  const requestedExtraDirs = runtimeDirs.map((dir, index) =>
+    index === libraryIndex ? libraryExtraDirSlot(dir) : dir);
   // Writable roots are a Main-owned persisted grant. CREATE_SESSION and lazy SEND payloads are
   // renderer/device-link controlled, so bootstrap must replace them with SQLite truth.
   const requestedWritableDirs =

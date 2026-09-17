@@ -374,6 +374,7 @@ export class GhostLibrarySlot {
       : this.deps.getDefaultRoot(ghostId);
     const vault = this.deps.createVault({
       rootDir: () => root,
+      onStreamClosed: (streamId) => { this.writeEpochByStream.delete(streamId); },
       ghostId,
       getDiskFreeBytes: this.deps.getDiskFreeBytes,
       locationKind: resolution.kind,

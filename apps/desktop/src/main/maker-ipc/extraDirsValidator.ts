@@ -150,7 +150,7 @@ export async function validateExtraDirs(
     }
 
     // 完全重复 — 第一次出现已 push 到 valid; 后续直接静默丢
-    if (seen.has(dir) || seen.has(root)) continue;
+    if (seen.has(dir)) continue;
 
     let stat;
     try {
@@ -177,7 +177,6 @@ export async function validateExtraDirs(
     }
 
     seen.add(dir);
-    seen.add(root);
     valid.push(dir);
   }
 
