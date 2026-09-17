@@ -326,12 +326,13 @@ describe('远程机器切换入口并入 SidebarTopNav(置顶段上方,固定不
       sidebarUpperSource.indexOf('const visiblePinnedEntries'),
     );
     expect(pinnedProjectsBlock).toContain('hiddenProjectComparisonKeys');
-    expect(pinnedProjectsBlock).toContain('pinnedProjectKeys.has(project.projectKey)');
+    expect(pinnedProjectsBlock).toContain('pinnedProjectComparisonKeys');
+    expect(pinnedProjectsBlock).toContain('projectKeyComparisonSetHas');
     expect(pinnedProjectsBlock).not.toContain('vendorPredicate');
     expect(pinnedProjectsBlock).not.toContain('filter.projectsAsSet');
     expect(pinnedProjectsBlock).not.toContain('allowedProjects');
     // 「最近活跃」本就豁免:置顶取 allGroups(未经活跃时间收窄),不是 activityFilteredSessions。
-    expect(sidebarUpperSource).toContain('const allGroups = useProjectGroups(sidebarSessions');
+    expect(sidebarUpperSource).toMatch(/const allGroups = useProjectGroups\(\s*sidebarSessions/);
   });
 
   // 2026-08-12 用户裁决:任务信息按用户勾选顺序显示(先勾时间再勾费用 → 时间在前)。
@@ -370,7 +371,7 @@ describe('远程机器切换入口并入 SidebarTopNav(置顶段上方,固定不
     expect(filterSource).toContain('Icon={Filter}');
     expect(filterSource).toContain('toggleProject(DIALOGUE_FILTER_KEY)');
     expect(filterSource).toContain("t('ccAgent.sidebar.dialogues')");
-    expect(filterSource).toContain('Icon={CircleDot}');
+    expect(filterSource).toContain('Icon={ListChecks}');
     expect(filterSource).toContain('Icon={Folder}');
     expect(filterSource).toContain('Icon={Bot}');
     expect(filterSource).toContain('Icon={CalendarClock}');
@@ -665,7 +666,7 @@ describe('远程机器切换入口并入 SidebarTopNav(置顶段上方,固定不
     // 渲染进程画不到窗口外:菜单高度按 Radix 可用高度收口 + 纵向滚动,
     // 否则 content 的 overflow-hidden 会把超出部分静默切掉(实机丢过「分组」整段)。
     expect(filterSource).toContain(
-      'max-h-[calc(var(--radix-dropdown-menu-content-available-height)-0.75rem)] overflow-y-auto',
+      'max-h-[calc(var(--radix-dropdown-menu-content-available-height)-0.75rem)] overflow-x-hidden overflow-y-auto',
     );
     expect(filterSource).toContain('collisionPadding={8}');
   });

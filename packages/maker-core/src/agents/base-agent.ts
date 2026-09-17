@@ -7,6 +7,7 @@
  * - 持有依赖注入的 deps，但具体使用由子类决定
  */
 
+import type { AutoReviewUserIntent } from './shared/auto-review-decision.js';
 import { LIBRARY_READ_ROOT } from './shared/library-native-read.js';
 import { canonicalSkillPath, isSkillDisabled } from './shared/skill-activation.js';
 
@@ -191,6 +192,10 @@ export type PiNativeApi =
   | 'openai-responses'
   | 'openai-completions'
   | 'google-generative-ai'
+  | 'bedrock-converse-stream'
+  | 'azure-openai-responses'
+  | 'google-vertex'
+  | 'mistral-conversations'
   /** PI's native ChatGPT subscription adapter; not a portable BYOM protocol. */
   | 'openai-codex-responses';
 
@@ -278,6 +283,8 @@ export type PiGatewayModelSpec = Pick<
  * 解析产出;PiAgent 写进 models.json 的独立 provider 块,并按 model→provider 路由 set_model。
  */
 export interface PiNativeProviderSpec {
+  /** Pi adapter identity; the user connection retains its independent ID and credential. */
+  adapterProvider?: string;
   /** PI runtime provider id(slug,禁与网关 provider `cindy` 撞名)。 */
   id: string;
   /** Cindy catalog / persisted provider id; defaults to the runtime id. */
@@ -1087,6 +1094,8 @@ export interface AgentDeps {
    * for host-owned HTTP MCP bridges. Missing hooks keep the old no-session
    * behavior; implementations should be in-memory and best-effort.
    */
+  /** Synchronous local policy registration; no RPC or IO on a send. Returns owner-scoped cleanup. */
+  registerCodexTextOnlyPolicy?: (threadId: string, disabled: () => boolean) => () => void;
   registerCodexMcpThreadContext?: (args: CodexMcpThreadContextArgs) => void;
   unregisterCodexMcpThreadContext?: (
     threadId: string,
@@ -1916,7 +1925,7 @@ export interface MainOwnedSendContext {
  */
 export interface SendOptions {
   readonly [AUTO_REVIEW_SOURCE_CONTENT]?: UserMessage['content'];
-  readonly [AUTO_REVIEW_USER_INTENT]?: string;
+  readonly [AUTO_REVIEW_USER_INTENT]?: AutoReviewUserIntent;
   readonly [INHERITED_CAPABILITY_SELECTION]?: string;
   /** Host-authenticated metadata; never accept an equivalent string-keyed wire field. */
   readonly [MAIN_OWNED_SEND_CONTEXT]?: MainOwnedSendContext;
@@ -1992,6 +2001,8 @@ export interface SendOptions {
    * approval boundary, before MCP auto-approval or permission-mode bypasses.
    */
   turnPermissionPolicy?: TurnPermissionPolicy;
+  /** Host-owned text-only turn. Block every tool before execution, including reads and Full access. */
+  toolsDisabled?: boolean;
 }
 
 export type TurnPermissionOrigin =
@@ -2364,6 +2375,11 @@ export interface AgentSessionHandle {
    * 默认实现为 false (capability 缺失时 host 不该问)。
    */
   isTurnRunning?(): boolean;
+  /** A provider-owned preparatory turn still precedes the accepted user input.
+   * Host timeouts must not resume it with a generic CONTINUE. Read synchronously
+   * before abort clears the provider's existing preparation state.
+   */
+  isPreparingUserTurn?(): boolean;
 }
 
 export abstract class BaseAgent {

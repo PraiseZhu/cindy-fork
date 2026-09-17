@@ -279,6 +279,10 @@ Orca 协同角色名，与 Worker 成对。五语统一保留英文 Lead，不�
 
 用户机器上运行的开源权重模型（经 Ollama / LM Studio 等本机 runtime）。刻意不用「本地模型」——「本地模式」已废弃，指未登录 Cindy 账号；「本机」强调权重和推理都在用户这台电脑上。设置页本机模型分组、Ollama 详情副标题使用。proposed：等本机模型入口上线后再固化。
 
+### Local
+
+用于 Desktop 本机范围标签。translations 中带任务／セッション／세션 的译法仅用于侧栏任务范围标题 ccAgent.sidebar.scopeLocalSessions；设备菜单、新建任务按钮和设备分组标题使用 alsoAllowed 中不带任务的设备标签译法，不可互换。英文统一使用 Local，表示当前电脑或其上的任务；其他语言保留各位置现有表达。不表示本地模型、离线模式或未登录状态，也不约束其他语境中的 local。
+
 ### Mac Login Password
 
 远程桌面原生密码表单中的 macOS 系统账户密码，区别于 Cindy 账号密码；密码不经过 JavaScript。
@@ -391,6 +395,10 @@ dev 版登录页区域徽标上的标签值（DESIGN.md §16.3），四语同值
 
 同账号手机查看和操作电脑真实桌面，独立于 Cindy 内部设备控制授权。
 
+### Direct to computer
+
+远程桌面传输状态，桌面端沿用手机端现有用语。表示画面不经过中转服务器；直连也可能穿过公网 NAT，不能据此标成内网直连。
+
 ### Lock screen control
 
 Windows 远程桌面设置中的系统服务授权能力；不表示支持开机前解密或无人登录。
@@ -407,9 +415,17 @@ Remote desktop display controls; resolution changes the host display, small wind
 
 Remote desktop display controls; resolution changes the host display, small window uses system picture in picture.
 
+### Server screenshot relay
+
+远程桌面退回通过现有设备连接逐张传送截图的方式，桌面端沿用手机端现有用语，避免仅写兼容模式而隐藏实际传输方式。
+
 ### Take over connection
 
 Explicit user action that replaces the current remote desktop viewer; never used for automatic recovery.
+
+### Server video relay
+
+远程桌面使用服务器中转实时视频，桌面与手机沿用同一用语；区别于逐张截图传输。
 
 ### Remote device
 

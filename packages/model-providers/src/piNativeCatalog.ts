@@ -1,4 +1,7 @@
-import piModelCatalogJson from "../catalog/pi-model-catalog.json" with { type: "json" };
+import {
+  PROVIDER_MODEL_CATALOG,
+  providerCatalogForPi,
+} from "./providerModelCatalog.js";
 
 import { defaultEffortForCapabilities } from "./effortResolution.js";
 import { piSupportedEfforts } from "./piThinkingLevels.mjs";
@@ -24,10 +27,25 @@ interface PiCatalogRow {
   cost?: ModelCost;
 }
 
-const PI_CATALOG = piModelCatalogJson as unknown as {
+const PI_CATALOG = providerCatalogForPi() as unknown as {
   generatedAt: string;
   providers: Record<string, PiCatalogRow[]>;
 };
+
+function nativeDefaultEffort(
+  providerId: string,
+  row: PiCatalogRow,
+  efforts: CatalogModel["efforts"],
+) {
+  const declared = PROVIDER_MODEL_CATALOG.providers[providerId]?.find(
+    (model) => model.id === row.id,
+  )?.defaultEffort;
+  // The Pi wire adapter omits Cindy defaults; retain the standard catalog's explicit choice.
+  return declared === null ||
+    (declared !== undefined && efforts.includes(declared))
+    ? declared
+    : defaultEffortForCapabilities(efforts);
+}
 
 function portablePiApi(api: string | undefined): PiModelApi | undefined {
   switch (api) {
@@ -94,7 +112,7 @@ export function piNativeCatalogModels(
           ? { supportsImageInput: row.input.includes("image") }
           : {}),
       },
-      defaultEffort: defaultEffortForCapabilities(efforts),
+      defaultEffort: nativeDefaultEffort(piProviderId, row, efforts),
       status: "active",
       ...(row.input?.includes("image") ? { supportsImageInput: true } : {}),
       ...(row.cost ? { cost: row.cost } : {}),
@@ -105,6 +123,8 @@ export function piNativeCatalogModels(
 
 function wireProtocolToPiCatalogApi(protocol: ProviderWireProtocol): string {
   switch (protocol) {
+    case "google-generative-ai":
+      return "google-generative-ai";
     case "anthropic-messages":
       return "anthropic-messages";
     case "openai-responses":
@@ -160,7 +180,7 @@ export function piNativeCatalogModelDefaults(
       ? { maxOutputTokens: row.maxTokens }
       : {}),
     efforts,
-    defaultEffort: defaultEffortForCapabilities(efforts),
+    defaultEffort: nativeDefaultEffort(piProviderId, row, efforts),
     ...(row.input ? { supportsImageInput: row.input.includes("image") } : {}),
   };
 }

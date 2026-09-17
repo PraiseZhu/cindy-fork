@@ -144,6 +144,22 @@ interface Exemption {
 }
 
 const EXEMPTIONS: Exemption[] = [
+  {
+    file: 'src/renderer/components/chat/MarkdownRenderer.tsx',
+    rule: 'tw-weight',
+    reason: 'DESIGN §3: content strong is absolute 700, including nested strong; ordinary UI weights remain capped at 600.',
+    signatures: [{ match: 'font-bold', expected: 1 }],
+  },
+  {
+    file: 'src/main/windowsBadgeIcon.ts',
+    rule: 'inline-size',
+    reason: 'DESIGN.md §2 Windows taskbar attention badge: 16px 系统图标内的 8–12px 拟合数字',
+    signatures: [
+      { match: 'fontSize …1', expected: 1 },
+      { match: 'fontSize …2', expected: 1 },
+      { match: 'fontSize …8', expected: 1 },
+    ],
+  },
   // 登录/Splash 品牌画布域:Tailwind font-bold ×7 + 内联 700 五处形态
   // (238 直接字面量、290 filled/error 三元、300/310 focus/blur style 赋值、748 内联 style)。
   {

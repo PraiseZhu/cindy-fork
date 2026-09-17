@@ -33,6 +33,9 @@ const MOBILE_DIR = path.join(REPO_ROOT, "apps", "mobile");
 const NOTICES_DIR = path.join(REPO_ROOT, "docs", "legal", "notices");
 const SBOM_DIR = path.join(NOTICES_DIR, "sbom");
 const CARGO_MANIFESTS = [
+  path.join(DESKTOP_DIR, "native", "windows-taskbar", "Cargo.toml"),
+  path.join(DESKTOP_DIR, "native", "xbox-gamepad", "windows-gamepad-helper", "Cargo.toml"),
+  path.join(DESKTOP_DIR, "native", "worklouder", "windows-micro-helper", "Cargo.toml"),
   path.join(DESKTOP_DIR, "native", "remote-desktop", "windows-input", "Cargo.toml"),
   path.join(DESKTOP_DIR, "native", "remote-desktop", "windows-host", "Cargo.toml"),
   path.join(DESKTOP_DIR, "cindy-updater", "src-tauri", "Cargo.toml"),
@@ -866,6 +869,19 @@ function buildDesktopCommonEntries(apacheText, sharpPackageNames) {
       licenseText: readBundledLicense(
         "packages/browser-control-runtime/src/_generated/vendor/fs-safe/LICENSE",
       ),
+    }),
+  );
+
+  // Workspace packages are skipped by npm closure discovery. The vendored
+  // OpenCodex helpers are also bundled into Desktop main, not only the SSH proxy.
+  const opencodex = readJson(path.join(REPO_ROOT, "packages/model-compat/UPSTREAM.json"));
+  entries.push(
+    bundledComponent({
+      name: "OpenCodex compatibility sources (vendored)",
+      version: opencodex.commit,
+      license: "MIT",
+      url: `${opencodex.repository}/tree/${opencodex.commit}`,
+      licenseText: readBundledLicense("packages/model-compat/LICENSE.opencodex"),
     }),
   );
 

@@ -17,7 +17,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { unifiedModelEntries, type ProviderView } from '@cindy/model-providers';
+import { buildUserProvider, unifiedModelEntries, type ProviderView } from '@cindy/model-providers';
 
 class MemLocalStorage {
   private store = new Map<string, string>();
@@ -108,6 +108,39 @@ beforeEach(() => {
   });
   vi.stubGlobal('localStorage', memStorage);
   vi.resetModules();
+});
+
+describe('shared origin readiness', () => {
+  it('does not publish transient pending while a reloaded renderer waits for its owner lock', async () => {
+    memStorage.setItem('xdt:modelVisibilityPrefs:v1.migration-complete.owner.owner-a', '1');
+    memStorage.setItem('xdt:modelVisibilityPrefs:v1.owner.owner-a', JSON.stringify({ 'pi:xd:kept': false }));
+    const locks = new Locks();
+    vi.stubGlobal('navigator', { locks });
+    const release = locks.hold();
+    const prefs = await loadModule();
+    const initialization = prefs.setModelVisibilityOwner('owner-a', 1, 'cloud');
+    await Promise.resolve();
+    expect(prefs.isModelEnabled('pi', 'xd', { id: 'kept' })).toBe(false);
+    expect(syncModelVisibility).not.toHaveBeenCalled();
+    release();
+    await initialization;
+    expect(syncModelVisibility).toHaveBeenCalled();
+    expect(syncModelVisibility).not.toHaveBeenCalledWith('owner-a', 1,
+      expect.anything(), expect.objectContaining({ pending: true }));
+  });
+
+  it('does not repeat owner claims for preference operations while legacy storage stays absent', async () => {
+    setOwnerClaim('owner-a', 1, true, false);
+    ownerClaim.profileOrigin = 'existing';
+    memStorage.setItem('xdt:modelVisibilityPrefs:v1.local-adoption.owner.owner-a', '1');
+    const claim = vi.spyOn(window.electronAPI.maker, 'claimLegacyModelVisibilityOwner');
+    const prefs = await loadModuleForOwner();
+    await prefs.migrateModelVisibilityDefaults('owner-a', 1, []);
+    claim.mockClear();
+    expect(await prefs.setModelVisibility('pi', 'xd', 'kept', false)).toBe(true);
+    expect(claim).not.toHaveBeenCalled();
+    expect(memStorage.getItem('xdt:modelVisibilityPrefs:v1.migration-complete.owner.owner-a')).toBeNull();
+  });
 });
 
 describe('local profile visibility adoption', () => {
@@ -1250,7 +1283,10 @@ describe('compact model defaults upgrade', () => {
     const prefs = await upgrade();
     await prefs.setModelVisibility('pi', 'xd', 'fable-5-1', false);
     if (hasLegacy) expect(memStorage.getItem(markerKey)).toBeNull();
-    else expect(JSON.parse(memStorage.getItem(markerKey)!)).toMatchObject({ eligibleForDefaults: true, scopes: [] });
+    else expect(JSON.parse(memStorage.getItem(markerKey)!)).toMatchObject({
+      eligibleForDefaults: true,
+      scopes: provider.agents.map((agent) => JSON.stringify([provider.id, agent])),
+    });
     setOwnerClaim('owner-a', 1);
     await prefs.migrateModelVisibilityDefaults('owner-a', 1, [provider]);
     expect(prefs.isModelEnabled('pi', 'xd', { id: 'gemini', defaultEnabled: true })).toBe(true);
@@ -1271,4 +1307,26 @@ describe('compact model defaults upgrade', () => {
     expect(await prefs.migrateModelVisibilityDefaults('owner-a', 1, [provider])).toBe(true);
     expect(prefs.isModelEnabled('pi', 'xd', { id: 'gemini', defaultEnabled: true })).toBe(false);
   });
+});
+
+
+it('restores imported native defaults while preserving manual overrides until reset', async () => {
+  const prefs = await import('../state/modelVisibilityPrefs');
+  prefs.setModelVisibilityOwner('owner-a', 1, 'cloud');
+  const agents = ['claude-code', 'codex', 'pi'] as const;
+  const p = buildUserProvider({ id: 'imported-native', name: 'Test', runtimes: Object.fromEntries(
+    agents.map(agent => [agent, { baseUrl: 'https://example.com/v1', models: [{
+      id: 'claude-test', name: 'Claude', api: 'anthropic-messages',
+    }] }]),
+  ) }, { modelRegistry: { schemaVersion: 5, updatedAt: '2026-09-13T00:00:00Z', models: [{
+    id: 'claude-test', name: 'Claude', nativeApi: 'anthropic-messages',
+    routes: [{ providerId: 'imported-native', modelId: 'claude-test', agents: ['claude-code', 'codex'] }],
+  }] } });
+  const enabled = () => agents.map(agent => prefs.isModelEnabled(agent, p.id, p.models[agent]![0]!));
+  expect(enabled()).toEqual([true, false, true]);
+  await prefs.setModelVisibility('pi', p.id, 'claude-test', false);
+  await prefs.setModelVisibility('codex', p.id, 'claude-test', true);
+  expect(enabled()).toEqual([true, true, false]);
+  await prefs.resetModelVisibilities(p.id, agents.map(agent => ({ agent, modelId: 'claude-test' })));
+  expect(enabled()).toEqual([true, false, true]);
 });

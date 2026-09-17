@@ -1,4 +1,7 @@
+import type { ImMessageSource } from '../../shared/imMessageSource';
 import { readBotAuthorizationCard } from '../../shared/botAuthorization';
+import { confirmRemoteUsers, reserveRemoteUser } from './remoteUserHandoff';
+import { readRemoteHistoryCache, remoteHistoryCacheWriter } from './remoteHistoryCache';
 /**
  * makerChatStore — Module-level store for Maker chat (Claude / Codex), sharded by sessionId.
  * ---------------------------------------------------------------------------
@@ -445,6 +448,8 @@ export interface ChatMessage {
    * UI 可以据此显示 spinner / 灰色态（本轮不做，留给后续）。
    */
   isPendingPersist?: boolean;
+  /** Renderer-only position; DB acknowledgement does not yet transfer ownership to history. */
+  localSendPrecedingClientIds?: readonly string[];
   /**
    * 意识拦截(订阅槽①):本条用户消息被某意识钩子拦下(未入库、未起 turn)。
    * 气泡照常显示(未发出),其下渲一条 error 红条,内容 = 意识返回的文本
@@ -467,12 +472,7 @@ export interface ChatMessage {
   /** user 消息投递方式:普通新 turn 或运行中 steer。 */
   delivery?: 'turn' | 'steer';
   /** Hook 来源元数据(IM 平台 + 用户干净原文 + thread 上下文),UserMessage 据此渲染 Cindy 任务卡片。 */
-  hookSource?: {
-    im: string;
-    channelName?: string | null;
-    userText?: string;
-    threadContext?: Array<{ author: string; text: string; isBot?: boolean }>;
-  };
+  hookSource?: ImMessageSource;
   /** /goal 目标设定/更新标记:该 user 消息是目标文案,renderer 在气泡上方渲「目标 / 目标已更新」徽标。 */
   goalBadge?: { updated: boolean };
   /** F7.2: ask_user message fields */
@@ -854,9 +854,13 @@ export interface PendingGhostGrantConfirm {
    * 往目录里存文件;reveal_path = 允许当前 Agent 获得单个媒体仓本机路径;
    * fs_write = 意识申请写工作目录文件(会话 permission 为
    * 逐条确认档时逐次弹,同目录本会话批一次);workspace = 意识申请以该目录
-   * 为工作区在侧边栏创建/复用会话入口(不过户字节)。
+   * 为工作区在侧边栏创建/复用会话入口(不过户字节);
+   * forge_source = Forge 打包/骨架/安装的源码目录在工作目录外;
+   * outside_workdir = 文档/电脑等内置工具读写工作目录外的路径。
    */
-  lane: 'attachments' | 'dir' | 'save_dir' | 'reveal_path' | 'fs_write' | 'workspace';
+  lane: 'attachments' | 'dir' | 'save_dir' | 'reveal_path' | 'fs_write' | 'workspace' | 'forge_source' | 'outside_workdir';
+  sourceTool?: string;
+  operation?: 'read' | 'write';
   items: Array<{
     name: string;
     absPath: string;
@@ -2403,6 +2407,8 @@ export interface SessionChatState {
   taskUpdates?: ReadonlyMap<string, AgentTaskUpdate>;
   isStreaming: boolean;
   agentStatus: AgentStatus;
+  /** A task with an explicit product title must not be auto-renamed from its first message. */
+  autoTitleDisabled?: boolean;
   error: string | null;
   /** 当前 terminal error 是否为可恢复的账号用量限制，以及可识别的重置时刻。 */
   usageLimitRecovery?: UsageLimitRecoveryHint | null;
@@ -4475,7 +4481,8 @@ function applyInputProjection(
       ...locallyDispatchedQueueItems,
     ].reduce<ChatMessage[]>((messages, item) => {
       if (messages.some((message) => message.clientId === item.clientId)) return messages;
-      return [...messages, { ...item.chatMessage, isPendingPersist: true }];
+      const row = { ...item.chatMessage, isPendingPersist: true };
+      return [...messages, remoteProjection ? reserveRemoteUser(row, messages) : row];
     }, dedupedMessages);
     // Codex 原生重连已经被 host 接管、进入凭证切换等待或明确回落时，原生进行态行
     // 必须让位给 Cindy 的接管行、凭证切换状态或终态错误。没有这些字段的普通
@@ -8689,7 +8696,7 @@ function initGlobalListeners(options: GlobalListenerOptions = {}): void {
               // controller while this renderer still owns an offline outbox.
               // Retire it at the authoritative push boundary so reconnect
               // cannot dispatch into a task that no longer exists.
-              removeRemoteSessionActivityEntry(p.sessionId);
+              removeRemoteSessionActivityEntry(p.sessionId, push.deviceId);
               _purgeSession(p.sessionId);
               break;
             }
@@ -8697,7 +8704,7 @@ function initGlobalListeners(options: GlobalListenerOptions = {}): void {
             mirrorSessionFields(p.sessionId, p.patch);
             // 会话在被控端被删除 / 归档 → 同步清掉活动镜像,避免孤儿状态点。
             if (terminal) {
-              removeRemoteSessionActivityEntry(p.sessionId);
+              removeRemoteSessionActivityEntry(p.sessionId, push.deviceId);
             }
           }
           break;
@@ -9506,7 +9513,10 @@ function computeRunningSnapshot(): Map<string, SessionStatusInfo> {
     // (远程会话豁免,见 hasBackgroundAgentWork 注释。)
     const bgTaskRunning = hasBackgroundAgentWork(id, state);
 
-    if (state.agentStatus.isRunning || bgTaskRunning) {
+    // Recovery is still unfinished work. Keep the existing running edge alive
+    // so a dispatch failure can settle as error without another vendor turn.
+    const recoveryPending = !state.error && hasSessionRecoveryPending(id);
+    if (state.agentStatus.isRunning || bgTaskRunning || recoveryPending) {
       // Currently running — always include.
       next.set(id, {
         isRunning: true,
@@ -9624,6 +9634,18 @@ function hasSessionTerminalError(sessionId: string): boolean {
   // side-task 结束保留的旧 error 不算「本次 run 的终态失败」(与 transition
   // snapshot 的豁免同口径, 见 lastStopWasSideTask)。
   return !!s?.error && !s.lastStopWasSideTask;
+}
+
+/** Non-creating read: recovery can outlive the one-generation stop snapshot. */
+function hasSessionRecoveryPending(sessionId: string): boolean {
+  const state = sessions.get(sessionId);
+  return !!state && (
+    state.messages.some((message) =>
+      message.clientId === AUTO_RESUME_PENDING_CLIENT_ID ||
+      message.clientId === CODEX_RECONNECT_PENDING_CLIENT_ID,
+    ) ||
+    (!state.queuePaused && state.pendingQueue.some((item) => item.autoResume === true))
+  );
 }
 
 // 远程回执 error 免疫的兜底探针:活动镜像缺条目(推送丢失 / 未达)时,
@@ -10838,6 +10860,10 @@ function createRemoteHistoryView(sessionId: string) {
     view: undefined, intentQueue: { tail: Promise.resolve() }, isCurrent: () => false,
   };
   const owner = getDataOwnerGeneration();
+  // Begin the protected disk read before taking write tokens for remote requests.
+  const cached = readRemoteHistoryCache<HistoryChatMessage>(deviceId, sessionId);
+  let writeCache: ReturnType<typeof remoteHistoryCacheWriter> | undefined;
+  let persistTimer: ReturnType<typeof setTimeout> | undefined;
   const isCurrent = (): boolean => isDataOwnerGenerationCurrent(owner)
     && remoteProjectsStore.getSessionDeviceId(sessionId) === deviceId
     && remoteHistoryViews.get(sessionId)?.view === view;
@@ -10852,12 +10878,16 @@ function createRemoteHistoryView(sessionId: string) {
   };
   const view = new HistoryViewController<HistoryChatMessage>({
     page: async (before) => {
+      const writer = remoteHistoryCacheWriter(deviceId, sessionId);
       const page = await call<HistoryViewPage<Message>>('local-db:messages:view', [sessionId, { before }]);
       if (page == null) throw new Error('[CHANNEL_NOT_ALLOWED] History view is unavailable');
+      writeCache = writer;
       return { ...page, items: mapHistoryViewMessages(page.items, mapRows) };
     },
     details: async (ref, after) => {
+      const writer = remoteHistoryCacheWriter(deviceId, sessionId);
       const page = await call<HistoryDetailPage<Message>>('local-db:messages:work-details', [sessionId, ref, { after }]);
+      writeCache = writer;
       return { ...page, messages: mapRows(page.messages) };
     },
     expanded: async (refs) => {
@@ -10875,8 +10905,18 @@ function createRemoteHistoryView(sessionId: string) {
   remoteHistoryViews.set(sessionId, entry);
   view.setNetworkAvailable(!isRemoteDeviceMarkedDisconnected(deviceId));
   view.subscribe(() => {
+    if (persistTimer) clearTimeout(persistTimer);
     if (!isCurrent() || !sessions.has(sessionId)) return;
     const snapshot = view.getSnapshot();
+    if (isHistoryViewUnavailable(snapshot.error)) {
+      writeCache = undefined;
+      // Keep the last usable mirror until the raw fallback succeeds and replaces it.
+      setState(sessionId, (state) => ({ ...state, messages: confirmRemoteUsers(state.messages,
+        new Set(state.messages.filter((row) => !row.isPendingPersist).map((row) => row.clientId))) }));
+    } else if (snapshot.ready && !snapshot.loading && !snapshot.error && writeCache) {
+      const writer = writeCache;
+      persistTimer = setTimeout(() => { if (isCurrent()) writer(snapshot); }, 1200);
+    }
     if (!snapshot.ready) {
       if (view.isActive() && isHistoryViewUnavailable(snapshot.error)) {
         void reconcileRemoteMessages(sessionId, { force: true }).catch(() => undefined);
@@ -10886,11 +10926,18 @@ function createRemoteHistoryView(sessionId: string) {
     const available = historyViewLeaves(snapshot.items).flatMap((item) => item.type === 'messages' ? item.messages : []);
     for (const detail of snapshot.details.values()) available.push(...detail.messages);
     setState(sessionId, (state) => ({ ...state, historyLoaded: true,
-      messages: mergeMessages(available, state.messages.filter((message) => !message.cacheHydrated), { addOnly: true }),
+      messages: confirmRemoteUsers(
+        mergeMessages(available, state.messages.filter((message) => !message.cacheHydrated), { addOnly: true }),
+        new Set(available.filter((message) => message.role === 'user').map((message) => message.clientId)),
+      ),
       hasMoreMessages: snapshot.hasMore, isLoadingMore: snapshot.loading,
       oldestMessageId: snapshot.nextCursor,
       historyWindowHasIsland: false,
     }));
+  });
+  void view.restoreCachedView(async () => {
+    const snapshot = await cached;
+    return isCurrent() ? snapshot : null;
   });
   return view;
 }
@@ -10901,6 +10948,7 @@ function ensureInitialMessages(sessionId: string): void {
   if (deviceId && isRemoteDeviceMarkedDisconnected(deviceId)) {
     _historyLoadOrigin.set(sessionId, deviceId);
     noteInputProjectionOrigin(sessionId, deviceId);
+    createRemoteHistoryView(sessionId);
     hydrateRemoteMessagesFromCache(sessionId);
     return;
   }
@@ -11038,9 +11086,7 @@ function ensureInitialMessages(sessionId: string): void {
       const snapshot = view.getSnapshot();
       if (!snapshot.error && snapshot.ready) {
         if (isCurrentHistoryLoad()) {
-          // This path bypasses the raw latest-page cache write. Retire that old
-          // cache instead of persisting an incomplete projection as raw history.
-          clearCachedMessages(historyOriginAtStart!, sessionId);
+          // The structured snapshot is persisted through the same mirror-cache barriers.
           settleCacheHydration(sessionId);
         }
         releaseHistoryFetchIfCurrent(sessionId, historyFetchToken);
@@ -11439,6 +11485,7 @@ async function continuePlanResolutionAfterIdleDiscovery(sessionId: string): Prom
  */
 function reloadMessages(sessionId: string, opts?: { allowCacheHydrate?: boolean }): void {
   discardPendingTextDelta(sessionId);
+  if (!opts?.allowCacheHydrate) invalidateRemoteMessageCache(sessionId);
   // 代际递增:作废 in-flight 的 loadOlderMessages 追页窗口(见 _messagesEpoch 注释)。
   invalidateMessageHistoryWindow(sessionId);
   invalidateHistoryFetch(sessionId);
@@ -11463,7 +11510,6 @@ function reloadMessages(sessionId: string, opts?: { allowCacheHydrate?: boolean 
     // 标记没了而盘上那份还是 rewind 之前的窗口 —— 下次离线冷启动照样 hydrate 出已被软删
     // 的消息(review: codex P1)。所以同时把盘上那份清掉:缓存是纯优化,重载后的首拉
     // 成功时会重新写上。
-    invalidateRemoteMessageCache(sessionId);
   }
   setState(sessionId, (s) => {
     const optimisticRecords = remoteOptimisticSendRecords(sessionId);
@@ -13055,7 +13101,8 @@ function completeRemoteOptimisticMaterialization(
     const messages = state.messages.map((message) => {
       if (message.clientId !== clientId || message.isPendingPersist !== true) return message;
       changed = true;
-      return { ...queued.chatMessage, isPendingPersist: true };
+      return { ...queued.chatMessage, isPendingPersist: true,
+        ...(message.localSendPrecedingClientIds ? { localSendPrecedingClientIds: message.localSendPrecedingClientIds } : {}) };
     });
     return changed ? { ...state, pendingQueue, messages } : state;
   });
@@ -13432,6 +13479,7 @@ function maybeAutoNameUnnamedSession(
   agentKind: 'claude-code' | 'codex' | 'pi',
 ): void {
   if (!seed?.isUserText) return;
+  if (sessions.get(sessionId)?.autoTitleDisabled === true) return;
   scheduleAutoName(sessionId, seed.text, agentKind, true);
 }
 
@@ -13712,7 +13760,9 @@ async function sendMessageCore(
     setState(sessionId, (s) =>
       s.messages.some((m) => m.clientId === queued.clientId)
         ? s
-        : { ...s, messages: [...s.messages, { ...queued.chatMessage, isPendingPersist: true }] },
+        : { ...s, messages: [...s.messages, deviceLinkRemote
+          ? reserveRemoteUser({ ...queued.chatMessage, isPendingPersist: true }, s.messages)
+          : { ...queued.chatMessage, isPendingPersist: true }] },
     );
   }
 
@@ -14106,7 +14156,7 @@ async function steerMessageCore(
     setState(sessionId, (s) =>
       s.messages.some((message) => message.clientId === queued.clientId)
         ? s
-        : { ...s, messages: [...s.messages, { ...queued.chatMessage, isPendingPersist: true }] },
+        : { ...s, messages: [...s.messages, reserveRemoteUser({ ...queued.chatMessage, isPendingPersist: true }, s.messages)] },
     );
   }
   const rollbackOptimisticSteer = () => {
@@ -15125,50 +15175,80 @@ function updateSystemCardData(
   }
 }
 
-/**
- * F7.4/F7.5: Send all user answers for ask-user-question to the main process.
- * Updates the corresponding ask_user message to 'answered' state.
- */
+// Only an accepted Host receipt may commit a question/plan decision. A rejected
+// or lost receipt leaves the existing card and its draft available for retry.
+const questionDecisionsInFlight = new Set<string>();
+
+function submitQuestionDecision(
+  sessionId: string,
+  requestId: string,
+  decision: Record<string, unknown>,
+  onAccepted: () => void,
+): void {
+  const key = JSON.stringify([sessionId, requestId]);
+  if (questionDecisionsInFlight.has(key)) return;
+  questionDecisionsInFlight.add(key);
+  const owner = getDataOwnerGeneration();
+  const epoch = _messagesEpoch.get(sessionId) ?? 0;
+  const authority = _inputProjectionAuthorityEpoch.get(sessionId) ?? 0;
+  const origin = remoteProjectsStore.getSessionDeviceId(sessionId);
+  const isCurrent = () => isDataOwnerGenerationCurrent(owner) &&
+    (_messagesEpoch.get(sessionId) ?? 0) === epoch &&
+    (_inputProjectionAuthorityEpoch.get(sessionId) ?? 0) === authority &&
+    remoteProjectsStore.getSessionDeviceId(sessionId) === origin;
+  bumpInteractionReconcileEpoch(sessionId);
+  void (async () => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const receipt = await Promise.race([
+        makerApiFor(sessionId).resolveInteraction(requestId, decision),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error('Interaction receipt timeout')), 15_000);
+        }),
+      ]);
+      if (!isCurrent()) return;
+      if (receipt?.accepted !== true) throw new Error('Interaction decision was not accepted');
+      bumpInteractionReconcileEpoch(sessionId);
+      onAccepted();
+    } catch (error) {
+      if (!isCurrent()) return;
+      const state = sessions.get(sessionId);
+      // A winning dismissal from another window/Stop remains authoritative.
+      if (state?.pendingAskUser?.requestId !== requestId &&
+        state?.pendingPlanReview?.requestId !== requestId) return;
+      log.warn('Question decision receipt unavailable', error);
+      toast.warning(i18n.t('newChat.permissionPrompt.submissionFailed'));
+    } finally {
+      if (timer) clearTimeout(timer);
+      questionDecisionsInFlight.delete(key);
+    }
+  })();
+}
+
 function answerUserQuestion(
   sessionId: string,
   requestId: string,
   answers: Record<string, string>,
 ): void {
   if (!sessionId) return;
-  const state = getOrCreateState(sessionId);
-  if (!state.pendingAskUser) return;
-  if (state.pendingAskUser.requestId !== requestId) return;
-  bumpInteractionReconcileEpoch(sessionId);
-
-  // Build a human-readable reply summary
-  const replySummary = formatAskUserReply(answers);
-
-  // Update message to answered + clear pendingAskUser
-  setState(sessionId, (s) => ({
+  if (getOrCreateState(sessionId).pendingAskUser?.requestId !== requestId) return;
+  const submittedAnswers = { ...answers };
+  const replySummary = formatAskUserReply(submittedAnswers);
+  submitQuestionDecision(sessionId, requestId, {
+    kind: 'ask_user_question', answers: submittedAnswers,
+  }, () => setState(sessionId, (s) => ({
     ...s,
-    pendingAskUser: null,
-    // F-AUQ-MIN-5: question resolved — reset viewer for the next one.
-    askUserViewerState: 'expanded',
-    // F-AUQ-DRAFT: question resolved — drop the draft so a future question
-    // (potentially with the same questions[] payload) starts at step 1.
-    askUserDraft: null,
+    pendingAskUser: s.pendingAskUser?.requestId === requestId ? null : s.pendingAskUser,
+    askUserViewerState: s.pendingAskUser?.requestId === requestId ? 'expanded' : s.askUserViewerState,
+    askUserDraft: s.pendingAskUser?.requestId === requestId ? null : s.askUserDraft,
     messages: s.messages.map((m) =>
       m.askUserRequestId === requestId && m.askUserStatus === 'pending'
-        ? {
-            ...m,
-            askUserStatus: 'answered' as const,
-            askUserReply: replySummary,
-            askUserAnswers: answers,
-          }
+        ? { ...m, askUserStatus: 'answered' as const, askUserReply: replySummary, askUserAnswers: submittedAnswers }
         : m,
     ),
-  }));
-
-  // 落库只走 main 的 onInteractionResolved。renderer 先写会让多窗口输家/
-  // Stop-vs-answer 的迟到 updateContent 覆盖赢家或 cancelled。
-  makerApiFor(sessionId)
-    .resolveInteraction(requestId, { kind: 'ask_user_question', answers })
-    .catch((err) => log.error('Failed to answer user question:', err));
+  })));
+  // Persistence belongs exclusively to Main's onInteractionResolved, including
+  // local sessions. A late renderer write must not overwrite a winning decision.
 }
 
 function respondToPluginSetup(
@@ -15424,7 +15504,9 @@ function parseGhostGrantConfirmRequest(request: {
     lane !== 'save_dir' &&
     lane !== 'reveal_path' &&
     lane !== 'fs_write' &&
-    lane !== 'workspace'
+    lane !== 'workspace' &&
+    lane !== 'forge_source' &&
+    lane !== 'outside_workdir'
   )
     return null;
   if (typeof request.ghostId !== 'string' || typeof request.ghostName !== 'string') return null;
@@ -15456,6 +15538,10 @@ function parseGhostGrantConfirmRequest(request: {
     ghostId: request.ghostId,
     ghostName: request.ghostName,
     lane,
+    ...(typeof request.sourceTool === 'string' ? { sourceTool: request.sourceTool } : {}),
+    ...(request.operation === 'read' || request.operation === 'write'
+      ? { operation: request.operation }
+      : {}),
     items,
   };
 }
@@ -15495,122 +15581,43 @@ function respondToPlanReview(
   feedback?: string,
 ): void {
   if (!sessionId) return;
-  const state = getOrCreateState(sessionId);
-  if (!state.pendingPlanReview) return;
-  if (state.pendingPlanReview.requestId !== requestId) return;
-
-  const nextStatus = approved ? 'approved' : 'revised';
-  const trimmedFeedback = feedback?.trim() ?? '';
-  bumpInteractionReconcileEpoch(sessionId);
-
-  // Find the clientId for persistence update
-  const planMsg = state.messages.find(
-    (m) =>
-      m.role === 'plan_review' &&
-      m.planReviewRequestId === requestId &&
-      m.planReviewStatus === 'pending',
-  );
-
-  setState(sessionId, (s) => ({
-    ...s,
-    pendingPlanReview: null,
-    // Reset viewer state so the next review starts fresh
-    planViewerState: 'expanded',
-    lastExpandedPlanViewerState: 'expanded',
-    messages: s.messages.map((m) =>
-      m.role === 'plan_review' &&
-      m.planReviewRequestId === requestId &&
-      m.planReviewStatus === 'pending'
-        ? {
-            ...m,
-            planReviewStatus: nextStatus as 'approved' | 'revised',
-            planReviewFeedback: approved ? undefined : trimmedFeedback || undefined,
-          }
-        : m,
-    ),
-  }));
-
-  // Persist answered state via PATCH API。远程会话由被控端权威落库(见 answerUserQuestion 注释),
-  // 控制端跳过避免 dead write;本机会话保持原样。
-  if (planMsg && !isRemoteSession(sessionId)) {
-    messageService
-      .updateContent(sessionId, planMsg.clientId, {
-        requestId,
-        plan: planMsg.planReviewPlan ?? '',
-        planFilePath: planMsg.planReviewFilePath ?? '',
-        status: nextStatus,
-        feedback: approved ? null : trimmedFeedback || null,
-      })
-      .catch((err) => log.error('Failed to persist plan_review state:', err));
-  }
-
-  // Send to maker (InteractionDecision kind: 'plan_review')
-  // approved → behavior='allow' + editedPlan = current pending.plan (用户改过的版本)
-  // 拒绝 → behavior='deny' + reason=feedback (模型读到 feedback 知道为什么被拒)
-  makerApiFor(sessionId)
-    .resolveInteraction(requestId, {
-      kind: 'plan_review',
-      behavior: approved ? 'allow' : 'deny',
-      editedPlan: approved ? state.pendingPlanReview.plan : undefined,
-      reason: approved ? undefined : trimmedFeedback || undefined,
-    })
-    .catch((err) => log.error('Failed to respond to plan review:', err));
+  const pending = getOrCreateState(sessionId).pendingPlanReview;
+  if (pending?.requestId !== requestId) return;
+  const trimmedFeedback = feedback?.trim() || undefined;
+  submitPlanReviewDecision(sessionId, requestId, {
+    kind: 'plan_review',
+    behavior: approved ? 'allow' : 'deny',
+    editedPlan: approved ? pending.plan : undefined,
+    reason: approved ? undefined : trimmedFeedback,
+  }, approved ? 'approved' : 'revised', approved ? undefined : trimmedFeedback);
 }
 
-/**
- * 取消本次计划审阅(issue #475):与批准/反馈并列的第三条出路。
- * 关闭卡片、气泡标 cancelled;决策发 deny + dismissed 标记 ——
- *   - Codex: 结束本轮计划循环,不发修订 turn(dismissed 语义,见 maker-core;下一条消息回常规模式);
- *   - Claude: ExitPlanMode 以默认理由被拒,模型收到后收尾等待,计划模式不变。
- * 持久化与 respondToPlanReview 同款(远程会话由被控端权威落库,本机 PATCH)。
- */
 function cancelPlanReview(sessionId: string, requestId: string): void {
   if (!sessionId) return;
-  const state = getOrCreateState(sessionId);
-  if (!state.pendingPlanReview) return;
-  if (state.pendingPlanReview.requestId !== requestId) return;
-  bumpInteractionReconcileEpoch(sessionId);
+  if (getOrCreateState(sessionId).pendingPlanReview?.requestId !== requestId) return;
+  submitPlanReviewDecision(sessionId, requestId, {
+    kind: 'plan_review', behavior: 'deny', dismissed: true,
+  }, 'cancelled');
+}
 
-  const planMsg = state.messages.find(
-    (m) =>
-      m.role === 'plan_review' &&
-      m.planReviewRequestId === requestId &&
-      m.planReviewStatus === 'pending',
-  );
-
-  setState(sessionId, (s) => ({
+function submitPlanReviewDecision(
+  sessionId: string,
+  requestId: string,
+  decision: Record<string, unknown>,
+  status: 'approved' | 'revised' | 'cancelled',
+  feedback?: string,
+): void {
+  submitQuestionDecision(sessionId, requestId, decision, () => setState(sessionId, (s) => ({
     ...s,
-    pendingPlanReview: null,
-    planViewerState: 'expanded',
-    lastExpandedPlanViewerState: 'expanded',
+    pendingPlanReview: s.pendingPlanReview?.requestId === requestId ? null : s.pendingPlanReview,
+    planViewerState: s.pendingPlanReview?.requestId === requestId ? 'expanded' : s.planViewerState,
+    lastExpandedPlanViewerState: s.pendingPlanReview?.requestId === requestId ? 'expanded' : s.lastExpandedPlanViewerState,
     messages: s.messages.map((m) =>
-      m.role === 'plan_review' &&
-      m.planReviewRequestId === requestId &&
-      m.planReviewStatus === 'pending'
-        ? { ...m, planReviewStatus: 'cancelled' as const, planReviewFeedback: undefined }
+      m.role === 'plan_review' && m.planReviewRequestId === requestId && m.planReviewStatus === 'pending'
+        ? { ...m, planReviewStatus: status, planReviewFeedback: feedback }
         : m,
     ),
-  }));
-
-  if (planMsg && !isRemoteSession(sessionId)) {
-    messageService
-      .updateContent(sessionId, planMsg.clientId, {
-        requestId,
-        plan: planMsg.planReviewPlan ?? '',
-        planFilePath: planMsg.planReviewFilePath ?? '',
-        status: 'cancelled',
-        feedback: null,
-      })
-      .catch((err) => log.error('Failed to persist cancelled plan_review state:', err));
-  }
-
-  makerApiFor(sessionId)
-    .resolveInteraction(requestId, {
-      kind: 'plan_review',
-      behavior: 'deny',
-      dismissed: true,
-    })
-    .catch((err) => log.error('Failed to cancel plan review:', err));
+  })));
 }
 
 /**
@@ -16193,6 +16200,8 @@ function setSessionRuntime(
     planModeEnabled?: boolean;
     /** Seed before SessionView hydrates the DB row; sendMessage reads this for SSH routing. */
     remoteHostId?: string | null;
+    /** Disable automatic first-message renaming for product-owned titled sessions. */
+    autoTitleDisabled?: boolean;
   },
 ): void {
   if (!sessionId) return;
@@ -16203,11 +16212,13 @@ function setSessionRuntime(
     const nextRemoteHostId = Object.hasOwn(opts, 'remoteHostId')
       ? (opts.remoteHostId ?? null)
       : s.remoteHostId;
+    const nextAutoTitleDisabled = opts.autoTitleDisabled ?? s.autoTitleDisabled;
     if (
       s.agentKind === nextAgentKind &&
       s.fastMode === nextFastMode &&
       s.planModeEnabled === nextPlanMode &&
-      s.remoteHostId === nextRemoteHostId
+      s.remoteHostId === nextRemoteHostId &&
+      s.autoTitleDisabled === nextAutoTitleDisabled
     )
       return s;
     return {
@@ -16216,6 +16227,7 @@ function setSessionRuntime(
       fastMode: nextFastMode,
       planModeEnabled: nextPlanMode,
       remoteHostId: nextRemoteHostId,
+      autoTitleDisabled: nextAutoTitleDisabled,
       ...(s.planModeEnabled !== nextPlanMode ? { planModeRev: s.planModeRev + 1 } : {}),
     };
   });
@@ -16361,6 +16373,7 @@ export const makerChatStore = {
   getRunningSnapshot,
   /** F-SB-7: Authoritative terminal-error read, immune to snapshot-generation races. */
   hasSessionTerminalError,
+  hasSessionRecoveryPending,
   wasLastStopSideTask,
   wasLastStopPrivateReply: (sessionId: string): boolean =>
     sessions.get(sessionId)?.lastStopWasPrivateReply === true,
@@ -17494,7 +17507,9 @@ function mapServerMessages(serverMsgs: Message[]): ChatMessage[] {
       const origin = m.agentMeta?.origin;
       const delivery = m.agentMeta?.delivery;
       const goalObjective = m.agentMeta?.goalObjective;
-      const hookSource = m.agentMeta?.hookSource;
+      // Both ingress paths share the Desktop card, but local IM must not opt
+      // older Mobile clients into legacy Hook/system-card semantics.
+      const hookSource = m.agentMeta?.imSource ?? m.agentMeta?.hookSource;
       return {
         clientId: m.clientId,
         role: m.role,

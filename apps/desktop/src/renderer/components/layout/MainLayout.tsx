@@ -32,6 +32,8 @@ import { CredentialStoreBanner } from '@/components/layout/CredentialStoreBanner
 import { useDeviceLinkRemoteProjects } from '@/features/device-link/useDeviceLinkRemoteProjects';
 import { pluginScheduleNavigationState } from '@/features/scheduler/lib/pluginScheduleCreateIntent';
 import { ScheduleSessionIndexOwner } from '@/features/scheduler/components/ScheduleSessionIndexOwner';
+import { AppBadgeAttentionSync } from '@/components/layout/AppBadgeAttentionSync';
+import { usePendingAlertAttention } from '@/hooks/usePendingAlertAttention';
 import { FeatureSidebarSlotProvider } from '@/features/feature-context';
 import { useAppShortcut } from '@/hooks/useAppShortcut';
 import { isAppInteractionLocked } from '@/lib/appInteractionLock';
@@ -95,6 +97,7 @@ import {
 } from '@/features/right-sidebar/lib/sidebarCommands';
 import { requestSessionSwitch } from '@/features/cc-agent/lib/sessionSwitchCommands';
 import { makeFolderPickerNewMakerRouteState } from '@/features/cc-agent/lib/newMakerRouteState';
+import { makeGenericNewMakerRouteState } from '@/features/cc-agent/lib/genericNewMakerRouteState';
 import { resolveSessionRoute } from '@/lib/orcaSessionIdentity';
 import { getBotProfiles } from '@/features/bots/botStore';
 import { botRouteForOwnedSession } from '@/features/bots/botSessionOwners';
@@ -218,6 +221,8 @@ function SidebarPinSpacer({ width }: { width: number }) {
 }
 
 export function MainLayout() {
+  // 未处理报错的恢复与已处置收敛不依赖当前路由或侧栏是否挂载。
+  usePendingAlertAttention();
   const splitGroup = useSplitGroup();
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(getInitialCollapsed);
   const [shareImportRequest, setShareImportRequest] = useState<{
@@ -609,6 +614,7 @@ export function MainLayout() {
         | { type: 'project'; workingDir: string }
         | { type: 'new-session'; workingDir: string }
         | { type: 'share-import'; filePath: string }
+        | { type: 'provider-import'; importId: string }
         | { type: 'settings'; tab: 'voice-input' | 'providers'; connect?: string },
     ) => {
       if (payload.type === 'session') {
@@ -633,6 +639,10 @@ export function MainLayout() {
         openShareImport(payload.filePath);
         return;
       }
+      if (payload.type === 'provider-import') {
+        navigate(`/settings?tab=providers&import=${encodeURIComponent(payload.importId)}`);
+        return;
+      }
       if (payload.type === 'settings') {
         // connect 透传给 ProvidersSection 已有的 ?connect=<providerId> 消费逻辑
         // (可指向内置 provider 或 preset;providers 就绪后一次性消费、消费即从
@@ -647,13 +657,23 @@ export function MainLayout() {
     [navigate, navigateToSession, openShareImport],
   );
   useEffect(() => {
-    const unsubscribe = window.electronAPI.onDeepLinkNavigate(handleDeepLinkPayload);
+    const unsubscribe = window.electronAPI.onDeepLinkNavigate((payload) => {
+      if (payload.type !== 'provider-import') {
+        handleDeepLinkPayload(payload);
+        return;
+      }
+      // Main retains imports through login. Both this wake-up and the mount pull
+      // use the same atomic take, so either ordering navigates only once.
+      void window.electronAPI.takePendingDeepLink().then((pending) => {
+        if (pending) handleDeepLinkPayload(pending);
+      });
+    });
     return unsubscribe;
   }, [handleDeepLinkPayload]);
 
   // pull-on-mount:冷启动期间 (mainWindow 未 ready / renderer 未挂 listener)
   // 缓存在 main 端的 deep link / --open-folder payload, MainLayout 第一次 mount
-  // 时拉一次消费。已运行场景始终返回 null,no-op。
+  // 时拉一次消费。导入唤醒事件也会 take，两者只有先到者拿到 payload。
   //
   // 关键场景:未登录用户右键 "通过 Cindy 打开" → 冷启动 → LoginPage 接管 →
   // 用户走完 Feishu OAuth → MainLayout (在 ProtectedRoute 之内) 第一次 mount →
@@ -1016,7 +1036,9 @@ export function MainLayout() {
           return;
         }
         applicationMenuLog.info('new-maker shortcut invoked, navigating to /cc-agent/new');
-        navigate('/cc-agent/new');
+        navigate('/cc-agent/new', {
+          state: makeGenericNewMakerRouteState(currentPathRef.current.split('?')[0]),
+        });
       })
       .catch((err: unknown) => {
         applicationMenuLog.warn('new-maker shortcut routing failed', err);
@@ -1057,11 +1079,11 @@ export function MainLayout() {
           navigate('/issues');
           break;
         case 'new-maker':
-          // 等价于 CCAgentSidebarUpper.handleNewCCS (sidebar 顶部 "+ New Maker" 按钮):
-          // 单步 navigate 到 /cc-agent/new, draft 状态由 NewMakerDraftRoute 自己读取。
-          // 不重置 workingDir —— sidebar 按钮也不重置, 保留用户上次的目录上下文。
+          // 与侧栏同口径：继承当前任务电脑，同机保留草稿项目。
           applicationMenuLog.info('new-maker invoked, navigating to /cc-agent/new');
-          navigate('/cc-agent/new');
+          navigate('/cc-agent/new', {
+            state: makeGenericNewMakerRouteState(currentPathRef.current.split('?')[0]),
+          });
           break;
         case 'new-maker-shortcut':
           handleNewMakerShortcut();
@@ -1168,7 +1190,9 @@ export function MainLayout() {
       if (action.type !== 'command') return false;
       switch (action.commandId) {
         case 'newTask':
-          navigate('/cc-agent/new');
+          navigate('/cc-agent/new', {
+            state: makeGenericNewMakerRouteState(currentPathRef.current.split('?')[0]),
+          });
           return true;
         case 'settings':
           navigate('/settings?tab=shortcuts');
@@ -1355,6 +1379,7 @@ export function MainLayout() {
       isCollapsed={sidebarPeek.isPeekVisible ? false : isSidebarCollapsed || isRailMode}
     >
       <ScheduleSessionIndexOwner />
+      {!isSecondaryWindow() && <AppBadgeAttentionSync />}
       <div
         ref={rowRef}
         className={cn(

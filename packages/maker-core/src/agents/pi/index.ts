@@ -31,6 +31,7 @@ import { constants as fsConstants, promises as fs } from 'node:fs';
 import { createHash, createHmac, randomBytes } from 'node:crypto';
 import { piSupportedEfforts } from '@cindy/model-providers/pi-thinking-levels';
 import { readPiGlobalContext } from './global-context.js';
+import { scanPiSessionJsonl } from './session-jsonl-scan.js';
 
 /**
  * 轮 40-w4-t5 CRITICAL:远端 agentHome 是 POSIX 路径($HOME/... 或展开后的
@@ -91,7 +92,11 @@ import {
 } from '../base-agent.js';
 import {
   CINDY_BRIDGE_EXTENSION_FILENAME,
+  CINDY_PI_TEXT_ONLY_INPUT_PREFIX,
+  CINDY_PI_TEXT_ONLY_READY_PREFIX,
+  CINDY_PI_TEXT_ONLY_CLOSED_PREFIX,
   CINDY_BRIDGE_EXTENSION_SOURCE } from './cindy-bridge-source.js';
+import { nativeProviderAdapterAliases } from './native-provider-adapter-source.js';
 import {
   CINDY_SUBAGENT_ENV,
   CINDY_SUBAGENT_EXTENSION_FILENAME,
@@ -131,6 +136,9 @@ import {
   createAutoReviewUnavailableNotice,
   extractAutoReviewUserIntent,
   appendAutoReviewUserIntent,
+  normalizeAutoReviewUserIntent,
+  createAutoReviewActionContext,
+  type AutoReviewUserIntent,
   composeAutoReviewIntentWithClarification,
   isSystemPermissionDenialReason,
   formatPermissionDenial,
@@ -195,6 +203,13 @@ import {
   unavailablePiProjectResourceAssembly,
 } from './project-resource-assembly.js';
 import { applyPiBotSkillPolicy } from './bot-skill-policy.js';
+import {
+  assertPiSpawnArgvFitsPlatform,
+  collectPiProjectResourceCliPaths,
+  emptyPiProjectResourceCliPaths,
+  filterPiProjectCliSkills,
+  piProjectResourceCliArgs,
+} from './project-resource-cli.js';
 import {
   createPiTranslateContext,
   disposePiTranslateContext,
@@ -864,11 +879,18 @@ function reconcilePiStartupEffort(requested: Effort | undefined, model: ModelDes
  * 有效)—— 防止误触扩展命令让 Cindy 侧状态镜像脱同步(如 /plan),也堵住未来扩展/包
  * 新增命令带来的攻击面。内部控制路径(setPlanMode 的 /plan)不走本函数。
  */
+function isAuthorizedPiSlashCommandName(
+  name: string,
+  manifest: PiRuntimeCapabilityManifest | undefined,
+): boolean {
+  if (name.startsWith('skill:')) return true;
+  if (manifest?.status !== 'loaded') return false;
+  return manifest.authorizedSlashCommandNames?.includes(name) === true;
+}
+
 function isExecutablePiSlashCommand(text: string, manifest: PiRuntimeCapabilityManifest | undefined): boolean {
   const match = text.trimStart().match(/^\/([^\s]+)(?:\s|$)/);
-  if (!match?.[1]) return false;
-  if (match[1].startsWith('skill:')) return true;
-  return manifest?.status === 'loaded' && manifest.managedPackageCommandNames?.includes(match[1]) === true;
+  return Boolean(match?.[1] && isAuthorizedPiSlashCommandName(match[1], manifest));
 }
 
 function managedExtensionSlashCommandName(
@@ -877,7 +899,7 @@ function managedExtensionSlashCommandName(
 ): string | undefined {
   const match = text.trimStart().match(/^\/([^\s]+)(?:\s|$)/);
   if (!match?.[1] || manifest?.status !== 'loaded') return undefined;
-  if (manifest.managedPackageCommandNames?.includes(match[1]) !== true) return undefined;
+  if (!isAuthorizedPiSlashCommandName(match[1], manifest)) return undefined;
   if (!manifest.commands.some((command) => command.name === match[1] && command.source === 'extension')) {
     return undefined;
   }
@@ -3202,6 +3224,13 @@ export class PiAgent extends BaseAgent {
       runtimeDir,
       `perm-${sid ?? `anon-${process.pid}-${Date.now()}`}-${runtimeInstanceId}${remote ? `-${permissionSnapshotHash}` : ''}.json`,
     );
+    let activeToolsDisabled = false;
+    let textOnlyPolicyReady = false;
+    const textOnlyInput = (text: string): string => {
+      if (!activeToolsDisabled) return text;
+      if (!textOnlyPolicyReady) throw new Error('Pi text-only input policy is unavailable.');
+      return `${CINDY_PI_TEXT_ONLY_INPUT_PREFIX}${runtimeInstanceId}\n${text}`;
+    };
     // 子代理运行期快照(model + provider)。与权限档同机制:文件而非 env —— env 在 spawn
     // 时定型,会话中途 setModel 后子代理会继续用启动时的旧模型(greptile P1),而 BYOM /
     // 本地 provider 不一起传还会让同名模型落到错误 endpoint(codex P2,pi-harness §3 要求
@@ -3570,6 +3599,7 @@ export class PiAgent extends BaseAgent {
       ? [] : [...(this.deps.getDisabledSkillPaths?.() ?? [])];
     let disabledSkillLaunch = snapshotDisabledSkillLaunch(disabledSkillPaths);
     const disabledSkillSnapshot = disabledSkillLaunch.identities;
+    const loadProjectResourcesInPlace = !reviewMode && !opts.botRuntimeProfile && !opts.remoteHostId;
     let projectResourceAssembly = unavailablePiProjectResourceAssembly(
       reviewMode ? 'review-mode-project-resources-disabled' : 'approval-resolver-unavailable',
     );
@@ -3582,7 +3612,11 @@ export class PiAgent extends BaseAgent {
         });
         projectResourceAssembly = await assembleApprovedPiProjectResources(trustInput, opts.workingDir);
         projectResourceAssembly = filterPiDisabledProjectSkills(projectResourceAssembly, currentDisabledSkillLaunchPaths(disabledSkillLaunch));
-        projectResourceAssembly = await stageApprovedPiProjectResources(projectResourceAssembly, configHome);
+        // In-place CLI loading uses original repo paths. Staging copies are unused
+        // there and would recopy every Skill asset on each startSession.
+        if (!loadProjectResourcesInPlace) {
+          projectResourceAssembly = await stageApprovedPiProjectResources(projectResourceAssembly, configHome);
+        }
       } catch {
         projectResourceAssembly = unavailablePiProjectResourceAssembly('approval-resolver-failed');
         this.deps.logger.warn('pi project approval resolver failed closed', {
@@ -3677,13 +3711,27 @@ export class PiAgent extends BaseAgent {
       typeof entry === 'string' ? entry : entry.source
     ));
 
+    // Local root tasks load project skills/prompts/extensions in place via
+    // explicit CLI flags. Keep --no-approve so `.pi/settings.json` is unread.
+    const collectedProjectResources = loadProjectResourcesInPlace
+      ? collectPiProjectResourceCliPaths(opts.workingDir)
+      : emptyPiProjectResourceCliPaths();
+    const projectResourceCli = loadProjectResourcesInPlace
+      ? {
+          ...collectedProjectResources,
+          skills: filterPiProjectCliSkills(
+            collectedProjectResources.skills,
+            currentDisabledSkillLaunchPaths(disabledSkillLaunch),
+          ),
+        }
+      : collectedProjectResources;
+
     const args = [
       '--mode',
       'rpc',
-      // --no-approve remains the hard project-resource gate. Only a local
-      // runtime with Main-supplied user package roots omits --no-extensions, so
-      // Pi can discover those runtime-settings packages without trusting the
-      // task's .pi/extensions or .pi/settings.json.
+      // --no-approve remains the hard project-settings gate. Explicit --skill /
+      // --prompt-template / --extension pass original in-repo paths without
+      // trusting `.pi/settings.json` or auto-installing project packages.
       '--no-approve',
       ...(nativePackagePaths.length === 0 ? ['--no-extensions'] : []),
       '--session-dir',
@@ -3702,8 +3750,23 @@ export class PiAgent extends BaseAgent {
       bridgeExtensionPath,
       ...(localSubagentSupported ? ['--extension', subagentExtensionPath] : []),
       ...(!reviewMode && planModeExtAvailable ? ['--extension', planModeExtPath] : []),
-      ...botSkillSelection.explicitSkillPaths.flatMap((skillPath) => ['--skill', skillPath]),
+      ...(loadProjectResourcesInPlace
+        ? piProjectResourceCliArgs(projectResourceCli)
+        : botSkillSelection.explicitSkillPaths.flatMap((skillPath) => ['--skill', skillPath])),
     ];
+    try {
+      assertPiSpawnArgvFitsPlatform(args);
+    } catch (error) {
+      try {
+        disposeSessionCtx?.();
+      } catch {
+        /* best-effort: cleanup failure must not mask argv budget failure */
+      }
+      disposeSessionCtx = undefined;
+      cleanupConfigHome();
+      cleanupRuntimeFiles();
+      throw error;
+    }
 
     const queue: AsyncQueue<AgentEvent> = createAsyncQueue<AgentEvent>();
     const ctx: PiTranslateContext = createPiTranslateContext(this.deps.logger);
@@ -3734,7 +3797,8 @@ export class PiAgent extends BaseAgent {
     let mutableProviderId: string | null | undefined = opts.providerId ?? authProviderId;
     let activeEffortSnapshot = initialEffortSnapshot;
     let mutableEffort: Effort | null = startupEffort ?? null;
-    let currentAutoReviewIntent = '';
+    let currentAutoReviewIntent: AutoReviewUserIntent = '';
+    const autoReviewActionContext = createAutoReviewActionContext();
     const autoReviewContext = () => activeTurnPermissionPolicy?.autoReviewContext
       ?? (activeTurnPermissionPolicy?.origin.kind === 'im'
         ? { requesterAuthority: 'unknown' as const, source: 'direct' as const }
@@ -3743,8 +3807,9 @@ export class PiAgent extends BaseAgent {
     let currentAutoReviewAuthority: ReturnType<typeof autoReviewContext> | null;
     const priorAutoReviewIntent = () => JSON.stringify(currentAutoReviewAuthority ?? null) === JSON.stringify(autoReviewContext() ?? null) ? currentAutoReviewIntent : '';
     const autoReviewDecisionCache = new Map<string, Promise<AutoReviewDecision>>();
-    const setAutoReviewIntent = (content: UserMessage['content'], source = { authority: currentAutoReviewAuthority }): void => {
-      currentAutoReviewIntent = extractAutoReviewUserIntent(content);
+    const setAutoReviewIntent = (content: AutoReviewUserIntent, source = { authority: currentAutoReviewAuthority }): void => {
+      autoReviewActionContext.advance(typeof content !== 'string' && JSON.stringify(currentAutoReviewAuthority ?? null) === JSON.stringify(source.authority ?? null));
+      currentAutoReviewIntent = normalizeAutoReviewUserIntent(content);
       currentAutoReviewAuthority = source.authority && { ...source.authority };
       autoReviewDecisionCache.clear();
       // 每条新用户消息 = 新一轮,提示重新武装。ErrorBanner 那份只活到下一条非 error 事件
@@ -3862,6 +3927,7 @@ export class PiAgent extends BaseAgent {
         providerId: mutableProviderId,
         model: mutableModel,
         userIntent: currentAutoReviewIntent,
+        precedingBlockedActions: autoReviewActionContext.precedingBlockedActions,
         ...(currentAutoReviewAuthority ? { authorizationContext: currentAutoReviewAuthority } : {}),
         action,
         workspaceRoots: [opts.workingDir, ...mutableExtraDirs, ...mutableWritableDirs],
@@ -3874,7 +3940,7 @@ export class PiAgent extends BaseAgent {
         pending = resolveAutoReviewDecision(request, this.deps.reviewAutoPermissionAction);
         autoReviewDecisionCache.set(cacheKey, pending);
       }
-      return pending.then((decision) => (
+      return pending.then<AutoReviewDecision>((decision) => (
         autoReviewDecisionCache.get(cacheKey) !== pending
           ? { verdict: 'block', reason: 'User instructions changed; retry against the latest authorization.' }
           : directoryGeneration === autoReviewDirectoryGeneration
@@ -3884,7 +3950,12 @@ export class PiAgent extends BaseAgent {
               verdict: 'block',
               reason: 'Directory permissions changed; retry with the current scope.',
             }
-      ));
+      )).then((decision) => {
+        if (autoReviewDecisionCache.get(cacheKey) === pending && directoryGeneration === autoReviewDirectoryGeneration) {
+          autoReviewActionContext.record(action, decision);
+        }
+        return decision;
+      });
     };
     let closed = false;
     /**
@@ -4236,6 +4307,7 @@ export class PiAgent extends BaseAgent {
       let input: Record<string, unknown> = {};
       let resolvedWritePath: string | null | undefined;
       let resolvedWritableRoots: string[] | null | undefined;
+      let controlPlaneWrite = false;
       const approvalPayload = approval.method === 'input'
         ? approval.placeholder
         : approval.message;
@@ -4246,6 +4318,7 @@ export class PiAgent extends BaseAgent {
             input?: unknown;
             resolvedWritePath?: unknown;
             resolvedWritableRoots?: unknown;
+            controlPlaneWrite?: unknown;
           };
           if (typeof payload.toolName === 'string' && payload.toolName) toolName = payload.toolName;
           if (payload.input && typeof payload.input === 'object' && !Array.isArray(payload.input)) {
@@ -4266,6 +4339,7 @@ export class PiAgent extends BaseAgent {
               ? payload.resolvedWritableRoots as string[]
               : null;
           }
+          controlPlaneWrite = payload.controlPlaneWrite === true;
         } catch {
           /* malformed permission payload remains a generic, deny-by-default prompt */
         }
@@ -4294,7 +4368,12 @@ export class PiAgent extends BaseAgent {
       const requestUserDecision = async (
         options: { forcePrompt: boolean; unavailableHandoff?: boolean },
       ): Promise<PiPermissionResolution | null> => {
-        if (permissionMode === 'bypassPermissions' && !adopted && !turnPolicyForcePrompt) return 'allow';
+        if (
+          permissionMode === 'bypassPermissions'
+          && !adopted
+          && !turnPolicyForcePrompt
+          && !options.forcePrompt
+        ) return 'allow';
         // Session wires the resolver immediately after handle creation. Keep a
         // very fast Ask/gray request pending until that wiring exists instead
         // of turning startup ordering into a denial. The runner timeout remains
@@ -4310,7 +4389,9 @@ export class PiAgent extends BaseAgent {
             resolve(resolution);
           };
           unregister = registerPendingPrompt(requestId, {
-            forcePrompt: adopted || turnPolicyForcePrompt,
+            // control-plane writes must keep forcePrompt across a Full Access
+            // hot-switch; otherwise dismissAllPendingPrompts would allow them.
+            forcePrompt: options.forcePrompt || adopted || turnPolicyForcePrompt,
             ...(options.unavailableHandoff ? { unavailableHandoff: true } : {}),
             // Durable child: losing the surface parks the question.
             deferWhenSurfaceLost: true,
@@ -4377,6 +4458,7 @@ export class PiAgent extends BaseAgent {
       const resolveConfirmation = async (): Promise<PiPermissionResolution | null> => {
         // Review resumed child evidence against current user authorization.
         // Other modes retain the independent confirmation for adopted work.
+        if (controlPlaneWrite) return requestUserDecision({ forcePrompt: true });
         if (adopted && permissionMode !== 'auto') return requestUserDecision({ forcePrompt: true });
         if (permissionMode === 'bypassPermissions') {
           return turnPolicyForcePrompt ? 'system-deny' : 'allow';
@@ -5016,6 +5098,7 @@ export class PiAgent extends BaseAgent {
         ...(proxyEnv ?? {}),
         // BYOM 原生 provider 的 api keys(键名对应 spec.apiKeyEnvVar,models.json 用 $ENV 引用)。
         ...nativeEnv,
+        CINDY_PI_NATIVE_PROVIDER_ADAPTERS: JSON.stringify(nativeProviderAdapterAliases(nativeProviders)),
         // 外部 MCP header 真值只经 env 交给 bridge extension；host 生成独立名字，
         // 且这些键已进入 piSecretEnvNames，LLM 可调用的 bash 子进程拿不到。
         ...mcpEnv,
@@ -5027,6 +5110,7 @@ export class PiAgent extends BaseAgent {
         PI_CODING_AGENT_DIR: configHome,
         [PI_BASH_PACKAGE_HOME_ENV]: bashPackageHome,
         CINDY_PI_PERMISSION_FILE: permissionFile,
+        CINDY_PI_TURN_TOOL_POLICY: remote ? '' : runtimeInstanceId,
         ...(allowPiPackageManagement ? { [PI_PACKAGE_MANAGEMENT_ENV]: piPackageManagementToken } : {}),
         // 轮 40-w4-t12 HIGH-1:review-only 启动标记 —— 独立于权限文件(文件损坏/
         // 缺失时 bridge 仍保留 reviewOnly 语义, 不降级成普通 ask;见
@@ -5106,6 +5190,16 @@ export class PiAgent extends BaseAgent {
         onEvent: (event: PiRpcEvent) => {
           if (event.type === 'agent_start' || event.type === 'agent_settled') {
             piAgentLifecycleSequence += 1;
+          }
+          if (!remote && event.type === 'extension_ui_request' && event.method === 'notify') {
+            if (event.message === `${CINDY_PI_TEXT_ONLY_READY_PREFIX}${runtimeInstanceId}`) {
+              textOnlyPolicyReady = true;
+              return;
+            }
+            if (event.message === `${CINDY_PI_TEXT_ONLY_CLOSED_PREFIX}${runtimeInstanceId}`) {
+              textOnlyPolicyReady = false;
+              return;
+            }
           }
           if (event.type === 'extension_ui_request') {
             this.handleExtensionUiRequest(event, proc, () => ({
@@ -5324,7 +5418,39 @@ export class PiAgent extends BaseAgent {
       throw err;
     }
 
-    const readPersistedPlanMode = async (): Promise<boolean | null> => {
+    let localSessionScanCache:
+      | { file: string; mtimeMs: number; size: number; scan: NonNullable<Awaited<ReturnType<typeof scanPiSessionJsonl>>> }
+      | null = null;
+
+    const readLocalSessionScan = async () => {
+      // 远端 sessionFile 不在本机;带图长任务的 get_entries 会撑破 16 Mi 字符 JSONL 帧。
+      if (remote || typeof sdkSessionId !== 'string' || !path.isAbsolute(sdkSessionId)) return null;
+      try {
+        const stat = await fs.stat(sdkSessionId);
+        if (
+          localSessionScanCache
+          && localSessionScanCache.file === sdkSessionId
+          && localSessionScanCache.mtimeMs === stat.mtimeMs
+          && localSessionScanCache.size === stat.size
+        ) {
+          return localSessionScanCache.scan;
+        }
+        const scan = await scanPiSessionJsonl(sdkSessionId);
+        if (scan) {
+          localSessionScanCache = {
+            file: sdkSessionId,
+            mtimeMs: stat.mtimeMs,
+            size: stat.size,
+            scan,
+          };
+        }
+        return scan;
+      } catch {
+        return null;
+      }
+    };
+
+    const readPersistedPlanModeFromEntries = async (): Promise<boolean | null> => {
       const entriesResp = await proc.request({ type: 'get_entries' });
       if (!entriesResp.success) return null;
       const entries =
@@ -5346,24 +5472,36 @@ export class PiAgent extends BaseAgent {
       return false;
     };
 
+    const readPersistedPlanMode = async (): Promise<boolean | null> => {
+      const local = await readLocalSessionScan();
+      if (local) return local.lastPlanModeEnabled ?? false;
+      return readPersistedPlanModeFromEntries();
+    };
+
+    const readPiUserEntryIdsFromEntries = async (): Promise<Set<string> | null> => {
+      const response = await proc.request({ type: 'get_entries' });
+      if (!response.success) return null;
+      const data = typeof response.data === 'object' && response.data !== null ? (response.data as Record<string, unknown>) : null;
+      // malformed success 不能当“空历史”，否则下一次正常读取会把任意既有 user entry
+      // 误判成刚发送的消息并串错附件。
+      if (!Array.isArray(data?.entries)) return null;
+      const entries = data.entries;
+      const ids = new Set<string>();
+      for (const raw of entries) {
+        if (typeof raw !== 'object' || raw === null) continue;
+        const entry = raw as Record<string, unknown>;
+        if (entry.type !== 'message' || typeof entry.id !== 'string' || entry.id.length === 0) continue;
+        const message = typeof entry.message === 'object' && entry.message !== null ? (entry.message as Record<string, unknown>) : null;
+        if (message?.role === 'user') ids.add(entry.id);
+      }
+      return ids;
+    };
+
     const readPiUserEntryIds = async (): Promise<Set<string> | null> => {
       try {
-        const response = await proc.request({ type: 'get_entries' });
-        if (!response.success) return null;
-        const data = typeof response.data === 'object' && response.data !== null ? (response.data as Record<string, unknown>) : null;
-        // malformed success 不能当“空历史”，否则下一次正常读取会把任意既有 user entry
-        // 误判成刚发送的消息并串错附件。
-        if (!Array.isArray(data?.entries)) return null;
-        const entries = data.entries;
-        const ids = new Set<string>();
-        for (const raw of entries) {
-          if (typeof raw !== 'object' || raw === null) continue;
-          const entry = raw as Record<string, unknown>;
-          if (entry.type !== 'message' || typeof entry.id !== 'string' || entry.id.length === 0) continue;
-          const message = typeof entry.message === 'object' && entry.message !== null ? (entry.message as Record<string, unknown>) : null;
-          if (message?.role === 'user') ids.add(entry.id);
-        }
-        return ids;
+        const local = await readLocalSessionScan();
+        if (local) return local.userEntryIds;
+        return await readPiUserEntryIdsFromEntries();
       } catch (error) {
         this.deps.logger.warn('pi user-entry snapshot failed (attachment link unavailable)', {
           message: error instanceof Error ? error.message : String(error),
@@ -5375,7 +5513,7 @@ export class PiAgent extends BaseAgent {
     const reportAcceptedPiUserEntry = async (before: Set<string> | null, callback: SendOptions['onTranscriptUserEntry']): Promise<void> => {
       if (!before || !callback) return;
       // prompt RPC 在 Pi 的 preflight acceptance 点返回，entry 紧接着才 append。短轮询
-      // get_entries，按“此前不存在的 user entry”取稳定 id；捕获失败只影响附件分支恢复，
+      // session JSONL / get_entries，按“此前不存在的 user entry”取稳定 id；捕获失败只影响附件分支恢复，
       // 不能把已被 Pi 接受的发送伪报成失败。
       for (let attempt = 0; attempt < 25; attempt += 1) {
         const current = await readPiUserEntryIds();
@@ -5433,13 +5571,24 @@ export class PiAgent extends BaseAgent {
         generation,
         stage,
       );
+      const managedPackageRoots = [...nativePackageRoots, ...managedPackageResources.packageRoots];
       const managedPackageCommandNames = identifyManagedPiPackageCommandNames(
         capturedManifest.commands,
-        [...nativePackageRoots, ...managedPackageResources.packageRoots],
+        managedPackageRoots,
+      );
+      const authorizedSlashCommandNames = identifyManagedPiPackageCommandNames(
+        capturedManifest.commands,
+        [
+          ...managedPackageRoots,
+          ...projectResourceCli.skills,
+          ...projectResourceCli.promptTemplates,
+          ...projectResourceCli.extensions,
+        ],
       );
       const manifest = {
         ...capturedManifest,
         managedPackageCommandNames,
+        authorizedSlashCommandNames,
         managedPackageSkills: snapshotManagedPiPackageSkills(
           managedPackageResources.skills,
           capturedManifest.commands,
@@ -5710,13 +5859,13 @@ export class PiAgent extends BaseAgent {
 
       // plan 镜像与 pi 持久态对齐(resume 关键):pi 的 plan-mode 扩展在 session_start 会从
       // session entry 自恢复 planModeEnabled,但不发 notify。若镜像固定为 false 而 pi 实为 true,
-      // 由于 /plan 是 toggle + setPlanMode 幂等短路,会导致方向反转或关不掉。故从 get_entries
-      // 读最后一条 plan-mode custom entry 的 enabled 校正镜像(get_entries 已验证暴露该 entry)。
+      // 由于 /plan 是 toggle + setPlanMode 幂等短路,会导致方向反转或关不掉。故从本机 session
+      // JSONL(远端仍走 get_entries)读活动分支上最后一条 plan-mode custom entry 的 enabled 校正镜像。
       if (planModeExtAvailable) {
         try {
           planModeActive = await readPersistedPlanMode();
           if (planModeActive === null) {
-            this.deps.logger.warn('pi plan-mode state sync: get_entries failed or returned an invalid state; plan mirror remains unknown');
+            this.deps.logger.warn('pi plan-mode state sync: persisted session scan failed; plan mirror remains unknown');
           }
         } catch (err) {
           planModeActive = null;
@@ -6424,6 +6573,12 @@ export class PiAgent extends BaseAgent {
       // Full Access 下 fail-closed 拒绝带策略的 send(与 capability
       // turnPermissionPolicy.unsupportedPermissionModes 一致,也与 CC/Codex 同口径)。
       validateSendOptions(sendOpts: SendOptions) {
+        if (sendOpts.toolsDisabled && remote) {
+          throw new Error('Host text-only Pi turns require a local runtime, not a shared remote daemon.');
+        }
+        if (sendOpts.toolsDisabled && !textOnlyPolicyReady) {
+          throw new Error('Pi text-only input policy is unavailable.');
+        }
         if (sendOpts.turnPermissionPolicy && permissionMode === 'bypassPermissions') {
           throw new TurnPermissionPolicyUnsupportedError('pi', permissionMode);
         }
@@ -6443,6 +6598,12 @@ export class PiAgent extends BaseAgent {
         let promptRequestStarted = false;
         let reviewIntentUpdated = false;
         try {
+          const nextToolsDisabled = sendOpts?.toolsDisabled === true;
+          if ((ctx.isStreaming || ctx.pendingHostTurnStartToken) && activeToolsDisabled !== nextToolsDisabled) {
+            throw new Error('Cannot change the tool policy while a Pi turn is active.');
+          }
+          activeToolsDisabled = nextToolsDisabled;
+          rejectIfCancelled(sendOpts, 'send');
           if (reviewMode) {
             await assertReviewMessageContentPaths(message.content, opts.workingDir, reviewReadGrants);
           }
@@ -6484,7 +6645,7 @@ export class PiAgent extends BaseAgent {
           }
           const command: Record<string, unknown> = {
             type: 'prompt',
-            message: escapeLeadingSlashCommand(promptText, runtimeCapabilityManifest),
+            message: textOnlyInput(escapeLeadingSlashCommand(promptText, runtimeCapabilityManifest)),
           };
           if (images.length > 0) command.images = images;
           // send 语义 = 排队开新 turn;pi streaming 中裸 prompt 会被拒,补 followUp。
@@ -8020,6 +8181,7 @@ export class PiAgent extends BaseAgent {
       let resolvedCredentialPaths: string[] | null | undefined;
       let resolvedWritePath: string | null | undefined;
       let resolvedWritableRoots: string[] | null | undefined;
+      let controlPlaneWrite = false;
       try {
         const rawPayload = method === 'input' ? event.placeholder : event.message;
         const payload = JSON.parse(typeof rawPayload === 'string' ? rawPayload : '{}') as {
@@ -8028,6 +8190,7 @@ export class PiAgent extends BaseAgent {
           resolvedCredentialPaths?: unknown;
           resolvedWritePath?: unknown;
           resolvedWritableRoots?: unknown;
+          controlPlaneWrite?: unknown;
         };
         if (typeof payload.toolName === 'string' && payload.toolName.length > 0) toolName = payload.toolName;
         if (payload.input && typeof payload.input === 'object') input = payload.input as Record<string, unknown>;
@@ -8053,6 +8216,7 @@ export class PiAgent extends BaseAgent {
             ? payload.resolvedWritableRoots as string[]
             : null;
         }
+        controlPlaneWrite = payload.controlPlaneWrite === true;
       } catch {
         /* keep defaults */
       }
@@ -8254,6 +8418,13 @@ export class PiAgent extends BaseAgent {
         // 本轮策略命中时不吃 Full Access 短路:policy + bypassPermissions 已在 send 预检
         // 拒绝、且 policy turn 持 host lease 堵死热切到 bypass,故此处 turnPolicyForcePrompt
         // 为真本不可达;仍显式 fail-closed,避免任一上游闸门被绕过就静默放行破坏性调用。
+        if (controlPlaneWrite) {
+          sendPermissionResolution(await requestUserConfirmation({
+            forcePrompt: true,
+            requireExplicitDecision: true,
+          }));
+          return;
+        }
         if (isFullAccessNow() && !turnPolicyForcePrompt) {
           sendPermissionResolution('allow');
           return;

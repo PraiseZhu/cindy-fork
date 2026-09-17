@@ -1,6 +1,8 @@
 {
   "failedScheduleNotice": {
-    "text": "此前有定时任务未完成，可查看运行记录。",
+    "text": "此前有自动运行失败。",
+    "precheck": "自动检查暂时受阻。",
+    "rateLimited": "自动检查暂时受阻：请求限流。",
     "dismissTitle": "关闭历史失败提示"
   },
   "common": {
@@ -354,6 +356,7 @@
     "worktreeCleanupPending": "上一次 worktree 仍待回收，请重新连接设备后再试。"
   },
   "menu": {
+    "details": "任务详情",
     "chipPinned": "已置顶",
     "chipArchived": "已归档",
     "chipReadOnly": "只读",
@@ -416,7 +419,6 @@
       "today": "今日已用",
       "unavailable": "暂未获取",
       "quotaUnavailable": "暂未获取账号配额",
-      "accountOnly": "ChatGPT 账号配额，未确认本任务使用此套餐",
       "lastUpdated": "上次更新 {{time}}",
       "taskUsage": "本任务用量",
       "taskValue": "本任务价值",

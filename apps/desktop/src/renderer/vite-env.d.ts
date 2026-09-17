@@ -1167,6 +1167,7 @@ type ElectronLocalDbSessionListUsageOptions = Omit<
 };
 
 interface ElectronAPI {
+  modelFavoritesHost: import('../shared/modelFavoritesSync').ModelFavoritesHostApi;
   routines: import('../shared/routines').RoutinesAPI;
   platform: string;
   /** 当前 Desktop 构建是否具备 Beta 更新渠道。 */
@@ -1901,6 +1902,8 @@ interface ElectronAPI {
   };
 
   windowBehavior: {
+    getLoginItem: () => Promise<import('../shared/loginItem').LoginItemState>;
+    setLoginItem: (enabled: boolean) => Promise<import('../shared/loginItem').LoginItemState>;
     setSwallowActivationClick: (enabled: boolean) => Promise<{ ok: true }>;
     getWindowsCloseBehavior: () => Promise<'quit' | 'tray' | null>;
     setWindowsCloseBehavior: (behavior: 'quit' | 'tray') => Promise<'quit' | 'tray'>;
@@ -2531,6 +2534,8 @@ interface ElectronAPI {
   onAppUpdateProgress: (callback: (payload: AppUpdateProgressPayload) => void) => () => void;
   fileBrowser: {
     listDir: (params: {
+      /** Return all ordinary entries without presentation filtering. */
+      includeIgnored?: boolean;
       /** 非空 = SSH remote 会话,操作经远端 file-service 执行(main 侧路由)。 */
       remoteHostId?: string | null;
       workdir: string;
@@ -2683,6 +2688,14 @@ interface ElectronAPI {
       }) => void,
     ) => () => void;
     /** 聊天流文件取回:远端绝对路径 → 本地缓存副本(进度经 onTransferProgress,relPath 键 = absPath)。 */
+    previewHtml: (params: {
+      origin:
+        | { kind: 'local' }
+        | { kind: 'device'; deviceId: string }
+        | { kind: 'ssh'; remoteHostId: string };
+      workdir: string;
+      absPath: string;
+    }) => Promise<{ ok: true; url: string }>;
     chatFetch: (params: {
       origin: { kind: 'device'; deviceId: string } | { kind: 'ssh'; remoteHostId: string };
       workdir: string;
@@ -2804,9 +2817,11 @@ interface ElectronAPI {
     ) => Promise<{ configured: boolean; enabled: boolean; maskedKey?: string }>;
     clear: () => Promise<{ configured: boolean; enabled: boolean }>;
   };
-  /** 将对应 session 标记为需要关注，显示 Dock/taskbar app badge。 */
+  /** 主窗口投影全部任务的关注总数；独立于通知事件及逐任务已读回执。 */
+  notificationSetAppAttentionCount: (snapshot: import('../shared/sessionAttention').AppAttentionSnapshot) => Promise<void>;
+  /** 将对应 session 标记为需要关注，同步灵动岛状态。 */
   notificationMarkSessionAttention: (sessionId: string) => Promise<void>;
-  /** 用户查看对应 session 后，清除系统级 Dock/taskbar attention badge。 */
+  /** 用户查看或处置对应 session 后，同步逐任务已读回执。 */
   notificationClearSessionAttention: (
     sessionId: string,
     intent?: 'explicit' | 'passive',
@@ -2890,14 +2905,15 @@ interface ElectronAPI {
         | { type: 'project'; workingDir: string }
         | { type: 'new-session'; workingDir: string }
         | { type: 'share-import'; filePath: string }
+        | { type: 'provider-import'; importId: string }
         | { type: 'settings'; tab: 'voice-input' | 'providers'; connect?: string },
     ) => void,
   ) => () => void;
 
   /**
    * 冷启动期间 (mainWindow 未 ready / renderer 未挂 listener) 缓存的 deep link /
-   * --open-folder payload。MainLayout mount 后调一次,take 一次清空——已运行
-   * 场景始终返回 null。未登录用户冷启动 + deep link 时,此机制保证用户完成
+   * --open-folder payload。MainLayout mount 与供应商导入唤醒共用此入口，take 一次清空。
+   * 未登录用户冷启动 + deep link 时,此机制保证用户完成
    * Feishu OAuth 后能继续消费当时的"点击意图"。
    */
   takePendingDeepLink: () => Promise<
@@ -2905,6 +2921,7 @@ interface ElectronAPI {
     | { type: 'project'; workingDir: string }
     | { type: 'new-session'; workingDir: string }
     | { type: 'share-import'; filePath: string }
+    | { type: 'provider-import'; importId: string }
     | { type: 'settings'; tab: 'voice-input' | 'providers'; connect?: string }
     | null
   >;
@@ -2930,7 +2947,7 @@ interface ElectronAPI {
    * Open a local file path with the OS default application. Used by the
    * TextLightbox toolbar Open-in-System button and the Oversize main button.
    */
-  openPath: (filePath: string) => Promise<{ success: boolean; error?: string }>;
+  openPath: (filePath: string) => Promise<import('../shared/openPathResult').OpenPathResult>;
 
   /**
    * 文件 chip 右键「打开方式」:枚举可打开该文件的应用(Windows 注册表;
@@ -2990,17 +3007,24 @@ interface ElectronAPI {
   /** Open Cindy's managed Make tools directory (`<userData>/cindy-make/tools`). */
   openCindyMakeToolsDir: () => Promise<{ success: boolean }>;
   getCindyMakeSourceStatus: () => Promise<import('../shared/cindyMakeDoctor').MakeSourceStatus>;
+  getCindyMakeState: () => Promise<import('../shared/cindyMakeDoctor').CindyMakeGlobalState>;
+  manageCindyMakeTask: (sessionId: string, action: 'finish' | 'delete') => Promise<void>;
   openCindyMakeSourceDir: () => Promise<{ success: boolean }>;
+  onCindyMakeState: (
+    listener: (state: import('../shared/cindyMakeDoctor').CindyMakeGlobalState) => void,
+  ) => () => void;
   /** Live global source status (Settings and the workflow share one operation). */
   onCindyMakeSourceStatus: (
     listener: (status: import('../shared/cindyMakeDoctor').MakeSourceStatus) => void,
   ) => () => void;
   /** Stop the running source operation from any window. */
   cancelCindyMakeSource: () => Promise<{ success: boolean }>;
-  /** Create the per-task worktree for a Cindy Make run; resolves with its path and branch. */
+  /** Compatibility entry point: prepare a worktree and its dependencies. */
   prepareCindyMakeWorkspace: (
     runId: string,
   ) => Promise<import('../shared/cindyMakeDoctor').MakeTaskWorkspace>;
+  startCindyMakeTask: (input: import('../shared/cindyMakeDoctor').CindyMakeTaskStart) => Promise<string>;
+  cancelCindyMakeTask: (runId: string) => Promise<{ success: boolean }>;
 
   /**
    * Reveal a file in the OS file manager (Explorer / Finder). Accepts either
@@ -3011,6 +3035,11 @@ interface ElectronAPI {
     url?: string;
     filePath?: string;
   }) => Promise<{ success: boolean; error?: string }>;
+
+  /** Copy an in-memory PNG export to the local native clipboard. */
+  copyPngToClipboard: (
+    params: import('../shared/pngClipboard').CopyPngToClipboardParams,
+  ) => Promise<void>;
 
   /**
    * Copy an image or video (resolved from `xdt-image://` / `xdt-video://`
@@ -3792,6 +3821,8 @@ interface ElectronAPI {
   fetchReleaseNotesIndex: () => Promise<string[] | null>;
 
   // ── Device Link (设备互联/跨设备远程控制) ─────────────────────────────
+  openRemoteDesktop: (target: {deviceId: string; name: string}) => Promise<void>;
+  remoteDesktopViewer: import('../shared/remoteDesktopViewer').RemoteDesktopViewerApi;
   remoteDesktop: import('../shared/remoteDesktop').RemoteDesktopApi;
   deviceLink: {
     getState: () => Promise<{
@@ -3889,6 +3920,7 @@ interface ElectronAPI {
         sessionId: string,
       ) => Promise<{
         messages: Record<string, unknown>[];
+        historyView?: string;
         invalidation?: number;
         ownerToken?: string;
         accountCounter?: number;
@@ -3900,6 +3932,7 @@ interface ElectronAPI {
         expectedInvalidation?: number,
         expectedOwnerToken?: string,
         expectedAccountCounter?: number,
+        historyView?: string,
       ) => Promise<{ ok: true; invalidation?: number }>;
       getSessionList: () => Promise<{
         devices: Array<{
@@ -4137,6 +4170,10 @@ interface ElectronAPI {
     addBinding: () => Promise<{ hook: import('../shared/hookControlIpc').SlackHookView }>;
     rebindTeam: (
       teamId: string,
+    ) => Promise<{ hook: import('../shared/hookControlIpc').SlackHookView }>;
+    setSlackCommunications: (
+      teamId: string,
+      enabled: boolean,
     ) => Promise<{ hook: import('../shared/hookControlIpc').SlackHookView }>;
     revokeTeam: (
       teamId: string,
@@ -4543,6 +4580,7 @@ interface ElectronAPI {
         source?: 'cindy-make';
       }) => Promise<import('@/lib/ccAgent.types').Session>;
       get: (id: string) => Promise<import('@/lib/ccAgent.types').Session>;
+      getMany: (ids: string[]) => Promise<import('@/lib/ccAgent.types').Session[]>;
       resolveReferences: (
         sessionIds: string[],
       ) => Promise<import('../shared/sessionReference').SessionReference[]>;
@@ -4612,11 +4650,11 @@ interface ElectronAPI {
         modelChain: import('../shared/botModelChain').BotModelRoute[];
         isCustomized: boolean;
       }>;
-      list: (body?: { lastReadAtByBotId?: Record<string, number> }) => Promise<unknown[]>;
+      list: (body?: { lastReadAtByBotId?: Record<string, number>; welcomeContext?: import('../shared/botWelcomeContext').BotWelcomeContext; locale?: import('../shared/locale').SupportedLocale }) => Promise<unknown[]>;
       get: (botId: string) => Promise<unknown>;
       generateDraft: (body: import('../shared/botCreation').BotCreationRequest) => Promise<import('../shared/botCreation').BotCreationDraft>;
       generateAvatar: (token: string) => Promise<{ avatarImageBase64: string }>;
-      chooseAvatar: (body: { botId: string }) => Promise<{
+      chooseAvatar: (body: { botId: string; avatarImageBase64?: string }) => Promise<{
         canceled: boolean;
         profile?: unknown;
       }>;
@@ -4644,7 +4682,14 @@ interface ElectronAPI {
     };
     recentWorkdirs: {
       /** 列出"最近工作目录"按 lastUsedAt desc;归档/删除 session 都不影响本列表。 */
-      list: () => Promise<Array<{ path: string; lastUsedAt: string; exists: boolean }>>;
+      list: () => Promise<
+        Array<{
+          path: string;
+          lastUsedAt: string;
+          exists: boolean;
+          knownAgentKinds: string[];
+        }>
+      >;
       /** 从最近列表移除一条(列表卫生,不动 sessions / 磁盘;再次使用会重新入列)。 */
       remove: (input: { path: string }) => Promise<{ deleted: boolean }>;
       /** Broadcast: 任一窗口/远程调用删除条目后通知;返回退订函数。 */
@@ -5190,6 +5235,8 @@ interface ElectronAPI {
               modelId: string;
               authMethod: 'apiKey' | 'oauth' | 'none';
               wireProtocol?: import('@cindy/model-providers').ProviderWireProtocol;
+              api?: import('@cindy/model-providers').PiModelApi;
+              catalogPresetId?: string;
               requestPath?: string;
               apiKey?: string | null;
               headers?: Record<string, string>;
@@ -5262,6 +5309,16 @@ interface ElectronAPI {
       providerId: string,
       options?: { releaseOwner?: boolean; ownerId?: string },
     ) => Promise<{ ok: true }>;
+    previewProviderImport: (
+      importId: string,
+      targetProviderId?: string,
+    ) => Promise<import('../shared/providerImport').ProviderImportPreview>;
+    confirmProviderImport: (
+      importId: string,
+      targetProviderId?: string,
+      interrupt?: true,
+    ) => Promise<import('../shared/providerImport').ProviderImportConfirmResult>;
+    cancelProviderImport: (importId: string) => Promise<{ ok: true }>;
     onProviderOAuthProgress: (
       cb: (progress: {
         providerId: string;
@@ -5717,6 +5774,9 @@ interface ElectronAPI {
         resumeSessionId?: string;
       },
     ) => Promise<import('@cindy/maker-core').ContextUsageData>;
+
+    /** main 侧权威运行态回填(#4513):该会话是否真的在 turn 中(tracker + live isTurnRunning)。 */
+    getSessionTurnActive: (sessionId: string) => Promise<{ inTurn: boolean }>;
 
     abortSession: (sessionId: string) => Promise<void>;
     closeSession: (sessionId: string, opts?: { preserveWorkspace?: boolean }) => Promise<void>;
@@ -6241,6 +6301,8 @@ interface ElectronAPI {
       agentKind: 'claude-code' | 'codex' | 'pi',
       sessionId?: string,
     ) => Promise<{ title: string | null }>;
+    /** Optional status copy from public execution facts only. */
+    polishWorkingStatus: (request: import('../shared/workingStatus').WorkingStatusRequest) => Promise<{ text: string | null }>;
     /** 重命名输入框 Magic 按钮:按会话最新对话内容重新生成标题(失败返 title: null)。 */
     regenerateSessionTitle: (sessionId: string) => Promise<{ title: string | null }>;
     /**

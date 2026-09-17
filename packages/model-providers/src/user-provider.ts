@@ -1,4 +1,10 @@
-import { BUILTIN_PROVIDERS } from './builtin.js';
+import { alignModelApiRoute, providerInterfaceModelRoute, hasDeclaredProviderInterface, providerWireProtocolForApi, providerBaseUrlForApi } from './providerInterfaceRoutes.js';
+import { nativeModelAgents } from './modelProtocol.js';
+import { resolveCatalogModelNativeApi, resolveModelNativeApi } from './modelRegistry.js';
+import { providerEndpointBindings, bindProviderEndpoint, bindProviderPresetRuntime, canonicalProviderEndpoint } from './providerEndpointTemplate.js';
+import { PI_MODEL_APIS } from "./types.js";
+import { providerModelRecord, providerPresetModelRecord, providerModelMetadata } from "./providerModelCatalog.js";
+import { BUNDLED_CATALOG, BUILTIN_PROVIDERS } from './builtin.js';
 import { providerMediaField } from "./providerMediaModels.js";
 import {
   expandedRegistryEntries,
@@ -7,6 +13,7 @@ import {
   mergeModelMetadata,
   pickModelMetadata,
   runtimeUserModelMetadata,
+  findBaseModel,
   type ModelMetadata,
 } from "./modelMetadataLayers.js";
 import {
@@ -323,6 +330,7 @@ function toCatalogModel(
     userModelConfig: { ...m },
     id: m.id,
     discoveredMetadata: m.discoveredMetadata,
+    ...(m.discoveredCost ? { cost: m.discoveredCost } : {}),
     nameExplicit: m.nameExplicit,
     name: m.name,
     ...(agent === "pi" && m.piApi ? { piApi: m.piApi } : {}),
@@ -381,7 +389,7 @@ function toRouting(
   headersState: "configured" | "unknown" | undefined,
   strategy: "api-key-header" | "oauth-token" | "oauth-passthrough" | "provider-oauth-header" | "none",
   modelsUrl?: string,
-  wireProtocol?: "anthropic-messages" | "openai-responses" | "openai-chat",
+  wireProtocol?: ProviderWireProtocol,
   piCatalogProviderId?: string,
   supportsImageGeneration?: boolean,
 ): RoutingDescriptor {
@@ -447,30 +455,61 @@ export function buildUserProvider(
     const rt = config.runtimes[agent];
     if (!rt) continue;
     agents.push(agent);
+    const preset = options.presets?.find(
+      (preset) => preset.id === rt.catalogPresetId,
+    );
+    const presetRuntimeSource = preset?.runtimes[agent];
+    const presetBindings = presetRuntimeSource
+      ? providerEndpointBindings(presetRuntimeSource.baseUrl, rt.baseUrl) : null;
+    const presetRuntime = presetRuntimeSource && presetBindings
+      ? bindProviderPresetRuntime(presetRuntimeSource, rt.baseUrl) : presetRuntimeSource;
+    const resolvedBaseUrl = presetBindings && presetRuntimeSource
+      ? bindProviderEndpoint(presetRuntimeSource.baseUrl, presetBindings, rt.baseUrl)
+      : rt.baseUrl;
     routing[agent] = toRouting(
       agent,
-      rt.baseUrl,
+      resolvedBaseUrl,
       rt.requestPath,
       rt.headers,
       rt.headersState,
       strategy,
-      rt.modelsUrl,
+      presetRuntime?.modelsUrl ?? rt.modelsUrl,
       rt.wireProtocol,
       rt.piCatalogProviderId,
       rt.supportsImageGeneration,
     );
-    const preset = options.presets?.find(
-      (preset) => preset.id === rt.catalogPresetId,
-    );
-    const presetRuntime = preset?.runtimes[agent];
     const followsPreset =
       presetRuntime &&
-      withoutTrailingSlashes(rt.baseUrl) ===
+      withoutTrailingSlashes(resolvedBaseUrl) ===
         withoutTrailingSlashes(presetRuntime.baseUrl) &&
       (rt.wireProtocol ?? defaultWireProtocol(agent)) ===
         (presetRuntime.wireProtocol ?? defaultWireProtocol(agent)) &&
       (rt.requestPath ?? "") === (presetRuntime.requestPath ?? "");
-    models[agent] = rt.models.map((m) => {
+    // A bound single-API cloud connection keeps its language for new deployment IDs too.
+    // This lends only the endpoint protocol, never another model's window or capabilities.
+    const presetApis = new Set<ProviderRuntimeModelConfig['api']>(followsPreset ? presetRuntime.models.map(model => model.api ?? model.piApi) : []);
+    const presetApi = presetApis.size === 1 ? [...presetApis][0] : undefined;
+    models[agent] = rt.models.map((storedModel) => {
+      // Old ID-only imports must pick up newly known per-model interfaces too.
+      // An explicit model API/path remains a user choice, not a preset default.
+      const interfaceDefault = followsPreset && !storedModel.api && !storedModel.piApi && !storedModel.route
+        ? presetRuntime.models.find(model => model.id === storedModel.id) : undefined;
+      const configuredModel = interfaceDefault ? { ...storedModel,
+        ...(interfaceDefault.api ? { api: interfaceDefault.api } : {}),
+        ...(agent === 'pi' && interfaceDefault.piApi ? { piApi: interfaceDefault.piApi } : {}),
+        ...(interfaceDefault.route ? { route: { ...interfaceDefault.route } } : {}),
+      } : storedModel;
+      const boundConfiguredModel = configuredModel.route
+        ? { ...configuredModel, route: {
+          ...configuredModel.route,
+          baseUrl: canonicalProviderEndpoint(presetRuntimeSource?.baseUrl ?? '', configuredModel.route.baseUrl)
+            ?? configuredModel.route.baseUrl,
+        } }
+        : configuredModel;
+      const m = rt.requestPath ? boundConfiguredModel : alignModelApiRoute(
+        providerInterfaceModelRoute(boundConfiguredModel, agent, rt.catalogPresetId, resolvedBaseUrl),
+        resolvedBaseUrl, rt.wireProtocol ?? defaultWireProtocol(agent),
+      );
       const presetModel = followsPreset
         ? presetRuntime.models.find((model) => model.id === m.id)
         : undefined;
@@ -480,14 +519,14 @@ export function buildUserProvider(
         m.route?.requestPath === presetModel?.route?.requestPath;
       const presetDefaults =
         presetModel && sameRoute
-          ? pickModelMetadata({
+          ? mergeModelMetadata(presetModel.discoveredMetadata, pickModelMetadata({
               ...presetModel,
               efforts:
                 presetModel.reasoning === false
                   ? []
                   : presetModel.reasoningEfforts,
               defaultEffort: presetModel.reasoningDefaultEffort,
-            })
+            }))
           : undefined;
       // Pi 来源带 piCatalogProviderId 且仍走官方路由时,pi-host 运行期会整条套用官方 Pi
       // 目录;没有 catalogPresetId(#4108 之前创建)的存量来源在这里没有预设默认,存储
@@ -496,14 +535,52 @@ export function buildUserProvider(
       // 目录(预设只声明 context/image 时 reasoning 仍由目录补),用户显式配置仍优先。
       const catalogDefaults =
         agent === "pi" && rt.piCatalogProviderId && !m.route &&
-        piNativeCatalogRouteMatches(rt.piCatalogProviderId, rt.baseUrl, rt.wireProtocol)
+        piNativeCatalogRouteMatches(rt.piCatalogProviderId, resolvedBaseUrl, rt.wireProtocol)
           ? piNativeCatalogModelDefaults(rt.piCatalogProviderId, m.id)
           : undefined;
-      const defaults =
-        catalogDefaults || presetDefaults
-          ? mergeModelMetadata(catalogDefaults, presetDefaults)
-          : undefined;
+      const wire = m.route?.wireProtocol ?? rt.wireProtocol ?? defaultWireProtocol(agent);
+      // Pi's model API overrides the runtime default. Match that actual API, rather than
+      // discarding all metadata when a Responses/Gemini model shares a Chat connection.
+      // With no explicit model route/API, an exact endpoint + unique ID supplies Pi's API.
+      const imported = !(m.route?.requestPath ?? rt.requestPath)
+        ? providerModelRecord(m.id, m.route?.baseUrl ?? resolvedBaseUrl,
+            m.api ?? (agent === 'pi' ? m.piApi ?? wire : wire),
+            !m.api && !m.piApi && !m.route)
+          ?? (hasDeclaredProviderInterface(m, agent, rt.catalogPresetId, resolvedBaseUrl)
+            ? providerPresetModelRecord(rt.catalogPresetId, m.id) : undefined)
+          ?? (followsPreset && sameRoute && m.api && presetModel?.api === m.api
+            ? providerPresetModelRecord(preset?.id, m.id, m.api) : undefined)
+        : undefined;
+      const importedApi = imported &&
+        PI_MODEL_APIS.some(api => api === imported.execution.pi.api)
+          ? imported.execution.pi.api as NonNullable<ProviderRuntimeModelConfig['piApi']>
+          : !m.route && presetApi ? presetApi
+          : wire === 'google-generative-ai' ? 'google-generative-ai' : undefined;
+      const defaults = imported || catalogDefaults || presetDefaults
+        ? mergeModelMetadata(imported ? providerModelMetadata(imported) : undefined, catalogDefaults, presetDefaults)
+        : undefined;
+      // A verified catalog identity can reuse the manufacturer's declaration.
+      // Execution protocols and prices still belong to this exact connection.
+      const registry = options.modelRegistry ?? undefined;
+      const resolveDeclaration = (source: ModelRegistry | undefined) => {
+        const baseModel = findBaseModel(source, m.id);
+        const routeNativeApi = resolveModelNativeApi(source, config.id, m.id);
+        return routeNativeApi !== undefined ? routeNativeApi
+          : imported || baseModel || (followsPreset && (presetModel || m.discoveredMetadata))
+            ? resolveCatalogModelNativeApi(source, baseModel?.id ?? m.id)
+            : undefined;
+      };
+      const currentDeclaration = resolveDeclaration(registry);
+      // Same fallback as Gateway: Server omissions use local native declarations;
+      // explicit corrections/unknowns win. Never backfill another route's capabilities.
+      const declaration = currentDeclaration !== undefined ? currentDeclaration
+        : resolveDeclaration(BUNDLED_CATALOG.modelRegistry);
+      const nativeApi = declaration === null || declaration === 'anthropic-messages'
+        || declaration === 'openai-responses' || declaration === 'openai-completions'
+        || declaration === 'google-generative-ai' ? declaration : undefined;
       return {
+        ...(nativeApi !== undefined ? { nativeApi } : {}),
+        ...(imported?.cost ? { cost: imported.cost } : {}),
         ...toCatalogModel(
           m,
           followsPreset && sameRoute ? preset!.id : config.id,
@@ -512,6 +589,16 @@ export function buildUserProvider(
           defaults,
           nativeCodex ? 'openai' : undefined,
         ),
+        // Projection is not a user edit. Save only the original configuration.
+        userModelConfig: structuredClone(storedModel),
+        ...(m.api ? { api: m.api, ...(agent === 'pi' ? { piApi: m.api } : {}) } : {}),
+        ...(importedApi && !m.piApi && !m.api ? {
+          api: importedApi, ...(agent === 'pi' ? { piApi: importedApi } : {}),
+          ...(!m.route && providerWireProtocolForApi(importedApi) && providerWireProtocolForApi(importedApi) !== wire ? { route: {
+            baseUrl: providerBaseUrlForApi(resolvedBaseUrl, importedApi),
+            wireProtocol: providerWireProtocolForApi(importedApi)!,
+          } } : {}),
+        } : {}),
         ...(rt.catalogPresetId ? { catalogPresetId: rt.catalogPresetId } : {}),
       };
     });
@@ -550,8 +637,18 @@ export function buildUserProvider(
       source: 'user',
       auth: { method: 'oauth', native: 'codex' },
       models: { ...identity.models, codex: models.codex ?? [] },
-      imageModels: identity.imageModels?.map((model) => ({ ...model, id: model.id.replace(/^openai\//, `${runtimeProviderId}/`) })),
+      // The active catalog binds the current public image definition to each connection.
+      // Do not freeze bundled membership when an independent account is constructed.
+      imageModels: undefined,
+      imageDefaults: undefined,
     };
+  }
+  // Selection/import membership does not opt the user into compatibility harnesses.
+  // Keep explicit configuration defaults; visibility preferences remain a separate override.
+  for (const agent of agents) for (const model of models[agent] ?? []) {
+    if (!providerMediaField(model.mode) && model.userModelConfig?.defaultEnabled === undefined) {
+      model.defaultEnabled = nativeModelAgents({ id: config.id, routing, source: 'user' }, { [agent]: model }).includes(agent);
+    }
   }
   const mediaLists: Partial<
     Pick<

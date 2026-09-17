@@ -1,3 +1,4 @@
+import type { AutoReviewUserIntent } from '@cindy/maker-core';
 import {
   CodexResumePreparationBlockedError,
   AUTO_REVIEW_SOURCE_CONTENT,
@@ -8,11 +9,14 @@ import {
   type AgentKind,
   type MainOwnedSendContext,
   type SessionSendOptions,
+  type Session,
   type SessionSendResult,
   type UserMessage,
 } from '@cindy/maker-core';
 import { CODEX_RESUME_NOT_READY_WIRE_MESSAGE } from '@cindy/maker-shared/agent-input-projection';
 import type { AgentInputQueuedMessage } from '../../shared/agentInputQueue.js';
+import { normalizeWorkingDirForStorage } from '../../shared/workingDir.js';
+import { workdirDiagnosticContext, workdirDiagnosticErrorCode, workdirDiagnosticId, type WorkdirDiagnosticLogger } from '../workdirDiagnostics.js';
 
 import {
   createHostSendFailure,
@@ -21,6 +25,7 @@ import {
   toDesktopSessionDispatchOutcome,
 } from '../maker-host/send-outcome.js';
 import { isCredentialModeSwitchBusyError } from '../maker-host/codex-credential-switch.js';
+import { routinePermissionSnapshot } from '../maker-host/routinePermission.js';
 import { throwIpcError } from '../utils/ipcValidate.js';
 import {
   extractPlainText,
@@ -223,9 +228,10 @@ export function revokeTrustedDesktopQueuedOrigin(item: AgentInputQueuedMessage):
 }
 
 type MakerSendOptions = {
+  toolsDisabled?: boolean;
   readonly [AUTO_REVIEW_SOURCE_CONTENT]?: UserMessage['content'];
   /** Main-only continuation: a restored intent is not an authored user turn. */
-  readonly [AUTO_REVIEW_USER_INTENT]?: string;
+  readonly [AUTO_REVIEW_USER_INTENT]?: AutoReviewUserIntent;
   readonly [INHERITED_CAPABILITY_SELECTION]?: string;
   readonly [MAIN_OWNED_SEND_CONTEXT]?: MainOwnedSendContext;
   messageUuid?: string;
@@ -312,6 +318,8 @@ function extractIpcUserMessageText(message: IpcUserMessage): string {
 }
 
 export interface MakerSendTransactionSession {
+  readonly stablePermissionModeState?: Session['stablePermissionModeState'];
+  readonly stablePlanModeState?: Session['stablePlanModeState'];
   hostStartupPreferences?: CreateOpts['hostStartupPreferences'];
   id: string;
   agentKind: AgentKind;
@@ -337,6 +345,7 @@ export interface MakerSendTransactionDeps {
   getSessionMeta(sessionId: string): Promise<{ title?: string } | null>;
   /** The same clear/rewind-filtered transcript used for native context handoffs. */
   readAutoReviewHistory?(sessionId: string): Promise<AutoReviewHistoryMessage[]>;
+  readScheduledPermissions?(sessionId: string): Promise<{ permissionMode: unknown; planModeEnabled: unknown } | null>;
   ensureRemoteReadyForSessionStart(params: {
     session?: { agentKind: AgentKind; remoteHostId: string | null } | null;
     createOpts?: unknown;
@@ -349,6 +358,7 @@ export interface MakerSendTransactionDeps {
     opts?: { suppressMissingBroadcast?: boolean },
   ): Promise<boolean>;
   resolveRecoveredWorkingDir?(sessionId: string, workingDir: string): string;
+  isPersistedWorktreeFallback?(workingDir: string): boolean;
   /**
    * 读 DB 里既有会话的权威 working_dir(行不存在 → null)。lazy-create /
    * rehydrate 在 caller 传入的 workingDir 校验失败时用它兜底——输入队列崩溃
@@ -482,6 +492,7 @@ export interface MakerSendTransactionDeps {
    */
   isCindyMakeSession?(sessionId: string): Promise<boolean>;
   log: MakerSendTransactionLog;
+  workdirDiagnostics?: WorkdirDiagnosticLogger;
 }
 
 export interface MakerSendTransaction {
@@ -656,8 +667,28 @@ export function createMakerSendTransaction(deps: MakerSendTransactionDeps): Make
     sessionId: string,
     createOpts: CreateOpts,
   ): Promise<boolean> {
-    const dbDir = await deps.readSessionWorkingDirFromDb(sessionId).catch(() => null);
+    const dbDir = await deps.readSessionWorkingDirFromDb(sessionId).catch((error) => {
+      deps.workdirDiagnostics?.warn('workdir DB lookup failed', {
+        ...workdirDiagnosticContext(sessionId, createOpts.workingDir), source: 'bootstrap',
+        code: workdirDiagnosticErrorCode(error),
+      });
+      return null;
+    });
+    // A queued runtime cwd may be a recovery directory from a previous process.
+    // Start from the durable binding so the new process retries Git restoration
+    // and, if still unavailable, supplies a fresh recovery note. In-process
+    // recovery.resolve continues to preserve the already selected fallback.
+    if (!createOpts.remoteHostId && createOpts.workingDir &&
+      deps.isPersistedWorktreeFallback?.(createOpts.workingDir)) {
+      if (!dbDir) return false;
+      createOpts.workingDir = dbDir;
+    }
     const fallbackDir = dbDir && dbDir !== createOpts.workingDir ? dbDir : null;
+    if (fallbackDir) deps.workdirDiagnostics?.info('workdir DB fallback candidate', {
+      ...workdirDiagnosticContext(sessionId, createOpts.workingDir), source: 'bootstrap',
+      dbDirectoryRef: workdirDiagnosticId(fallbackDir),
+      sameNormalizedDirectory: normalizeWorkingDirForStorage(fallbackDir) === normalizeWorkingDirForStorage(createOpts.workingDir),
+    });
     const ok = fallbackDir
       ? await deps.checkWorkDirExists(
           sessionId,
@@ -917,9 +948,20 @@ export function createMakerSendTransaction(deps: MakerSendTransactionDeps): Make
         // live SDK still owns the old cwd. Only use that persisted replacement;
         // recreating an arbitrary project as an empty folder would lose its context.
         const dbDir = !sess.remoteHostId
-          ? await deps.readSessionWorkingDirFromDb(sessionId).catch(() => null)
+          ? await deps.readSessionWorkingDirFromDb(sessionId).catch((error) => {
+              deps.workdirDiagnostics?.warn('workdir DB lookup failed', {
+                ...workdirDiagnosticContext(sessionId, sess!.workDir), source: 'live',
+                code: workdirDiagnosticErrorCode(error),
+              });
+              return null;
+            })
           : null;
         const fallbackDir = dbDir && dbDir !== sess.workDir ? dbDir : null;
+        if (fallbackDir) deps.workdirDiagnostics?.info('workdir DB fallback candidate', {
+          ...workdirDiagnosticContext(sessionId, sess.workDir), source: 'live',
+          dbDirectoryRef: workdirDiagnosticId(fallbackDir),
+          sameNormalizedDirectory: normalizeWorkingDirForStorage(fallbackDir) === normalizeWorkingDirForStorage(sess.workDir),
+        });
         const ok = await deps.checkWorkDirExists(
           sessionId,
           sess.workDir,
@@ -937,6 +979,11 @@ export function createMakerSendTransaction(deps: MakerSendTransactionDeps): Make
           ((sess.agentKind === 'claude-code' || sess.agentKind === 'pi') &&
           !!deps.peekWorkingDirectoryRecoveryNote?.(sessionId, sess.workDir)));
         if ((!ok && fallbackDir) || needsCwdRefresh) {
+          deps.workdirDiagnostics?.info('workdir runtime refresh requested', {
+            ...workdirDiagnosticContext(sessionId, sess.workDir),
+            reason: needsCwdRefresh ? 'recovered-directory' : 'db-fallback',
+            targetDirectoryRef: workdirDiagnosticId(needsCwdRefresh ? recoveredDir : fallbackDir!),
+          });
           const supplied = (createOpts as CreateOpts | undefined) ??
             await deps.readWorkingDirectoryRecoveryCreateOpts(sessionId);
           const startupPreferences = sess.hostStartupPreferences ?? {};
@@ -956,6 +1003,9 @@ export function createMakerSendTransaction(deps: MakerSendTransactionDeps): Make
             requestedSendOpts.fromDeviceLinkClient === true,
             'workdir',
           );
+          deps.workdirDiagnostics?.info('workdir runtime refresh completed', {
+            ...workdirDiagnosticContext(sessionId, co.workingDir), outcome: recovered.kind,
+          });
           if (recovered.kind === 'failure') return recovered.result;
           sess = recovered.session;
         } else if (!ok) {
@@ -1218,7 +1268,36 @@ export function createMakerSendTransaction(deps: MakerSendTransactionDeps): Make
       const autoReviewSourceContent = so[AUTO_REVIEW_SOURCE_CONTENT]
         ?? (typeof normalized === 'string' ? normalized : normalized.content) as UserMessage['content'];
       let restoredAutoReviewIntent = so[AUTO_REVIEW_USER_INTENT];
-      if (restoredAutoReviewIntent === undefined && isOrdinaryUserTurn && trustedUserText !== undefined
+      // The coordinator's scheduled continuation is not a new user message. Restore
+      // the owning task's authored requests at dispatch, including later revocations.
+      // Never use the agent-authored schedule prompt as evidence of permission.
+      const plannedModes = createOpts as Partial<CreateOpts> | undefined;
+      const expectedScheduledModes = so.origin?.kind === 'scheduler' ? routinePermissionSnapshot(undefined, {
+        permissionMode: plannedModes?.permissionMode ?? sess.stablePermissionModeState?.mode,
+        planModeEnabled: plannedModes?.planMode ?? sess.stablePlanModeState?.enabled,
+      }) : null;
+      let latestScheduledModes: { permissionMode: unknown; planModeEnabled: unknown } | null = null;
+      const assertScheduledModes = () => {
+        const current = routinePermissionSnapshot(sess, latestScheduledModes);
+        if (!current || deps.getSession(sessionId) !== sess
+          || current.permissionMode !== expectedScheduledModes?.permissionMode
+          || current.planMode !== expectedScheduledModes?.planMode) {
+          throwIpcError('PRECONDITION_FAILED', 'Scheduled task modes changed before vendor dispatch');
+        }
+      };
+      const resolveScheduledIntent = so.origin?.kind === 'scheduler' ? async () => {
+        let history: AutoReviewHistoryMessage[] = [];
+        try {
+          history = await deps.readAutoReviewHistory?.(sessionId) ?? [];
+        } catch {
+          deps.log.warn('auto-review continuation history unavailable', { sessionId });
+        }
+        latestScheduledModes = await deps.readScheduledPermissions?.(sessionId) ?? null;
+        assertScheduledModes();
+        return restoreAutoReviewUserIntent(history);
+      } : undefined;
+      if (resolveScheduledIntent) restoredAutoReviewIntent = undefined;
+      if (!resolveScheduledIntent && restoredAutoReviewIntent === undefined && isOrdinaryUserTurn && trustedUserText !== undefined
         && (!mainOwnedSendContext || mainOwnedSendContext.origin.kind === 'desktop')) {
         let history: AutoReviewHistoryMessage[] = [];
         try {
@@ -1324,6 +1403,7 @@ export function createMakerSendTransaction(deps: MakerSendTransactionDeps): Make
           ? Math.max(0, Date.now() - 1)
           : null;
         const sendResult = await sess.send(outgoing as never, {
+          ...(resolveScheduledIntent ? { resolveAutoReviewUserIntent: resolveScheduledIntent } : {}),
           [AUTO_REVIEW_SOURCE_CONTENT]: autoReviewSourceContent,
           ...(so[INHERITED_CAPABILITY_SELECTION] !== undefined
             ? { [INHERITED_CAPABILITY_SELECTION]: so[INHERITED_CAPABILITY_SELECTION] }
@@ -1335,6 +1415,7 @@ export function createMakerSendTransaction(deps: MakerSendTransactionDeps): Make
           messageUuid: so.messageUuid,
           userName: so.userName,
           throwOnStartFailure: so.throwOnStartFailure,
+          ...(so.toolsDisabled === true ? { toolsDisabled: true } : {}),
           turnAttemptToken: so.turnAttemptToken,
           signal: so.signal,
           ...(so.onVendorTurnReserved ? { onTurnReserved: so.onVendorTurnReserved } : {}),
@@ -1400,7 +1481,9 @@ export function createMakerSendTransaction(deps: MakerSendTransactionDeps): Make
                       content: persistUserMessage.content,
                       agentMeta: {
                         uuid: so.messageUuid,
-                        ...(trustedUserText !== undefined ? { autoReviewUserText: trustedUserText } : {}),
+                        ...(so.origin?.kind === 'scheduler'
+                          ? { autoReviewUserText: { kind: 'scheduled-continuation' } }
+                          : trustedUserText !== undefined ? { autoReviewUserText: trustedUserText } : {}),
                         sdkSessionId: persistUserMessage.sdkSessionId,
                         ...(persistUserMessage.delivery
                           ? { delivery: persistUserMessage.delivery }
@@ -1450,6 +1533,7 @@ export function createMakerSendTransaction(deps: MakerSendTransactionDeps): Make
               }
             : undefined,
           onDispatching: () => {
+            if (resolveScheduledIntent) assertScheduledModes();
             if (persistUserMessage?.shouldBroadcast && !persistUserMessage.shouldBroadcast()) {
               throwIpcError(
                 'PRECONDITION_FAILED',

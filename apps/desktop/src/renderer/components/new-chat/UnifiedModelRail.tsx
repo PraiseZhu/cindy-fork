@@ -5,6 +5,7 @@ import { useTranslation } from 'react-i18next';
 import type { ProviderView } from '@cindy/model-providers';
 
 import { cn } from '@/lib/utils';
+import { providerAccountLabel } from '@/lib/providerDisplayName';
 import { Tip } from '@/components/ui/tooltip';
 
 import { useProviderWeeklyQuota } from './useProviderWeeklyQuota';
@@ -49,7 +50,8 @@ export function UnifiedModelRail({
   const activeKey = railItemKey(active);
   return (
     // 设计稿 .rail:宽 48(含 6px 侧距 + 1px 右分隔线)、纵向 8px、格间 2px。
-    <div className="flex min-h-0 w-12 shrink-0 flex-col items-center gap-0.5 overflow-y-auto border-r border-[var(--model-dropdown-border)] px-1.5 py-2">
+    // 与侧栏窄图标栏一致：滚动条不占宽度，避免挤压按钮并触发横向溢出。
+    <div className="flex min-h-0 w-12 shrink-0 flex-col items-center gap-0.5 overflow-x-hidden overflow-y-auto scrollbar-hide border-r border-[var(--model-dropdown-border)] px-1.5 py-2">
       {items.map((item) => {
         const key = railItemKey(item);
         const isActive = activeKey === key;
@@ -137,22 +139,6 @@ function ProviderQuotaButton(props: RailButtonProps & { provider: ProviderView }
   return <RailButtonView {...props} quota={quota} />;
 }
 
-function accountLabel(label: string, identity?: string): string {
-  if (!identity || label === identity) return label;
-  // Independent logins already name the connection "Provider · identity".
-  // OpenAI also truncates that generated name to 50 characters and may add (2).
-  const baseLabel = label.replace(/ \(\d+\)$/, '');
-  if (baseLabel.endsWith(` · ${identity}`)) return label;
-  const separator = baseLabel.indexOf(' · ');
-  if (
-    separator >= 0 &&
-    baseLabel.length === 50 &&
-    `${baseLabel.slice(0, separator)} · ${identity}`.slice(0, 50) === baseLabel
-  )
-    return label;
-  return `${label} · ${identity}`;
-}
-
 function RailButtonView({
   label,
   accountIdentity,
@@ -172,7 +158,7 @@ function RailButtonView({
       ? null
       : `${t('quotaCard.weeklyLabel')} · ${t('quotaCard.remainingPercent', { percent: remaining })}`;
   const reset = formatQuotaResetCountdown(quota?.resetsAt, Date.now(), t);
-  const displayLabel = accountLabel(label, accountIdentity);
+  const displayLabel = providerAccountLabel(label, accountIdentity);
   const tooltip = quotaLabel ? (
     <>
       <div>{displayLabel}</div>
