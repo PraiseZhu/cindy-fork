@@ -12471,7 +12471,7 @@
       "priceFromSuffix": "부터",
       "subscription": "구독",
       "includesFree": "무료 플랜의 모든 기능을 포함합니다",
-      "creditMultiple": "{{name}} 크레딧의 {{multiple}}배",
+      "creditMultiple": "{{name}} 포함 금액의 {{multiple}}배",
       "credits": {
         "MONTH": "매월 {{amount}}",
         "YEAR": "매년 {{amount}}",

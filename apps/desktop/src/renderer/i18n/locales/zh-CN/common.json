@@ -12471,7 +12471,7 @@
       "priceFromSuffix": "起",
       "subscription": "订阅",
       "includesFree": "包含免费版全部能力",
-      "creditMultiple": "额度是{{name}}的 {{multiple}} 倍",
+      "creditMultiple": "包含金额是{{name}}的 {{multiple}} 倍",
       "credits": {
         "MONTH": "每月 {{amount}}",
         "YEAR": "每年 {{amount}}",

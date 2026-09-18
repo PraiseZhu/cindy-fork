@@ -12471,7 +12471,7 @@
       "priceFromSuffix": "から",
       "subscription": "サブスクリプション",
       "includesFree": "無料プランの内容をすべて含みます",
-      "creditMultiple": "{{name}} の {{multiple}} 倍のクレジット",
+      "creditMultiple": "{{name}} の {{multiple}} 倍の付与額",
       "credits": {
         "MONTH": "毎月 {{amount}}",
         "YEAR": "毎年 {{amount}}",

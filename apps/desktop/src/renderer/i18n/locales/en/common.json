@@ -12488,7 +12488,7 @@
       "priceFromSuffix": "from",
       "subscription": "Subscription",
       "includesFree": "Includes everything in Free",
-      "creditMultiple": "{{multiple}}x the credits of {{name}}",
+      "creditMultiple": "{{multiple}}x the included amount of {{name}}",
       "credits": {
         "MONTH": "{{amount}} per month",
         "YEAR": "{{amount}} per year",
