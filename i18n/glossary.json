@@ -45,6 +45,18 @@
       "note": "用于 Desktop 本机范围标签。translations 中带任务／セッション／세션 的译法仅用于侧栏任务范围标题 ccAgent.sidebar.scopeLocalSessions；设备菜单、新建任务按钮和设备分组标题使用 alsoAllowed 中不带任务的设备标签译法，不可互换。英文统一使用 Local，表示当前电脑或其上的任务；其他语言保留各位置现有表达。不表示本地模型、离线模式或未登录状态，也不约束其他语境中的 local。"
     },
     {
+      "id": "remote-desktop-background-running",
+      "status": "proposed",
+      "en": "Run in background",
+      "translations": {
+        "zh-CN": "后台运行",
+        "zh-TW": "背景執行",
+        "ja": "バックグラウンド実行",
+        "ko": "백그라운드 실행"
+      },
+      "note": "远程桌面的持续开关，用户已确认中文名。离开页面或切到后台时以小窗继续显示，回到全屏后仍保持开启；不是任意后台任务或强制退出后继续运行的承诺。其他语言译名登记为 proposed。"
+    },
+    {
       "id": "remote-desktop-direct",
       "status": "proposed",
       "en": "Direct to computer",

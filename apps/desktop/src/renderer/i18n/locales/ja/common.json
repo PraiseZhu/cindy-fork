@@ -1,4 +1,12 @@
 {
+  "privacyExit": {
+    "status": "Cindy でリモート操作されています",
+    "hint": "クリックまたは任意のキーを押すと、切断を確認できます",
+    "title": "リモートデスクトップを切断しますか？",
+    "detail": "リモート操作を終了し、パソコンの画面を元に戻します。終了時のロックが有効な場合は、パソコンもロックされます。",
+    "cancel": "接続を維持",
+    "disconnect": "切断"
+  },
   "appBadge": {
     "attentionCount": "対応が必要なセッション：{{count}}"
   },
@@ -5860,6 +5868,7 @@
   "login": {
     "title": "Cindy へようこそ",
     "subtitle": "安全なログイン方法を選択してください",
+    "savedLoginPreserved": "保存済みのログイン情報はこの端末に残っています",
     "phonePlaceholder": "電話番号を入力",
     "emailPlaceholder": "メールアドレスを入力",
     "invalidEmail": "正しいメールアドレスを入力してください",
@@ -5959,6 +5968,9 @@
       "fallback": "ログインに失敗しました。再試行してください。",
       "AUTH_SERVICE_UNAVAILABLE": "ログインサービスは一時的に利用できません。",
       "AUTH_REQUEST_FAILED": "ログインリクエストに失敗しました。",
+      "CREDENTIAL_STORE_UNAVAILABLE": "Cindy を完全に終了して開き直すと、ログインを復元できます。",
+      "BROWSER_OPEN_FAILED": "ブラウザを開けませんでした。再試行してください。",
+      "BROWSER_OPEN_TIMEOUT": "ブラウザの起動がタイムアウトしました。再試行してください。",
       "NETWORK_ERROR": "ネットワーク接続を確認してください。",
       "REQUEST_TIMEOUT": "リクエストがタイムアウトしました。",
       "INVALID_PARAMS": "入力内容を確認してください。",
@@ -7276,6 +7288,10 @@
       "downloadMobile": "Cindy モバイル版をダウンロード"
     },
     "accountSwitcher": {
+      "current": "現在のアカウント",
+      "switching": "アカウントを切り替え中…",
+      "adding": "ログインを準備中…",
+      "sharedDataRestriction": "この開発用ウィンドウは別の Cindy インスタンスとアカウントデータを共有しているため、アカウントの切り替えや追加はできません。元の Cindy ウィンドウで操作するか、独立したデータで開発版を起動してください。",
       "title": "アカウントを切り替え",
       "description": "このデバイスでログインしたアカウントを選択します",
       "syncing": "ログイン状態を確認中…",
@@ -8760,6 +8776,7 @@
     },
     "media": {
       "clickToZoom": "クリックして拡大",
+      "audioProgress": "再生位置",
       "audioPlay": "音声を再生",
       "audioPause": "音声を一時停止",
       "modelPreviewAlt": "3D モデルのプレビュー",
@@ -12144,6 +12161,38 @@
     }
   },
   "billing": {
+    "comparison": {
+      "free": "FREE",
+      "freeUsage": "無料で利用",
+      "priceFromSuffix": "〜",
+      "topup": "必要な分だけチャージ",
+      "topupExpiry": "チャージしたクレジットは無期限",
+      "agent": "Agent の全機能",
+      "apiKey": "自分の API key を使用",
+      "existingSubscription": "既存のサブスクリプションを接続",
+      "localModels": "ローカルモデルに対応",
+      "basicModels": "基本モデルを利用",
+      "subscription": "サブスクリプション",
+      "rollover": "未使用クレジットは{{period}}も利用可能（最大 {{amount}}）",
+      "nextPeriod": {
+        "MONTH": "翌月",
+        "YEAR": "翌年",
+        "OTHER": "次の期間"
+      },
+      "includesFree": "FREE の全機能を含む",
+      "advancedModels": "上位モデルを利用可能に",
+      "managedService": "公式サービス、設定不要",
+      "topupUnlock": "必要な分だけ支払い、上位モデルを利用",
+      "select": "{{name}} を選択",
+      "upgrade": "{{name}} にアップグレード",
+      "downgrade": "{{name}} にダウングレード",
+      "changeUnavailable": "変更不可",
+      "creditMultiple": "{{name}} の {{multiple}} 倍の期間クレジット",
+      "credits": {
+        "MONTH": "毎月 {{amount}} のクレジット",
+        "YEAR": "毎年 {{amount}} のクレジット"
+      }
+    },
     "sidebar": "残高とプラン",
     "settings": {
       "title": "使用量と請求",
@@ -12197,7 +12246,7 @@
       "observedAt": "残高更新: {{date}}",
       "poolDetail": "使用済み {{used}} · 合計 {{total}}",
       "remaining": "残り",
-      "progressLabel": "{{label}}の使用量",
+      "progressLabel": "{{label}}の残りの割合",
       "noPlanCredits": "有効なサブスクリプションがないため、プラン残高はありません。",
       "historyUnavailable": "使用履歴が完全ではないため、残りの残高のみ表示しています。",
       "detailsUnavailable": "使用量の詳細を取得できないため、現在の残高のみ表示しています。",
@@ -12266,6 +12315,7 @@
     },
     "dialogs": {
       "subscription": {
+        "confirmTitle": "サブスクリプションの確認",
         "title": "サブスクリプションプランを選択"
       },
       "topup": {
@@ -12358,13 +12408,9 @@
       "failedBody": "支払いに失敗しました。しばらくしてからもう一度お試しください。"
     },
     "planChange": {
+      "emptyTitle": "切り替え可能なプランがありません",
       "targetTitle": "サブスクリプションプランの変更",
       "back": "戻る",
-      "upgradeBadge": "アップグレード",
-      "sameLevelBadge": "同じレベル",
-      "downgradeBadge": "ダウングレード",
-      "emptyTitle": "切り替え可能なプランがありません",
-      "emptyDescription": "現在、切り替え可能な他のプランはありません。",
       "quotingTitle": "プラン変更を準備中",
       "quotingBody": "金額と適用時期を確認しています…",
       "quoteTitle": "プラン変更の確認",

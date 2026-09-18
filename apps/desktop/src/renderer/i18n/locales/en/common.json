@@ -1,4 +1,12 @@
 {
+  "privacyExit": {
+    "status": "This computer is being remotely controlled through Cindy",
+    "hint": "Click or press any key to disconnect…",
+    "title": "Disconnect remote desktop?",
+    "detail": "This will end remote control and restore this computer’s screen. The computer will lock if lock on exit is enabled.",
+    "cancel": "Keep connected",
+    "disconnect": "Disconnect"
+  },
   "appBadge": {
     "attentionCount": "Tasks needing attention: {{count}}"
   },
@@ -5862,6 +5870,7 @@
   "login": {
     "title": "Welcome to Cindy",
     "subtitle": "Choose a secure way to sign in",
+    "savedLoginPreserved": "Your saved sign-in is still on this device",
     "phonePlaceholder": "Enter your phone number",
     "emailPlaceholder": "Enter your email",
     "invalidEmail": "Please enter a valid email address",
@@ -5961,6 +5970,9 @@
       "fallback": "Sign-in failed. Please try again.",
       "AUTH_SERVICE_UNAVAILABLE": "The sign-in service is temporarily unavailable.",
       "AUTH_REQUEST_FAILED": "The sign-in request failed. Please try again.",
+      "CREDENTIAL_STORE_UNAVAILABLE": "Quit Cindy completely, then reopen it to restore sign-in.",
+      "BROWSER_OPEN_FAILED": "Could not open the browser. Please try again.",
+      "BROWSER_OPEN_TIMEOUT": "The browser did not start in time. Please try again.",
       "NETWORK_ERROR": "Could not connect. Check your network and try again.",
       "REQUEST_TIMEOUT": "The request timed out. Please try again.",
       "INVALID_PARAMS": "Check the value you entered.",
@@ -7278,6 +7290,10 @@
       "downloadMobile": "Download Cindy Mobile"
     },
     "accountSwitcher": {
+      "current": "Current account",
+      "switching": "Switching accounts…",
+      "adding": "Preparing sign-in…",
+      "sharedDataRestriction": "This development window shares account data with another Cindy instance, so it cannot switch or add accounts. Use the original Cindy window, or start the development app with separate data.",
       "title": "Switch account",
       "description": "Choose an account used on this device",
       "syncing": "Checking sign-in status…",
@@ -8766,6 +8782,7 @@
     },
     "media": {
       "clickToZoom": "Click to zoom",
+      "audioProgress": "Playback position",
       "audioPlay": "Play audio",
       "audioPause": "Pause audio",
       "modelPreviewAlt": "3D model preview",
@@ -12161,6 +12178,38 @@
     }
   },
   "billing": {
+    "comparison": {
+      "free": "FREE",
+      "freeUsage": "Free to use",
+      "priceFromSuffix": "and up",
+      "topup": "Top up as needed",
+      "topupExpiry": "Top-up credits never expire",
+      "agent": "Full Agent features",
+      "apiKey": "Bring your own API key",
+      "existingSubscription": "Connect existing subscriptions",
+      "localModels": "Use local models",
+      "basicModels": "Access basic models",
+      "subscription": "Subscription plan",
+      "rollover": "Keep up to {{amount}} in unused credits for {{period}}",
+      "nextPeriod": {
+        "MONTH": "next month",
+        "YEAR": "next year",
+        "OTHER": "the next period"
+      },
+      "includesFree": "Everything in FREE",
+      "advancedModels": "Unlock advanced models",
+      "managedService": "Managed service, no setup",
+      "topupUnlock": "Pay as you go to unlock advanced models",
+      "select": "Choose {{name}}",
+      "upgrade": "Upgrade to {{name}}",
+      "downgrade": "Downgrade to {{name}}",
+      "changeUnavailable": "Unavailable",
+      "creditMultiple": "{{multiple}}× the period credits of {{name}}",
+      "credits": {
+        "MONTH": "{{amount}} credits each month",
+        "YEAR": "{{amount}} credits each year"
+      }
+    },
     "sidebar": "Balance & Plans",
     "settings": {
       "title": "Usage and billing",
@@ -12214,7 +12263,7 @@
       "observedAt": "Balance updated {{date}}",
       "poolDetail": "Used {{used}} · Total {{total}}",
       "remaining": "Remaining",
-      "progressLabel": "{{label}} usage",
+      "progressLabel": "{{label}} remaining percentage",
       "noPlanCredits": "No plan balance because there is no active subscription.",
       "historyUnavailable": "Usage history is incomplete. Only the remaining balance is available.",
       "detailsUnavailable": "Usage details are temporarily unavailable. Current balances are shown instead.",
@@ -12283,6 +12332,7 @@
     },
     "dialogs": {
       "subscription": {
+        "confirmTitle": "Confirm subscription",
         "title": "Choose a subscription plan"
       },
       "topup": {
@@ -12375,13 +12425,9 @@
       "failedBody": "Payment failed. Try again later or contact support."
     },
     "planChange": {
+      "emptyTitle": "No plans available to switch to",
       "targetTitle": "Change subscription plan",
       "back": "Back",
-      "upgradeBadge": "Upgrade",
-      "sameLevelBadge": "Same tier",
-      "downgradeBadge": "Downgrade",
-      "emptyTitle": "No plans available to switch to",
-      "emptyDescription": "There are no other plans available to switch to.",
       "quotingTitle": "Preparing plan change",
       "quotingBody": "Confirming the price and effective time…",
       "quoteTitle": "Confirm plan change",

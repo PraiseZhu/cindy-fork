@@ -233,21 +233,15 @@ export function sortSessionsForMainList(
   sortBy: FilterSortBy,
   ctx: MainListPriorityContext = EMPTY_PRIORITY_CONTEXT,
 ): Session[] {
-  if (sortBy === 'priority') {
-    return sessions
-      .slice()
-      .sort(
-        (a, b) =>
-          sessionPriorityRank(a, ctx) - sessionPriorityRank(b, ctx) ||
-          sessionPriorityRecencyMs(b, ctx) - sessionPriorityRecencyMs(a, ctx),
-      );
-  }
-  if (sortBy === 'created') {
-    return sessions.slice().sort((a, b) =>
-      sessionCreatedMs(b) - sessionCreatedMs(a) || a.id.localeCompare(b.id),
-    );
-  }
-  return sessions.slice().sort((a, b) => sessionActivityMs(b) - sessionActivityMs(a));
+  // Compute numeric keys once per call, never retain them across session updates.
+  return sessions.map((session) => ({
+    session,
+    rank: sortBy === 'priority' ? sessionPriorityRank(session, ctx) : 0,
+    time: sortBy === 'priority' ? sessionPriorityRecencyMs(session, ctx)
+      : sortBy === 'created' ? sessionCreatedMs(session) : sessionActivityMs(session),
+  })).sort((a, b) => a.rank - b.rank || b.time - a.time ||
+    (sortBy === 'created' ? a.session.id.localeCompare(b.session.id) : 0))
+    .map(({ session }) => session);
 }
 
 export interface BuildMainListEntriesInput {
@@ -372,24 +366,6 @@ export function buildMainListEntries({
   return sortMainListEntries(entries, sortBy, projectOrder, manualProjectOrder, ctx);
 }
 
-function compareEntriesBySortBy(
-  a: MainListEntry,
-  b: MainListEntry,
-  sortBy: FilterSortBy,
-  ctx: MainListPriorityContext,
-): number {
-  if (sortBy === 'priority') {
-    return (
-      entryPriorityRank(a, ctx) - entryPriorityRank(b, ctx) ||
-      entryPriorityRecencyMs(b, ctx) - entryPriorityRecencyMs(a, ctx)
-    );
-  }
-  const timeDifference = entryTimeMs(b, sortBy) - entryTimeMs(a, sortBy);
-  if (timeDifference !== 0 || sortBy !== 'created') return timeDifference;
-  return (getMainListEntrySessions(a)[0]?.id ?? '').localeCompare(
-    getMainListEntrySessions(b)[0]?.id ?? '',
-  );
-}
 
 function sortMainListEntries(
   entries: readonly MainListEntry[],
@@ -398,6 +374,17 @@ function sortMainListEntries(
   manualProjectOrder: readonly string[],
   ctx: MainListPriorityContext,
 ): MainListEntry[] {
+  const keys = new Map(entries.map((entry) => [entry, {
+    rank: sortBy === 'priority' ? entryPriorityRank(entry, ctx) : 0,
+    time: sortBy === 'priority' ? entryPriorityRecencyMs(entry, ctx) : entryTimeMs(entry, sortBy),
+    id: sortBy === 'created' ? getMainListEntrySessions(entry)[0]?.id ?? '' : '',
+  }]));
+  const compare = (a: MainListEntry, b: MainListEntry) => {
+    const left = keys.get(a)!;
+    const right = keys.get(b)!;
+    return left.rank - right.rank || right.time - left.time ||
+      (sortBy === 'created' ? left.id.localeCompare(right.id) : 0);
+  };
   if (projectOrder === 'custom') {
     // 自定义项目序:项目行按 manualProjectOrder;不在序的新项目由 normalize
     // 追加到已排序列之后。非项目条目排在项目之后,仍按当前任务排序。
@@ -420,11 +407,11 @@ function sortMainListEntries(
             Number.MAX_SAFE_INTEGER)
         );
       }
-      return compareEntriesBySortBy(a, b, sortBy, ctx);
+      return compare(a, b);
     });
   }
 
-  return entries.slice().sort((a, b) => compareEntriesBySortBy(a, b, sortBy, ctx));
+  return entries.slice().sort((a, b) => compare(a, b));
 }
 
 /* ============================== 设备分组(E 期) ============================== */
@@ -442,13 +429,11 @@ function entryDeviceId(entry: MainListEntry): string | null {
   if (entry.kind === 'automation-group') {
     return entry.group.sessions[0]?.deviceLinkDeviceId ?? null;
   }
-  // 伙伴组:同样按组内首条会话归属。伙伴本身不绑设备 —— 它的任务可以分布在
-  // 本机与远端,设备切段只看会话自己在哪。
+  // 对话组与伙伴组已经按成员设备拆分,此时首条会话代表整个片段。
   if (entry.kind === 'bot-group') {
     return entry.bot.sessions[0]?.deviceLinkDeviceId ?? null;
   }
-  // 对话组条目:按组内首条会话归属(散排对话在设备分组下由调用方按设备切分后
-  // 再分别成组,这里只是兜底)。
+  // 对话组同样已拆成单设备片段。
   return entry.sessions[0]?.deviceLinkDeviceId ?? null;
 }
 
@@ -457,8 +442,8 @@ function entryDeviceId(entry: MainListEntry): string | null {
  *   - 段顺序:本机在前,远程设备按 deviceOrder(设备切换栏同序);
  *     不在 deviceOrder 里的设备(断线缓存等)按段内最新活动排在其后。
  *   - 段内按当前 sortBy 重排(跨设备对话组拆开后,不能再沿用整组位置)。
- *   - 「对话归为一组」开启时,跨设备的对话组会被拆成每设备一组——调用方无需
- *     预切分,这里对 dialogue-group 条目按成员设备拆分。
+ *   - 「对话归为一组」开启时,跨设备的对话组和伙伴组会被拆成每设备一组——调用方无需
+ *     预切分,分组身份不变,成员只保留本设备的任务。
  */
 export function splitEntriesByDevice(
   entries: readonly MainListEntry[],
@@ -470,22 +455,24 @@ export function splitEntriesByDevice(
     priorityContext?: MainListPriorityContext;
   } = {},
 ): MainListDeviceSection[] {
-  // 先把跨设备对话组拆开(组内成员可能来自不同设备)。
+  // 先把跨设备会话组拆开,再按每个片段的成员计算排序和设备聚合灯。
   const flattened: MainListEntry[] = [];
   for (const entry of entries) {
-    if (entry.kind !== 'dialogue-group') {
+    if (entry.kind !== 'dialogue-group' && entry.kind !== 'bot-group') {
       flattened.push(entry);
       continue;
     }
     const byDevice = new Map<string | null, Session[]>();
-    for (const s of entry.sessions) {
+    for (const s of getMainListEntrySessions(entry)) {
       const key = s.deviceLinkDeviceId ?? null;
       const list = byDevice.get(key);
       if (list) list.push(s);
       else byDevice.set(key, [s]);
     }
     for (const sessions of byDevice.values()) {
-      flattened.push({ kind: 'dialogue-group', sessions });
+      flattened.push(entry.kind === 'bot-group'
+        ? { kind: 'bot-group', bot: { ...entry.bot, sessions } }
+        : { kind: 'dialogue-group', sessions });
     }
   }
 

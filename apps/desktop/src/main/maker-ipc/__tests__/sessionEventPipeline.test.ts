@@ -1383,6 +1383,7 @@ describe('Bot adapters in the shared event pipeline', () => {
     await microtasks();
     expect(h.deps.botDelegationServiceHolder.settleSession).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
       childSessionId: 'task', outcome: 'error', resultText: result,
+      execution: { instanceId: h.session.instanceId, generation: 4 },
       error: 'Pi reached the model output limit.',
     }));
     h.deps.autoResumeBookkeeping.consumeFailedTurnCompletionTail.mockReturnValue(true);
@@ -1406,6 +1407,21 @@ describe('Bot adapters in the shared event pipeline', () => {
     expect(h.deps.broadcastToAllWindows).toHaveBeenCalledWith('maker:event', expect.objectContaining({
       event: expect.objectContaining({ type: 'done', agentMeta: expect.objectContaining({ botPrivateReply: true }) }),
     }));
+  });
+
+  it('preserves retry ownership in the terminal queue snapshot', async () => {
+    const h = harness();
+    h.deps.agentInputCoordinatorHolder.getQueueControlSnapshot.mockReturnValue({ pendingQueue: [
+      { clientId: 'retry-clone', supersedesUserClientId: 'bot-delegation-interject:task:original' },
+      { clientId: 'auto-clone', retrySourceClientId: 'bot-delegation-interject:task:auto' },
+      { clientId: 'direct-input' },
+    ] });
+    h.emit(event('done', { result: 'prior result' }));
+    await microtasks();
+    expect(h.deps.botDelegationServiceHolder.settleSession).toHaveBeenCalledWith(expect.objectContaining({
+      pendingInputClientIds: ['retry-clone', 'bot-delegation-interject:task:original', 'auto-clone', 'bot-delegation-interject:task:auto', 'direct-input'],
+    }));
+    await h.dispose();
   });
 
   it('carries a pending follow-up into task settlement and remembers compact boundaries without rebuilding early', async () => {

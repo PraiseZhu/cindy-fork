@@ -627,12 +627,19 @@ describe('sendToSession ordering', () => {
       'selection,',
     );
     expect(source).toContain('withSessionLock: withSendToSessionLock,');
-    expect(directSendSwitchBlock).toContain('const release = await acquireSendToSessionLock(sessionId);');
+    expect(directSendSwitchBlock).toContain('const release = await acquireSendToSessionLock(sessionId, undefined, () => stage);');
     expectOrder(
       directSendSwitchBlock,
-      'const release = await acquireSendToSessionLock(sessionId);',
+      'const release = await acquireSendToSessionLock(sessionId, undefined, () => stage);',
       'applyPendingAgentSwitchIfIdle(',
     );
+    for (const operation of [
+      'reconcileBotModelRoute', 'applyPendingAgentSwitchIfIdle',
+      'applyScheduledModelSelection', 'prepareUnhealthySession',
+    ]) {
+      expectOrder(directSendSwitchBlock, `stage = 'direct-send:${operation}'`, `${operation}(`);
+    }
+    expectOrder(directSendSwitchBlock, 'prepareUnhealthySession', "stage = 'direct-send:caller-dispatch'");
     expectOrder(directSendSwitchBlock, 'applyPendingAgentSwitchIfIdle(', 'prepareUnhealthySession');
     expectOrder(directSendSwitchBlock, 'prepareUnhealthySession', 'return { release, selection: resolvedSelection };');
   });

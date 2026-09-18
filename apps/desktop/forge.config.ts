@@ -829,6 +829,7 @@ function extraResourcesForTarget(targetPlatform: string): string[] {
   if (windowsUpdaterRuntimeResource) {
     base.unshift(
       `resources/${UPDATER_EXE}`,
+      'resources/windows-installation-version.ps1',
       windowsUpdaterRuntimeResource,
     );
   }
@@ -1106,7 +1107,8 @@ function buildRemoteDesktopInput(platform: ForgePlatform, arch: ForgeArch): void
     const result = spawnSync('xcrun', ['clang', path.join(__dirname, 'native', 'remote-desktop', 'macos-capture.m'),
       ...captureArch, '-mmacosx-version-min=10.15', '-fobjc-arc', '-fblocks', '-O2',
       '-framework', 'Foundation', '-framework', 'AppKit', '-framework', 'CoreGraphics', '-framework', 'CoreImage',
-      '-framework', 'IOSurface', '-framework', 'ImageIO', '-framework', 'IOKit', '-o', capture], { stdio: 'inherit' });
+      '-framework', 'IOSurface', '-framework', 'ImageIO', '-framework', 'IOKit',
+      '-weak_framework', 'ScreenCaptureKit', '-framework', 'CoreMedia', '-framework', 'CoreVideo', '-o', capture], { stdio: 'inherit' });
     if (result.error || result.status !== 0) throw new Error('Remote desktop capture build failed');
     fs.chmodSync(capture, 0o755);
   } else if (process.platform === 'win32' && platform === 'win32') {
@@ -1769,6 +1771,12 @@ const config: ForgeConfig = {
           entry: 'src/main/contacts-sync/contactsSyncCodecWorker.ts',
           config: 'vite.contacts-sync-codec-worker.config.ts',
           // 大通讯录 JSON/gzip/crypto 隔离在线程中，避免阻塞 Electron main。
+          target: 'preload',
+        },
+        {
+          entry: 'src/main/worktree/recoveryArchiveWorker.ts',
+          config: 'vite.recovery-archive-worker.config.ts',
+          // Physical ASAR bytes belong in recovery archives; isolate noAsar from main.
           target: 'preload',
         },
         {

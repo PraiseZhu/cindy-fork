@@ -1,5 +1,9 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import { DESKTOP_LOCAL } from '../../../shared/remoteDesktop';
+import { DESKTOP_AUDIO_RETRY_MS, DESKTOP_LOCAL } from '../../../shared/remoteDesktop';
+
+vi.hoisted(() => {
+  vi.stubGlobal('process', { ...process, platform: 'darwin', getSystemVersion: () => '26.0' });
+});
 
 const h = vi.hoisted(() => ({
   handlers: new Map<string, any>(),
@@ -175,6 +179,7 @@ vi.mock('../../utils/ipcValidate', () => ({
   },
 }));
 import { registerRemoteDesktopIpc } from '../index';
+import { PrivacyScreen } from '../privacyScreen';
 const event = (owner = h.owner) => ({ sender: owner, senderFrame: owner.mainFrame });
 const flush = async () => {
   for (let i = 0; i < 12; i++) await Promise.resolve();
@@ -203,10 +208,17 @@ beforeEach(() => {
   registerRemoteDesktopIpc();
 });
 afterEach(() => {
+  vi.restoreAllMocks();
   h.deps.stopVideo();
   vi.clearAllTimers();
   vi.useRealTimers();
   vi.unstubAllGlobals();
+});
+
+it.each([false, true])('only stops on added displays with privacy masks active=%s', (active) => {
+  vi.spyOn(PrivacyScreen.prototype, 'active', 'get').mockReturnValue(active);
+  h.screenHandlers.get('display-added')({}, { id: 2 });
+  expect(h.stop).toHaveBeenCalledTimes(active ? 1 : 0);
 });
 
 it.each(['resolution', 'restoreResolution'])(
@@ -250,19 +262,18 @@ it.each(['resolution', 'restoreResolution'])(
   },
 );
 
-it.each([
-  ['scaleFactor'],
-  ['bounds', 'scaleFactor'],
-  ['bounds', 'workArea', 'scaleFactor'],
-])('keeps managed geometry after late display metrics %j', (...metrics) => {
-  h.screenHandlers.get('display-metrics-changed')(
-    {},
-    { id: 1, size: { width: 1920, height: 1080 } },
-    metrics,
-  );
-  expect(h.geometryMatches).toHaveBeenCalledWith('1', 1920, 1080);
-  expect(h.stop).not.toHaveBeenCalled();
-});
+it.each([['scaleFactor'], ['bounds', 'scaleFactor'], ['bounds', 'workArea', 'scaleFactor']])(
+  'keeps managed geometry after late display metrics %j',
+  (...metrics) => {
+    h.screenHandlers.get('display-metrics-changed')(
+      {},
+      { id: 1, size: { width: 1920, height: 1080 } },
+      metrics,
+    );
+    expect(h.geometryMatches).toHaveBeenCalledWith('1', 1920, 1080);
+    expect(h.stop).not.toHaveBeenCalled();
+  },
+);
 
 it.each([
   [true, ['rotation']],
@@ -623,4 +634,88 @@ it('does not advertise or select Windows overlays without a ready native service
   expect(command.nativeCapture).toBe(false);
   h.handlers.get(DESKTOP_LOCAL.REPLY)(event(), command.id, 'answer');
   await pending;
+});
+
+it.each([true, false])(
+  'bounds same-screen audio recovery after the initial grant was consumed=%s',
+  async (consumed) => {
+    const pending = h.deps.offer(
+      { lease: h.lease, display: { id: '1' } },
+      'sdp',
+      { audio: true, fps: 30, bitrate: 0 },
+      true,
+      'attempt',
+    );
+    h.handlers.get(DESKTOP_LOCAL.REGISTER)(event());
+    await flush();
+    const owner = h.owner;
+    const grant = owner.session.setDisplayMediaRequestHandler.mock.calls[0][0];
+    const callback = vi.fn();
+    const request = { frame: owner.mainFrame, videoRequested: true, audioRequested: true };
+    if (consumed) {
+      grant(request, callback);
+      expect(callback).toHaveBeenLastCalledWith({
+        video: { id: 'screen:1', display_id: '1' },
+        audio: 'loopback',
+      });
+    }
+    h.handlers.get(DESKTOP_LOCAL.REPLY)(event(), owner.send.mock.calls[0][1].id, 'answer');
+    await pending;
+    // An OS denial can happen before the first display grant is consumed.
+    // The answered video lease still permits only bounded audio recovery.
+    for (const invalid of [
+      { ...request, frame: {} },
+      { ...request, audioRequested: false },
+      { ...request, videoRequested: false },
+    ]) {
+      grant(invalid, callback);
+      expect(callback).toHaveBeenLastCalledWith({});
+    }
+    for (let i = consumed ? 1 : 0; i < 1 + DESKTOP_AUDIO_RETRY_MS.length; i++) {
+      grant(request, callback);
+      expect(callback).toHaveBeenLastCalledWith({
+        video: { id: 'screen:1', display_id: '1' },
+        audio: 'loopback',
+      });
+    }
+    grant(request, callback);
+    expect(callback).toHaveBeenLastCalledWith({});
+    expect(owner.dead).toBe(false);
+  },
+);
+
+it('revokes audio recovery with the lease and never grants it to an audio-off replacement', async () => {
+  const pending = h.deps.offer(
+    { lease: h.lease, display: { id: '1' } },
+    'sdp',
+    { audio: true, fps: 30, bitrate: 0 },
+    true,
+    'attempt',
+  );
+  h.handlers.get(DESKTOP_LOCAL.REGISTER)(event());
+  await flush();
+  const oldOwner = h.owner;
+  const oldGrant = oldOwner.session.setDisplayMediaRequestHandler.mock.calls[0][0];
+  h.handlers.get(DESKTOP_LOCAL.REPLY)(event(), oldOwner.send.mock.calls[0][1].id, 'answer');
+  await pending;
+  h.lease = 'replacement';
+  const callback = vi.fn();
+  const oldRequest = { frame: oldOwner.mainFrame, videoRequested: true, audioRequested: true };
+  oldGrant(oldRequest, callback);
+  expect(callback).toHaveBeenLastCalledWith({});
+  const replacement = offer();
+  h.handlers.get(DESKTOP_LOCAL.REGISTER)(event());
+  await flush();
+  const owner = h.owner;
+  const grant = owner.session.setDisplayMediaRequestHandler.mock.calls[0][0];
+  oldGrant(oldRequest, callback);
+  expect(callback).toHaveBeenLastCalledWith({});
+  const request = { ...oldRequest, frame: owner.mainFrame };
+  grant(request, callback);
+  expect(callback).toHaveBeenLastCalledWith({ video: { id: 'screen:1', display_id: '1' } });
+  h.handlers.get(DESKTOP_LOCAL.REPLY)(event(), owner.send.mock.calls[0][1].id, 'answer');
+  await replacement;
+  grant(request, callback);
+  expect(callback).toHaveBeenLastCalledWith({});
+  expect(owner.dead).toBe(false);
 });

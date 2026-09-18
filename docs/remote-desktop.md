@@ -29,8 +29,9 @@ also restores the local cursor inside the picture.
 With the picture focused, Cmd+C/V on macOS or Ctrl+C/V on Windows copies selected
 remote text to the local clipboard or pastes local text remotely. Transfers use
 the existing authorized Main bridge, are ordered and user-triggered, and report
-failure without reconnecting. There is no background clipboard monitoring or
-automatic context-menu synchronization; images, files and cut are not bridged.
+failure without reconnecting. These Desktop keyboard shortcuts remain text-only;
+images, files and cut are not bridged by them. The opt-in Mobile clipboard sync
+described below is a separate, foreground-only operation.
 
 The shared viewer session marks recovery only when a start is attempted, so an
 initial capability-query timeout does not turn a retry against a legacy host into
@@ -196,15 +197,15 @@ both sides. Duplicate candidates are applied once. A timed-out exchange does
 not tear down healthy video; polling is bounded to 30 seconds. SDP, candidate
 addresses, credentials and desktop content are not added to logs.
 
-| Phase | Bound |
-| --- | --- |
-| Desktop source enumeration | 2 seconds with native capture, 5 seconds otherwise |
-| Desktop offer command | 18 seconds |
-| Remote-desktop invoke | 30 seconds; other invoke channels are unchanged |
-| Viewer waiting for answer | 25 seconds |
-| ICE checks after answer | 15 seconds |
-| Temporary media disconnect | 5-second grace period |
-| Automatic media retries | 1, 3 and 8 seconds; restored after 30 seconds connected |
+| Phase                      | Bound                                                   |
+| -------------------------- | ------------------------------------------------------- |
+| Desktop source enumeration | 2 seconds with native capture, 5 seconds otherwise      |
+| Desktop offer command      | 18 seconds                                              |
+| Remote-desktop invoke      | 30 seconds; other invoke channels are unchanged         |
+| Viewer waiting for answer  | 25 seconds                                              |
+| ICE checks after answer    | 15 seconds                                              |
+| Temporary media disconnect | 5-second grace period                                   |
+| Automatic media retries    | 1, 3 and 8 seconds; restored after 30 seconds connected |
 
 On a transient disconnect the viewer keeps the picture, releases held input and
 shows the existing reconnecting badge. Input uses the existing authorized invoke
@@ -409,10 +410,13 @@ remote desktop reconnects with fresh dimensions. The shared relay and other
 peer links remain untouched. Windows/Linux display mode changes are currently
 unavailable and are not advertised.
 
-System PiP is offered only when WebKit reports support for this video and the
-native presentation module and host backgroundViewing capability are present.
+System PiP requires the native presentation module and host backgroundViewing
+capability. New iOS binaries use AVKit readiness; browser receivers require WebKit
+support for the video. Native automatic entry is armed in the foreground after the
+first frame, with host authorization completed in parallel during Home entry.
 Entering releases control. A capture-renderer challenge/pong heartbeat renews
-only a view-only lease while the viewer reports actual system PiP presentation.
+only a view-only lease after host authorization while the viewer reports actual
+system PiP presentation.
 Closing PiP, closing WebRTC, local disconnect, revocation and the ordinary finite
 lease timeout all terminate background viewing. This does not grant indefinite
 background control or extend the lifetime of unrelated device links.
@@ -485,7 +489,6 @@ Remaining platform adapters are explicitly separate:
 The macOS pre-login and Linux service adapters remain unimplemented. The remote business protocol and shared relay are unchanged. Recovery
 affects only this desktop lease/video track, not other connected peers.
 
-
 ### Windows system service (implementation awaiting Windows runtime validation)
 
 Packaged Windows builds include a native SCM service, a Main-only Node-API pipe
@@ -521,7 +524,6 @@ Windows display-mode changes and pre-login/unattended post-reboot control are no
 implemented. Linux remains deferred. Do not present this as fully validated
 Windows support or advertise high-frame-rate secure capture.
 
-
 ### Keyboard clipboard actions
 
 The keyboard's leading clipboard button opens two actions in both phone and
@@ -546,13 +548,12 @@ the existing remote-desktop business channel. Old desktops show an upgrade hint;
 no relay/server protocol changes are required. Both operations require the current
 peer-bound controlling lease, reject concurrent transfers, and check revocation
 again after asynchronous native work. The phone also discards results after its
-lease changes or it leaves the foreground. No clipboard listeners, background
-synchronization, history, logs containing text, or disk persistence are added.
+lease changes or it leaves the foreground. These explicit text operations do not
+retain clipboard history or log its contents. Opt-in synchronization is described below.
 
 TypeScript and native compilation checks cover this implementation. Keyboard/menu
 interaction, application-specific selection support, and physical-phone transfer
 have not been exercised; manual verification remains with the user.
-
 
 ### Portable clipboard content
 
@@ -567,7 +568,10 @@ fall back to clipboard content, but protected/failed/stale selection reads do no
 
 Clipboard JSON is transferred sequentially in 64 Ki-character chunks, at most
 32 Mi-characters total (native iOS additionally bounds UTF-8 bytes). Images are
-limited to 64 million pixels. Each transfer is peer/lease/control-generation
+limited to 4 million pixels on iOS before PNG encoding or incoming PNG decoding,
+with an 8 MiB encoded PNG limit. Oversized images are rejected, not downsampled.
+Android uses the limits described below.
+Each transfer is peer/lease/control-generation
 bound, lives only in memory, expires after 60 seconds, and is discarded on
 control changes or disconnect. Commit consumes its transfer before pasting and
 is never automatically retried. No transport/global frame limits are changed.
@@ -652,7 +656,6 @@ capture returning cursor geometry/raster metadata. Real phone gestures,
 application-by-application cursor transitions and sustained frame rate remain
 for manual verification.
 
-
 ## Clipboard and connection handoff
 
 The keyboard clipboard menu offers Copy to phone and Paste from phone. Copy
@@ -661,7 +664,46 @@ clipboard. Transfers support text, HTML, RTF, URLs and PNG images through bounde
 sequential chunks, with a blocking progress overlay. Arbitrary files and private
 application clipboard formats are not supported. Transfer buffers are discarded
 on completion, cancellation and lease termination; uncertain paste responses are
-never automatically retried. Native clipboard access requires a new iOS build.
+never automatically retried. Native portable clipboard access and version tracking
+require new iOS and Android native builds; older runtimes retain the text fallback.
+Android supports text, HTML, HTTP(S) URLs and PNG images (not RTF), limits decoded
+clipboard image reads and incoming PNGs to 4 million pixels, with 8 MiB limits on both the source
+and encoded PNG. Incoming Base64 length is checked before decoding, and its PNG
+header and dimensions before publication. Oversized images are rejected before unbounded encoding or
+Base64 copies; images are not downsampled. Android clipboard images
+use grant-scoped cache files. Every successful image, text or URL replacement
+reclaims unreferenced published images, retaining at most three previous images
+(24 MiB) for up to one hour as a read grace period. Current clipboard URIs are
+always preserved. Preparation uses unpublished temporary files; failed or cancelled
+preparation/publication removes only its own file. Cleanup is best effort when
+the clipboard cannot be inspected or the filesystem rejects deletion.
+Subsequent successful replacements also reclaim unpublished files left by older
+processes once they are over one hour old. Filenames include the process ID and
+start time, so current-process preparation survives long suspensions and module
+recreation without an active-file registry.
+
+Desktop manual copy, automatic reads and write verification share a 4 million
+pixel check before native PNG encoding. PNG buffers over 8 MiB are rejected before
+Base64/hash copies. Incoming PNGs have encoded-length, byte and dimension checks
+before native decoding. The pixel limit bounds encoding work; Electron still
+allocates the PNG buffer before its byte length can be checked.
+
+### Opt-in Mobile clipboard synchronization
+
+On supported peers, the security options can enable clipboard synchronization
+while the phone is foregrounded and owns the controlling lease. Every 1.5 seconds
+the phone checks local and remote version tokens, reading portable content only
+when a version changes. Android uses change notifications and description timestamps
+without reading the clipboard body during unchanged polls. Image provider reads,
+conversion and file preparation run off the Android main thread; clipboard access
+and the final foreground/version check and write run on the main thread.
+
+Synchronization compares content digests to avoid echoing its own writes and
+checks the destination version again before writing so it cannot overwrite a
+newer local copy. Disabling sync, leaving the foreground, losing control or
+disconnecting invalidates pending work. It does not poll in the background,
+maintain history or log clipboard contents. Private formats and arbitrary files
+remain unsupported; only portable representations are synchronized.
 
 Only one viewer lease is active. A second viewer sees a busy state and can
 explicitly take over when the host advertises `connectionTakeover`. Ordinary

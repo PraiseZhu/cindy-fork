@@ -1,4 +1,12 @@
 {
+  "privacyExit": {
+    "status": "正在透過 Cindy 被遠端控制",
+    "hint": "點擊螢幕或按任意鍵，確認後中斷連線",
+    "title": "中斷遠端桌面連線？",
+    "detail": "這將結束遠端控制並恢復電腦螢幕。如果已開啟結束時鎖定螢幕，電腦也會鎖定。",
+    "cancel": "保持連線",
+    "disconnect": "中斷連線"
+  },
   "appBadge": {
     "attentionCount": "需要關注的任務：{{count}}"
   },
@@ -5860,6 +5868,7 @@
   "login": {
     "title": "歡迎使用 Cindy",
     "subtitle": "選擇一種方式安全登入",
+    "savedLoginPreserved": "已儲存的登入資訊仍在本機",
     "phonePlaceholder": "請輸入手機號碼",
     "emailPlaceholder": "請輸入電子郵件",
     "invalidEmail": "請輸入正確的電子郵件地址",
@@ -5959,6 +5968,9 @@
       "fallback": "登入失敗，請稍後重試",
       "AUTH_SERVICE_UNAVAILABLE": "登入服務暫不可用",
       "AUTH_REQUEST_FAILED": "登入請求失敗，請重試",
+      "CREDENTIAL_STORE_UNAVAILABLE": "請完全退出 Cindy 後重新開啟，以恢復登入",
+      "BROWSER_OPEN_FAILED": "無法開啟瀏覽器，請重試",
+      "BROWSER_OPEN_TIMEOUT": "瀏覽器未及時啟動，請重試",
       "NETWORK_ERROR": "網路連線失敗，請檢查網路",
       "REQUEST_TIMEOUT": "請求超時，請重試",
       "INVALID_PARAMS": "輸入格式不正確",
@@ -7276,6 +7288,10 @@
       "downloadMobile": "下載 Cindy 移動端"
     },
     "accountSwitcher": {
+      "current": "目前帳號",
+      "switching": "正在切換帳號…",
+      "adding": "正在準備登入…",
+      "sharedDataRestriction": "目前的開發視窗與另一個 Cindy 執行個體共用帳號資料，無法切換或新增帳號。請在原 Cindy 視窗操作，或使用獨立資料啟動開發版。",
       "title": "切換帳號",
       "description": "選擇這台裝置上登入過的帳號",
       "syncing": "正在檢查登入狀態…",
@@ -8759,6 +8775,7 @@
     },
     "media": {
       "clickToZoom": "點擊放大",
+      "audioProgress": "播放進度",
       "audioPlay": "播放音訊",
       "audioPause": "暫停音訊",
       "modelPreviewAlt": "3D 模型預覽",
@@ -12144,6 +12161,38 @@
     }
   },
   "billing": {
+    "comparison": {
+      "free": "FREE",
+      "freeUsage": "免費使用",
+      "priceFromSuffix": "起",
+      "topup": "按需儲值",
+      "topupExpiry": "儲值點數不過期",
+      "agent": "完整 Agent 功能",
+      "apiKey": "自備 API key",
+      "existingSubscription": "接入現有訂閱",
+      "localModels": "支援本機模型",
+      "basicModels": "可用基礎模型",
+      "subscription": "訂閱方案",
+      "rollover": "剩餘點數可留到{{period}}，最多 {{amount}}",
+      "nextPeriod": {
+        "MONTH": "下個月",
+        "YEAR": "下一年",
+        "OTHER": "下期"
+      },
+      "includesFree": "包含 FREE 全部功能",
+      "advancedModels": "解鎖進階模型",
+      "managedService": "官方服務，免設定",
+      "topupUnlock": "按需付費，解鎖進階模型",
+      "select": "選擇 {{name}}",
+      "upgrade": "升級至 {{name}}",
+      "downgrade": "降級至 {{name}}",
+      "changeUnavailable": "暫不可切換",
+      "creditMultiple": "{{name}} 的 {{multiple}} 倍週期點數",
+      "credits": {
+        "MONTH": "每月 {{amount}} 點數",
+        "YEAR": "每年 {{amount}} 點數"
+      }
+    },
     "sidebar": "餘額與訂閱",
     "settings": {
       "title": "用量和計費",
@@ -12197,7 +12246,7 @@
       "observedAt": "餘額更新於 {{date}}",
       "poolDetail": "已用 {{used}} · 總額 {{total}}",
       "remaining": "剩餘",
-      "progressLabel": "{{label}}使用進度",
+      "progressLabel": "{{label}}剩餘比例",
       "noPlanCredits": "當前無生效訂閱，因此沒有訂閱餘額。",
       "historyUnavailable": "歷史記錄不完整，暫時僅顯示剩餘餘額。",
       "detailsUnavailable": "用量明細暫時不可用，當前僅顯示各類餘額。",
@@ -12266,6 +12315,7 @@
     },
     "dialogs": {
       "subscription": {
+        "confirmTitle": "確認訂閱",
         "title": "選擇訂閱套餐"
       },
       "topup": {
@@ -12358,13 +12408,9 @@
       "failedBody": "支付失敗，請稍後重試或聯絡支援。"
     },
     "planChange": {
+      "emptyTitle": "暫無可切換的套餐",
       "targetTitle": "更改訂閱套餐",
       "back": "上一步",
-      "upgradeBadge": "升級",
-      "sameLevelBadge": "同等級",
-      "downgradeBadge": "降級",
-      "emptyTitle": "暫無可切換的套餐",
-      "emptyDescription": "當前沒有其他可切換的套餐。",
       "quotingTitle": "正在準備套餐變更",
       "quotingBody": "正在確認價格與生效時間…",
       "quoteTitle": "確認套餐變更",
