@@ -70,7 +70,6 @@ import {
   DIALOGUE_GROUP_ALL_KEY,
 } from '../../hooks/helpers/sidebarFilterCore';
 import {
-  buildMainListEntries,
   CINDY_MAKE_GROUP_KEY,
   getMainListEntrySessions,
   holdViewedPriorityRank,
@@ -79,6 +78,7 @@ import {
   type MainListEntry,
   type ViewedPriorityHoldState,
 } from '../../lib/mainListModel';
+import { useMainListEntries } from '../../hooks/useMainListEntries';
 import { sidebarPriorityContext } from '../../lib/sidebarPriorityContext';
 import { useViewedPriorityHold } from '../../hooks/useViewedPriorityHold';
 import { projectKeyComparisonKey, type BotGroupNode } from '../../lib/projectGrouping';
@@ -561,42 +561,29 @@ export function ProjectsSection({
   // 混排模型(D 期):项目行 / 散排对话 / 对话组统一为顶层条目并按同一口径排序。
   // 这有意推翻旧「Dialogue 固定段在 Projects 之后」的裁决(mainListModel.ts 文件头)。
   // 设备分组开启时,未分类草稿并进混排再按设备切段;单段路径仍走顶部独立段。
-  const mixedEntries = useMemo(
+  const mixedUnclassified = useMemo(
     () =>
-      buildMainListEntries({
-        projects,
-        dialogues,
-        bots,
-        unclassified: unclassifiedHidden
-          ? []
-          : deviceGroupingActive
-            ? unclassified
-            : unclassified.filter((session) => isCindyMakeFamilySource(session.source)),
-        groupBy: filter.groupBy,
-        groupDialogue: filter.groupDialogue,
-        sortBy: filter.sortBy,
-        projectOrder: displayedProjectOrder.projectOrder,
-        manualProjectOrder: displayedProjectOrder.manualProjectOrder,
-        priorityContext,
-        notifications,
-        scheduleSessionIndex,
-      }),
-    [
-      projects,
-      dialogues,
-      bots,
-      unclassified,
-      unclassifiedHidden,
-      deviceGroupingActive,
-      filter.groupBy,
-      filter.groupDialogue,
-      filter.sortBy,
-      displayedProjectOrder,
-      priorityContext,
-      notifications,
-      scheduleSessionIndex,
-    ],
+      unclassifiedHidden
+        ? []
+        : deviceGroupingActive
+          ? unclassified
+          : unclassified.filter((session) => isCindyMakeFamilySource(session.source)),
+    [unclassified, unclassifiedHidden, deviceGroupingActive],
   );
+  const mixedEntries = useMainListEntries({
+    projects,
+    dialogues,
+    bots,
+    unclassified: mixedUnclassified,
+    groupBy: filter.groupBy,
+    groupDialogue: filter.groupDialogue,
+    sortBy: filter.sortBy,
+    projectOrder: displayedProjectOrder.projectOrder,
+    manualProjectOrder: displayedProjectOrder.manualProjectOrder,
+    priorityContext,
+    notifications,
+    scheduleSessionIndex,
+  });
 
   // 顶层条目折叠:最多显示 N 条,超出收起 + 「显示全部 N 项」。与会话同一套
   // 规则(getSessionListCollapseView):始终保留"有需关注会话"的条目、以及包含当前会话的
