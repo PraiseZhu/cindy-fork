@@ -39,11 +39,11 @@ describe('cindy-make-complete system card', () => {
         }}
       />,
     );
-    expect(screen.getByRole('region', { name: 'cindyMake.complete.title' })).toBeTruthy();
+    expect(screen.getAllByRole('region', { name: 'cindyMake.complete.title' })).toHaveLength(1);
     expect(screen.getByText('cindyMake.complete.description')).toBeTruthy();
     expect(
-      screen.getByRole('region', { name: 'cindyMake.complete.title' }).querySelectorAll('svg'),
-    ).toHaveLength(1);
+      screen.getByRole('region', { name: 'cindyMake.complete.title' }).querySelector('svg'),
+    ).toBeTruthy();
     const meta = screen.getByText(/cindyMake\.complete\.changedFiles/).textContent ?? '';
     expect(meta).toContain('"count":3');
     expect(meta).toContain('"commit":"abcdef123456"');

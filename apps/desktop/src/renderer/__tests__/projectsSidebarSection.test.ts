@@ -47,9 +47,11 @@ describe('Projects sidebar section', () => {
       'disabled: projectNodesToggleDisabled && !hasDeviceLayer && !hasGroupLayer',
     );
     expect(projectsSectionSource).toContain(
-      "const hasVisibleProjectGroups = mixedEntries.some((entry) => entry.kind === 'project')",
+      'const allVisibleProjectGroupsCollapsed = mixedEntries.every(',
     );
-    expect(projectsSectionSource).toContain('(!hasVisibleProjectGroups || isAllCollapsed)');
+    expect(projectsSectionSource).toContain(
+      "(entry) => entry.kind !== 'project' || collapsed.has(entry.project.projectKey)",
+    );
     // 平铺时来源标签要覆盖从项目摊出来的会话,不能只喂 dialogues。
     expect(projectsSectionSource).toContain('flattenedSessionsForSourceLabels');
     expect(projectsSectionSource).toContain(
@@ -137,7 +139,9 @@ describe('Projects sidebar section', () => {
     expect(projectsSectionSource).toContain(
       'return splitEntriesByDevice(mixedEntries, [...(remoteDeviceIndex?.keys() ?? [])], {',
     );
-    expect(projectsSectionSource).toContain('unclassified: deviceGroupingActive && !unclassifiedHidden ? unclassified : undefined');
+    expect(projectsSectionSource).toContain(
+      'unclassified.filter((session) => isCindyMakeFamilySource(session.source))',
+    );
     // 每段独立折叠视图 + 段内作用域的「显示全部」(复核 P2:共用一个标志会让
     // 点任一段全段展开)。
     expect(projectsSectionSource).toMatch(

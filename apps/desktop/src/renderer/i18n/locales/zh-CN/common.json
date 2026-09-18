@@ -12322,7 +12322,8 @@
     },
     "dialogs": {
       "subscription": {
-        "title": "选择订阅套餐"
+        "title": "选择订阅套餐",
+        "confirmTitle": "确认订阅"
       },
       "topup": {
         "title": "余额充值"
@@ -12455,6 +12456,39 @@
       "targetLabel": "目标套餐：{{name}}",
       "pendingDowngrade": "已排期降级至 {{name}}，{{date}} 生效。",
       "undo": "撤销降级"
+    },
+    "comparison": {
+      "select": "选择{{name}}",
+      "topup": "充值",
+      "topupUnlock": "充值后可解锁额外用量。",
+      "rollover": "{{amount}} 可结转至{{period}}",
+      "changeUnavailable": "无法进行此变更",
+      "upgrade": "升级",
+      "downgrade": "降级",
+      "free": "免费",
+      "freeUsage": "按量使用",
+      "topupExpiry": "充值余额用完为止",
+      "priceFromSuffix": "起",
+      "subscription": "订阅",
+      "includesFree": "包含免费版全部能力",
+      "creditMultiple": "额度是{{name}}的 {{multiple}} 倍",
+      "credits": {
+        "MONTH": "每月 {{amount}}",
+        "YEAR": "每年 {{amount}}",
+        "OTHER": "{{amount}}"
+      },
+      "nextPeriod": {
+        "MONTH": "下个月",
+        "YEAR": "明年",
+        "OTHER": "下一周期"
+      },
+      "agent": "Agent 任务",
+      "apiKey": "使用自有 API Key",
+      "existingSubscription": "沿用已有订阅",
+      "localModels": "本地模型",
+      "basicModels": "基础模型",
+      "advancedModels": "进阶模型",
+      "managedService": "托管服务"
     }
   },
   "fileAccess": {

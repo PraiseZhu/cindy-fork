@@ -12322,7 +12322,8 @@
     },
     "dialogs": {
       "subscription": {
-        "title": "구독 요금제 선택"
+        "title": "구독 요금제 선택",
+        "confirmTitle": "구독 확인"
       },
       "topup": {
         "title": "잔액 충전"
@@ -12455,6 +12456,39 @@
       "targetLabel": "대상 플랜: {{name}}",
       "pendingDowngrade": "{{name}}(으)로의 다운그레이드가 {{date}}에 예약되어 있습니다.",
       "undo": "다운그레이드 취소"
+    },
+    "comparison": {
+      "select": "{{name}} 선택",
+      "topup": "충전",
+      "topupUnlock": "충전하면 추가 사용량을 해제할 수 있습니다.",
+      "rollover": "{{amount}}이(가) {{period}}(으)로 이월됩니다",
+      "changeUnavailable": "이 변경은 사용할 수 없습니다",
+      "upgrade": "업그레이드",
+      "downgrade": "다운그레이드",
+      "free": "무료",
+      "freeUsage": "사용한 만큼 결제",
+      "topupExpiry": "충전 잔액은 소진될 때까지 유효",
+      "priceFromSuffix": "부터",
+      "subscription": "구독",
+      "includesFree": "무료 플랜의 모든 기능을 포함합니다",
+      "creditMultiple": "{{name}} 크레딧의 {{multiple}}배",
+      "credits": {
+        "MONTH": "매월 {{amount}}",
+        "YEAR": "매년 {{amount}}",
+        "OTHER": "{{amount}}"
+      },
+      "nextPeriod": {
+        "MONTH": "다음 달",
+        "YEAR": "내년",
+        "OTHER": "다음 기간"
+      },
+      "agent": "Agent 작업",
+      "apiKey": "자체 API 키 사용",
+      "existingSubscription": "기존 구독 사용",
+      "localModels": "로컬 모델",
+      "basicModels": "기본 모델",
+      "advancedModels": "고급 모델",
+      "managedService": "관리형 서비스"
     }
   },
   "fileAccess": {

@@ -12322,7 +12322,8 @@
     },
     "dialogs": {
       "subscription": {
-        "title": "サブスクリプションプランを選択"
+        "title": "サブスクリプションプランを選択",
+        "confirmTitle": "サブスクリプションを確認"
       },
       "topup": {
         "title": "残高チャージ"
@@ -12455,6 +12456,39 @@
       "targetLabel": "変更先プラン:{{name}}",
       "pendingDowngrade": "{{name}} へのダウングレードが {{date}} に予約されています。",
       "undo": "ダウングレードを取り消す"
+    },
+    "comparison": {
+      "select": "{{name}} を選択",
+      "topup": "チャージ",
+      "topupUnlock": "チャージすると追加利用分を解除できます。",
+      "rollover": "{{amount}} は{{period}}へ繰り越されます",
+      "changeUnavailable": "この変更はできません",
+      "upgrade": "アップグレード",
+      "downgrade": "ダウングレード",
+      "free": "無料",
+      "freeUsage": "従量課金",
+      "topupExpiry": "チャージ残高は使い切るまで有効",
+      "priceFromSuffix": "から",
+      "subscription": "サブスクリプション",
+      "includesFree": "無料プランの内容をすべて含みます",
+      "creditMultiple": "{{name}} の {{multiple}} 倍のクレジット",
+      "credits": {
+        "MONTH": "毎月 {{amount}}",
+        "YEAR": "毎年 {{amount}}",
+        "OTHER": "{{amount}}"
+      },
+      "nextPeriod": {
+        "MONTH": "翌月",
+        "YEAR": "翌年",
+        "OTHER": "次の期間"
+      },
+      "agent": "Agent タスク",
+      "apiKey": "独自の API キーを利用",
+      "existingSubscription": "既存のサブスクリプションを利用",
+      "localModels": "ローカルモデル",
+      "basicModels": "基本モデル",
+      "advancedModels": "高度なモデル",
+      "managedService": "マネージドサービス"
     }
   },
   "fileAccess": {

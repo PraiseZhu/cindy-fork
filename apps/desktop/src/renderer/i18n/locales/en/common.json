@@ -12339,7 +12339,8 @@
     },
     "dialogs": {
       "subscription": {
-        "title": "Choose a subscription plan"
+        "title": "Choose a subscription plan",
+        "confirmTitle": "Confirm subscription"
       },
       "topup": {
         "title": "Add Funds"
@@ -12472,6 +12473,39 @@
       "targetLabel": "Target plan: {{name}}",
       "pendingDowngrade": "Downgrade to {{name}} is scheduled for {{date}}.",
       "undo": "Undo downgrade"
+    },
+    "comparison": {
+      "select": "Select {{name}}",
+      "topup": "Add funds",
+      "topupUnlock": "Add funds to unlock extra usage.",
+      "rollover": "{{amount}} rolls over to {{period}}",
+      "changeUnavailable": "This change is unavailable",
+      "upgrade": "Upgrade",
+      "downgrade": "Downgrade",
+      "free": "Free",
+      "freeUsage": "Pay as you go",
+      "topupExpiry": "Added funds stay until used",
+      "priceFromSuffix": "from",
+      "subscription": "Subscription",
+      "includesFree": "Includes everything in Free",
+      "creditMultiple": "{{multiple}}x the credits of {{name}}",
+      "credits": {
+        "MONTH": "{{amount}} per month",
+        "YEAR": "{{amount}} per year",
+        "OTHER": "{{amount}}"
+      },
+      "nextPeriod": {
+        "MONTH": "next month",
+        "YEAR": "next year",
+        "OTHER": "the next period"
+      },
+      "agent": "Agent tasks",
+      "apiKey": "Bring your own API keys",
+      "existingSubscription": "Use existing subscriptions",
+      "localModels": "Local models",
+      "basicModels": "Basic models",
+      "advancedModels": "Advanced models",
+      "managedService": "Managed service"
     }
   },
   "fileAccess": {
