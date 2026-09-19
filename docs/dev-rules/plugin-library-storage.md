@@ -116,6 +116,7 @@ backups）对插件不可达——路径语法段首不许点，协议层天然�
     仍验当前 owner 与已启用 library 能力；只有 `staging.release` 核验当前 Library ACK。
     `disposeGhost` / `disposeAll` 先置 `relocating` 再排空该 ghost 在途 `staging.release`（tombstone/fsync 期间 Library 会话保持稳定），新的 release 在闸上拒绝；bind/unbind/relocate/delete 都先置 relocating 再 dispose，不把 owner mutation lease 当迁库锁。首次 mint staging 根时，耐久还要 fsync 新建根在其父目录中的 entry，只 fsync 根 inode 不算。Windows 仍报 `fsynced:false`。
     staging 根按 owner×ghost 捕获后不漂移；坏/不可读 manifest 返回 `LIBRARY_UNAVAILABLE`，不得报空或释放对应空间。
+    新原件在 blob 就位前经 Vault 写下 `intent.json`（owner/ghost/id/task/revision/hash/bytes/mime/recovery）；崩溃后 new Store 只从这份可信 intent 校验 bytes/hash 再补 `manifest.json`+dirfsync，不从 blob 猜归属。不完整或冲突 fail-closed 并保留源。本 PR 新原件必有 intent；历史无 intent 的 orphan blob 只隔离计费，不 TTL 删除、不声称可恢复。原件只在 Library ACK 且调用者已保存画布后释放。
     恢复与 release 走流式 hash，禁止 `readFile` 整文件入内存。null owner 拒。
     消费规则：仅 `version===1` 且 `operations` 为字符串数组才有效；额外字段忽略，未知
     operation 忽略，已知项保留；有效 v1 清单缺少某项才是 unsupported；缺字段、错类型、

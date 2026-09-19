@@ -179,6 +179,9 @@ function sameRecovery(a: Record<string, unknown>, b: Record<string, unknown>): b
 function blobPath(id: string): string {
   return `tasks/${id}/blob.bin`;
 }
+function intentPath(id: string): string {
+  return `tasks/${id}/intent.json`;
+}
 function manifestPath(id: string): string {
   return `tasks/${id}/manifest.json`;
 }
@@ -211,17 +214,26 @@ interface DurableRecord {
   recovery: Record<string, unknown>;
 }
 
-interface DurableManifest {
-  version: 1;
+interface TaskIdentity {
   stagingId: string;
   ghostId: string;
+  ownerScopeKey: string;
   taskId: string;
   sourceRevision: string;
   sha256: string;
   bytes: number;
   mime: string;
   recovery: Record<string, unknown>;
+}
+
+interface DurableManifest extends TaskIdentity {
+  version: 1;
   durable: true;
+}
+
+interface IntentMarker extends TaskIdentity {
+  version: 1;
+  intent: true;
 }
 
 function receiptOf(record: DurableRecord): LibraryStagingReceipt {
@@ -236,19 +248,18 @@ function receiptOf(record: DurableRecord): LibraryStagingReceipt {
   };
 }
 
-function parseManifest(raw: string, stagingId: string, ghostId: string): DurableManifest | LibraryStagingFailure {
-  if (Buffer.byteLength(raw, 'utf8') > 256 * 1024) return fail('LIBRARY_UNAVAILABLE', 'staging manifest 过大');
-  let parsed: DurableManifest;
-  try {
-    parsed = JSON.parse(raw) as DurableManifest;
-  } catch {
-    return fail('LIBRARY_UNAVAILABLE', 'staging manifest 不可读');
-  }
+function parseTaskIdentity(
+  parsed: Record<string, unknown>,
+  stagingId: string,
+  ghostId: string,
+  ownerScopeKey: string,
+  kind: 'manifest' | 'intent',
+): TaskIdentity | LibraryStagingFailure {
+  const label = kind === 'manifest' ? 'staging manifest' : 'staging intent';
   if (
-    parsed?.version !== 1
-    || parsed.durable !== true
-    || parsed.stagingId !== stagingId
+    parsed.stagingId !== stagingId
     || parsed.ghostId !== ghostId
+    || parsed.ownerScopeKey !== ownerScopeKey
     || typeof parsed.taskId !== 'string' || parsed.taskId.length === 0 || parsed.taskId.length > TASK_ID_MAX
     || typeof parsed.sourceRevision !== 'string' || parsed.sourceRevision.length === 0 || parsed.sourceRevision.length > TASK_ID_MAX
     || typeof parsed.sha256 !== 'string' || !HEX64.test(parsed.sha256)
@@ -256,9 +267,76 @@ function parseManifest(raw: string, stagingId: string, ghostId: string): Durable
     || typeof parsed.mime !== 'string' || parsed.mime.length === 0 || parsed.mime.length > MIME_MAX
     || typeof parsed.recovery !== 'object' || parsed.recovery === null || Array.isArray(parsed.recovery)
   ) {
+    return fail('LIBRARY_UNAVAILABLE', `${label} 字段非法`);
+  }
+  return {
+    stagingId,
+    ghostId,
+    ownerScopeKey,
+    taskId: parsed.taskId,
+    sourceRevision: parsed.sourceRevision,
+    sha256: parsed.sha256,
+    bytes: parsed.bytes,
+    mime: parsed.mime,
+    recovery: parsed.recovery as Record<string, unknown>,
+  };
+}
+
+function parseJsonObject(raw: string, label: string): { ok: true; value: Record<string, unknown> } | LibraryStagingFailure {
+  if (Buffer.byteLength(raw, 'utf8') > 256 * 1024) return fail('LIBRARY_UNAVAILABLE', `${label} 过大`);
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+      return fail('LIBRARY_UNAVAILABLE', `${label} 不可读`);
+    }
+    return { ok: true, value: parsed as Record<string, unknown> };
+  } catch {
+    return fail('LIBRARY_UNAVAILABLE', `${label} 不可读`);
+  }
+}
+
+function parseManifest(
+  raw: string,
+  stagingId: string,
+  ghostId: string,
+  ownerScopeKey: string,
+): DurableManifest | LibraryStagingFailure {
+  const parsed = parseJsonObject(raw, 'staging manifest');
+  if (!parsed.ok) return parsed;
+  if (parsed.value.version !== 1 || parsed.value.durable !== true || parsed.value.intent === true) {
     return fail('LIBRARY_UNAVAILABLE', 'staging manifest 字段非法');
   }
-  return parsed;
+  const identity = parseTaskIdentity(parsed.value, stagingId, ghostId, ownerScopeKey, 'manifest');
+  if ('errorCode' in identity) return identity;
+  return { ...identity, version: 1, durable: true };
+}
+
+function parseIntent(
+  raw: string,
+  stagingId: string,
+  ghostId: string,
+  ownerScopeKey: string,
+): IntentMarker | LibraryStagingFailure {
+  const parsed = parseJsonObject(raw, 'staging intent');
+  if (!parsed.ok) return parsed;
+  if (parsed.value.version !== 1 || parsed.value.intent !== true || parsed.value.durable === true) {
+    return fail('LIBRARY_UNAVAILABLE', 'staging intent 字段非法');
+  }
+  const identity = parseTaskIdentity(parsed.value, stagingId, ghostId, ownerScopeKey, 'intent');
+  if ('errorCode' in identity) return identity;
+  return { ...identity, version: 1, intent: true };
+}
+
+function identityMatches(actual: TaskIdentity, expected: TaskIdentity): boolean {
+  return actual.stagingId === expected.stagingId
+    && actual.ghostId === expected.ghostId
+    && actual.ownerScopeKey === expected.ownerScopeKey
+    && actual.taskId === expected.taskId
+    && actual.sourceRevision === expected.sourceRevision
+    && actual.sha256 === expected.sha256
+    && actual.bytes === expected.bytes
+    && actual.mime === expected.mime
+    && sameRecovery(actual.recovery, expected.recovery);
 }
 
 export class LibraryStagingStore {
@@ -383,30 +461,22 @@ export class LibraryStagingStore {
         }
         continue;
       }
-      if (!names.has('manifest.json')) {
-        const blob = inner.entries.find((item) => item.path.endsWith('/blob.bin') && item.kind === 'file');
-        if (blob) orphanBlobBytes += blob.bytes;
+      if (names.has('manifest.json')) {
+        const recovered = await this.recoverDurableFromDisk(stagingId, names.has('intent.json'));
+        if (!recovered.ok) return recovered;
+        next.set(stagingId, recovered.record);
+        durableBytes += recovered.record.bytes;
         continue;
       }
-      const raw = await this.vault.read({ path: manifestPath(stagingId), encoding: 'utf8' });
-      if (!raw.ok) return fail('LIBRARY_UNAVAILABLE', 'staging manifest 不可读');
-      const parsed = parseManifest(raw.content, stagingId, this.ghostId);
-      if ('errorCode' in parsed) return parsed;
-      const hashed = await this.vault.hashFile(blobPath(stagingId));
-      if (!hashed.ok) return fail('LIBRARY_UNAVAILABLE', 'staging 原件缺失或不可读');
-      if (hashed.sha256 !== parsed.sha256 || hashed.bytes !== parsed.bytes) {
-        return fail('LIBRARY_UNAVAILABLE', 'staging 原件与 manifest 不一致');
+      if (names.has('intent.json') && names.has('blob.bin')) {
+        const recovered = await this.recoverDurableFromIntent(stagingId);
+        if (!recovered.ok) return recovered;
+        next.set(stagingId, recovered.record);
+        durableBytes += recovered.record.bytes;
+        continue;
       }
-      next.set(stagingId, {
-        stagingId,
-        taskId: parsed.taskId,
-        sourceRevision: parsed.sourceRevision,
-        sha256: parsed.sha256,
-        bytes: parsed.bytes,
-        mime: parsed.mime,
-        recovery: parsed.recovery,
-      });
-      durableBytes += parsed.bytes;
+      const blob = inner.entries.find((item) => item.path.endsWith('/blob.bin') && item.kind === 'file');
+      if (blob) orphanBlobBytes += blob.bytes;
     }
     this.durables = next;
     this.durableBytes = durableBytes;
@@ -499,11 +569,144 @@ export class LibraryStagingStore {
     return this.durables.get(id) ?? this.uploads.get(id);
   }
 
+  private durableFromIdentity(identity: TaskIdentity): DurableRecord {
+    return {
+      stagingId: identity.stagingId,
+      taskId: identity.taskId,
+      sourceRevision: identity.sourceRevision,
+      sha256: identity.sha256,
+      bytes: identity.bytes,
+      mime: identity.mime,
+      recovery: identity.recovery,
+    };
+  }
+
+  private expectedIdentity(upload: UploadRecord, hashed: { sha256: string; bytes: number }): TaskIdentity {
+    return {
+      stagingId: upload.stagingId,
+      ghostId: this.ghostId,
+      ownerScopeKey: this.ownerScopeKey,
+      taskId: upload.taskId,
+      sourceRevision: upload.sourceRevision,
+      sha256: hashed.sha256,
+      bytes: hashed.bytes,
+      mime: upload.mime,
+      recovery: upload.recovery,
+    };
+  }
+
+  private async hashMatchesIdentity(identity: TaskIdentity): Promise<LibraryStagingResult<{ record: DurableRecord }>> {
+    const hashed = await this.vault.hashFile(blobPath(identity.stagingId));
+    if (!hashed.ok) return fail('LIBRARY_UNAVAILABLE', 'staging 原件缺失或不可读');
+    if (hashed.sha256 !== identity.sha256 || hashed.bytes !== identity.bytes) {
+      return fail('LIBRARY_UNAVAILABLE', 'staging 原件与声明身份不一致');
+    }
+    return { ok: true, record: this.durableFromIdentity(identity) };
+  }
+
+  private async recoverDurableFromDisk(
+    stagingId: string,
+    hasIntent: boolean,
+  ): Promise<LibraryStagingResult<{ record: DurableRecord }>> {
+    const raw = await this.vault.read({ path: manifestPath(stagingId), encoding: 'utf8' });
+    if (!raw.ok) return fail('LIBRARY_UNAVAILABLE', 'staging manifest 不可读');
+    const parsed = parseManifest(raw.content, stagingId, this.ghostId, this.ownerScopeKey);
+    if ('errorCode' in parsed) return parsed;
+    if (hasIntent) {
+      const intentRaw = await this.vault.read({ path: intentPath(stagingId), encoding: 'utf8' });
+      if (!intentRaw.ok) return fail('LIBRARY_UNAVAILABLE', 'staging intent 不可读');
+      const intent = parseIntent(intentRaw.content, stagingId, this.ghostId, this.ownerScopeKey);
+      if ('errorCode' in intent) return intent;
+      if (!identityMatches(parsed, intent)) {
+        return fail('LIBRARY_UNAVAILABLE', 'staging intent 与 manifest 冲突');
+      }
+    }
+    return this.hashMatchesIdentity(parsed);
+  }
+
+  private async recoverDurableFromIntent(stagingId: string): Promise<LibraryStagingResult<{ record: DurableRecord }>> {
+    const raw = await this.vault.read({ path: intentPath(stagingId), encoding: 'utf8' });
+    if (!raw.ok) return fail('LIBRARY_UNAVAILABLE', 'staging intent 不可读');
+    const intent = parseIntent(raw.content, stagingId, this.ghostId, this.ownerScopeKey);
+    if ('errorCode' in intent) return intent;
+    const matched = await this.hashMatchesIdentity(intent);
+    if (!matched.ok) return matched;
+    const promoted = await this.writeManifestUnlocked(intent);
+    if (promoted) return promoted;
+    return { ok: true, record: matched.record };
+  }
+
+  private async writeIntentUnlocked(identity: TaskIdentity): Promise<LibraryStagingFailure | null> {
+    const marker: IntentMarker = { ...identity, version: 1, intent: true };
+    const written = await this.vault.write({
+      path: intentPath(identity.stagingId),
+      content: JSON.stringify(marker),
+      ifNotExists: true,
+    });
+    if (!written.ok && written.errorCode !== 'ALREADY_EXISTS') return vaultFail(written);
+    if (!written.ok) {
+      const raw = await this.vault.read({ path: intentPath(identity.stagingId), encoding: 'utf8' });
+      if (!raw.ok) return fail('LIBRARY_UNAVAILABLE', 'staging intent 不可读');
+      const existing = parseIntent(raw.content, identity.stagingId, this.ghostId, this.ownerScopeKey);
+      if ('errorCode' in existing) return existing;
+      if (!identityMatches(existing, identity)) {
+        return fail('ALREADY_EXISTS', 'staging intent 与当前任务身份冲突');
+      }
+    }
+    const synced = await this.fsyncDurablePath(identity.stagingId);
+    if (synced) {
+      const deleted = await this.vault.delete({ path: intentPath(identity.stagingId) });
+      if (!deleted.ok && deleted.errorCode !== 'NOT_FOUND') return vaultFail(deleted);
+      return synced;
+    }
+    return null;
+  }
+
+  private async writeManifestUnlocked(identity: TaskIdentity): Promise<LibraryStagingFailure | null> {
+    const manifest: DurableManifest = { ...identity, version: 1, durable: true };
+    const written = await this.vault.write({
+      path: manifestPath(identity.stagingId),
+      content: JSON.stringify(manifest),
+      ifNotExists: true,
+    });
+    if (!written.ok && written.errorCode !== 'ALREADY_EXISTS') return vaultFail(written);
+    let created = written.ok;
+    if (!written.ok) {
+      const adopted = await this.adoptExistingManifest(identity);
+      if (adopted.error) return adopted.error;
+      created = false;
+    }
+    const journalSync = await this.fsyncDurablePath(identity.stagingId);
+    if (journalSync) {
+      if (created) {
+        const deleted = await this.vault.delete({ path: manifestPath(identity.stagingId) });
+        if (!deleted.ok && deleted.errorCode !== 'NOT_FOUND') return vaultFail(deleted);
+      }
+      return journalSync;
+    }
+    return null;
+  }
+
+  private async adoptExistingManifest(
+    expected: TaskIdentity,
+  ): Promise<{ error: LibraryStagingFailure | null }> {
+    const raw = await this.vault.read({ path: manifestPath(expected.stagingId), encoding: 'utf8' });
+    if (!raw.ok) return { error: fail('LIBRARY_UNAVAILABLE', 'staging manifest 不可读') };
+    const parsed = parseManifest(raw.content, expected.stagingId, this.ghostId, this.ownerScopeKey);
+    if ('errorCode' in parsed) return { error: parsed };
+    if (!identityMatches(parsed, expected)) {
+      return { error: fail('ALREADY_EXISTS', '已有 manifest 与当前任务身份冲突') };
+    }
+    return { error: null };
+  }
+
   private async finishReleaseUnlocked(stagingId: string): Promise<LibraryStagingFailure | null> {
     const blob = await this.vault.delete({ path: blobPath(stagingId) });
     if (!blob.ok && blob.errorCode !== 'NOT_FOUND') return vaultFail(blob);
     const manifest = await this.vault.delete({ path: manifestPath(stagingId) });
     if (!manifest.ok && manifest.errorCode !== 'NOT_FOUND') return vaultFail(manifest);
+    const intent = await this.vault.delete({ path: intentPath(stagingId) });
+    if (!intent.ok && intent.errorCode !== 'NOT_FOUND') return vaultFail(intent);
     await this.vault.delete({ path: tombstonePath(stagingId) }).catch(() => {});
     return null;
   }
@@ -563,6 +766,23 @@ export class LibraryStagingStore {
         return fail('STAGING_QUOTA', 'staging 总容量不足,请在确认归档后释放再试');
       }
       const stagingId = randomUUID();
+      const identity: TaskIdentity = {
+        stagingId,
+        ghostId: this.ghostId,
+        ownerScopeKey: this.ownerScopeKey,
+        taskId,
+        sourceRevision,
+        sha256,
+        bytes: req.totalBytes,
+        mime,
+        recovery: parsedRecovery.recovery,
+      };
+      const intentFail = await this.writeIntentUnlocked(identity);
+      if (intentFail) return intentFail;
+      if (this.requireOwner()) {
+        await this.vault.delete({ path: intentPath(stagingId) }).catch(() => {});
+        return fail('OWNER_CHANGED', '账号已切换,staging 操作已取消');
+      }
       const begin = await this.vault.writeBegin({
         path: blobPath(stagingId),
         totalBytes: req.totalBytes,
@@ -572,7 +792,10 @@ export class LibraryStagingStore {
         if (begin.ok) await this.vault.writeAbort({ streamId: begin.streamId }).catch(() => {});
         return fail('OWNER_CHANGED', '账号已切换,staging 操作已取消');
       }
-      if (!begin.ok) return vaultFail(begin);
+      if (!begin.ok) {
+        await this.vault.delete({ path: intentPath(stagingId) }).catch(() => {});
+        return vaultFail(begin);
+      }
       this.uploads.set(stagingId, {
         stagingId,
         streamId: begin.streamId,
@@ -669,42 +892,14 @@ export class LibraryStagingStore {
       }
       const blobSync = await this.fsyncDurablePath(stagingId);
       if (blobSync) return blobSync;
-      const manifest: DurableManifest = {
-        version: 1,
-        stagingId,
-        ghostId: this.ghostId,
-        taskId: upload.taskId,
-        sourceRevision: upload.sourceRevision,
-        sha256: hashed.sha256,
-        bytes: hashed.bytes,
-        mime: upload.mime,
-        recovery: upload.recovery,
-        durable: true,
-      };
-      const written = await this.vault.write({
-        path: manifestPath(stagingId),
-        content: JSON.stringify(manifest),
-        ifNotExists: true,
-      });
-      if (!written.ok) return vaultFail(written);
-      const journalSync = await this.fsyncDurablePath(stagingId);
-      if (journalSync) {
-        await this.vault.delete({ path: manifestPath(stagingId) }).catch(() => {});
-        return journalSync;
-      }
-      if (this.requireOwner()) return fail('OWNER_CHANGED', '账号已切换,staging 操作已取消');
-      const record: DurableRecord = {
-        stagingId,
-        taskId: upload.taskId,
-        sourceRevision: upload.sourceRevision,
-        sha256: hashed.sha256,
-        bytes: hashed.bytes,
-        mime: upload.mime,
-        recovery: upload.recovery,
-      };
+      const identity = this.expectedIdentity(upload, hashed);
+      const written = await this.writeManifestUnlocked(identity);
+      if (written) return written;
+      const record = this.durableFromIdentity(identity);
       this.uploads.delete(stagingId);
       this.durables.set(stagingId, record);
       this.durableBytes += hashed.bytes;
+      if (this.requireOwner()) return fail('OWNER_CHANGED', '账号已切换,staging 操作已取消');
       return { ok: true as const, ...receiptOf(record) };
     });
   }
@@ -807,6 +1002,8 @@ export class LibraryStagingStore {
       const aborted = await this.vault.writeAbort({ streamId: upload.streamId });
       this.uploads.delete(stagingId);
       this.byTask.delete(taskKey(upload.taskId, upload.sourceRevision));
+      const intentDeleted = await this.vault.delete({ path: intentPath(stagingId) });
+      if (!intentDeleted.ok && intentDeleted.errorCode !== 'NOT_FOUND') return vaultFail(intentDeleted);
       const residue = await this.refreshClosedTmp();
       if (this.requireOwner()) return fail('OWNER_CHANGED', '账号已切换,staging 操作已取消');
       if (!aborted.ok) return vaultFail(aborted);

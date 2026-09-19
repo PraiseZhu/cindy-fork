@@ -105,6 +105,9 @@ describe('LibraryStagingStore 故障恢复', () => {
   function tombstoneAbs(root: string, stagingId: string): string {
     return path.join(root, 'tasks', stagingId, 'tombstone.json');
   }
+  function intentAbs(root: string, stagingId: string): string {
+    return path.join(root, 'tasks', stagingId, 'intent.json');
+  }
   function matchingAck(commit: { sha256: string; bytes: number }) {
     return {
       ok: true as const,
@@ -830,5 +833,159 @@ describe('LibraryStagingStore 故障恢复', () => {
     scope = 'local:owner-b:1';
     const crossed = await store.read({ ghostId, stagingId });
     expect(crossed).toMatchObject({ ok: false, errorCode: 'OWNER_CHANGED' });
+  });
+
+  it('manifest 已落盘且 journalSync/delete 失败后,同实例重试读回身份并 durable,冲突 manifest 拒绝覆盖', async () => {
+    const root = path.join(tmp, 'retained-manifest', ghostId);
+    const store = makeStore(root, { maxTotalBytes: 1024 });
+    const started = await beginChunk(store, 'retained', body);
+    expect(fs.existsSync(intentAbs(root, started.stagingId))).toBe(true);
+    const origWrite = LibraryVault.prototype.write;
+    const origFsync = LibraryVault.prototype.fsyncDir;
+    const origDelete = LibraryVault.prototype.delete;
+    let failJournal = false;
+    const writeSpy = vi.spyOn(LibraryVault.prototype, 'write').mockImplementation(async function (this: LibraryVault, req) {
+      const result = await origWrite.call(this, req);
+      if (typeof req.path === 'string' && req.path.endsWith('manifest.json') && result.ok) failJournal = true;
+      return result;
+    });
+    const fsyncSpy = vi.spyOn(LibraryVault.prototype, 'fsyncDir').mockImplementation(async function (this: LibraryVault, relPath?: unknown) {
+      if (failJournal) return { ok: false, errorCode: 'INTERNAL', message: 'journal fsync 失败' };
+      return origFsync.call(this, relPath);
+    });
+    const deleteSpy = vi.spyOn(LibraryVault.prototype, 'delete').mockImplementation(async function (this: LibraryVault, req) {
+      if (typeof req.path === 'string' && req.path.endsWith('manifest.json')) {
+        return { ok: false, errorCode: 'INTERNAL', message: 'manifest delete failed' };
+      }
+      return origDelete.call(this, req);
+    });
+    try {
+      const failed = await store.commit({ ghostId, stagingId: started.stagingId });
+      expect(failed.ok).toBe(false);
+      if (!failed.ok) expect(failed.errorCode).toBe('INTERNAL');
+      expect(fs.existsSync(manifestAbs(root, started.stagingId))).toBe(true);
+      expect(fs.existsSync(blobAbs(root, started.stagingId))).toBe(true);
+    } finally {
+      writeSpy.mockRestore();
+      fsyncSpy.mockRestore();
+      deleteSpy.mockRestore();
+    }
+    const retried = await store.commit({ ghostId, stagingId: started.stagingId });
+    expect(retried).toMatchObject({ ok: true, stagingId: started.stagingId, durable: true, bytes: Buffer.byteLength(body) });
+    const listed = await store.list({ ghostId });
+    if (!listed.ok) throw new Error(JSON.stringify(listed));
+    expect(listed.items.map((item) => item.stagingId)).toEqual([started.stagingId]);
+
+    const conflictRoot = path.join(tmp, 'conflict-manifest', ghostId);
+    const conflictStore = makeStore(conflictRoot, { maxTotalBytes: 1024 });
+    const other = await beginChunk(conflictStore, 'conflict', body);
+    const origFsync2 = LibraryVault.prototype.fsyncDir;
+    const plant = vi.spyOn(LibraryVault.prototype, 'fsyncDir').mockImplementation(async function (this: LibraryVault, relPath?: unknown) {
+      if (relPath === `tasks/${other.stagingId}` && !fs.existsSync(manifestAbs(conflictRoot, other.stagingId))) {
+        const r = await origFsync2.call(this, relPath);
+        await fs.promises.writeFile(manifestAbs(conflictRoot, other.stagingId), JSON.stringify({
+          version: 1, durable: true, intent: false,
+          stagingId: other.stagingId, ghostId, ownerScopeKey: 'local:owner-a:1',
+          taskId: 'not-this-task', sourceRevision: 'rev-x',
+          sha256: other.digest, bytes: other.bytes, mime: 'image/png', recovery,
+        }));
+        return r;
+      }
+      return origFsync2.call(this, relPath);
+    });
+    try {
+      const conflicted = await conflictStore.commit({ ghostId, stagingId: other.stagingId });
+      expect(conflicted).toMatchObject({ ok: false, errorCode: 'ALREADY_EXISTS' });
+      const onDisk = JSON.parse(await fs.promises.readFile(manifestAbs(conflictRoot, other.stagingId), 'utf8')) as { taskId: string };
+      expect(onDisk.taskId).toBe('not-this-task');
+      expect(fs.existsSync(blobAbs(conflictRoot, other.stagingId))).toBe(true);
+    } finally {
+      plant.mockRestore();
+    }
+  });
+
+  it('intent 在 blob 就位前 fsync 失败则回滚;intent+blob 重启后恢复;冲突/不完整 fail-closed 保留源;release 清 intent;无配额泄漏', async () => {
+    const fsyncRoot = path.join(tmp, 'intent-fsync', ghostId);
+    const fsyncStore = makeStore(fsyncRoot, { maxTotalBytes: 1024 });
+    const origFsync = LibraryVault.prototype.fsyncDir;
+    const fsyncSpy = vi.spyOn(LibraryVault.prototype, 'fsyncDir').mockImplementation(async function (this: LibraryVault, relPath?: unknown) {
+      if (relPath === 'tasks' || relPath === '') {
+        return { ok: false, errorCode: 'INTERNAL', message: 'intent parent fsync 失败' };
+      }
+      return origFsync.call(this, relPath);
+    });
+    try {
+      const began = await fsyncStore.begin({
+        ghostId, taskId: 'intent-fsync', sourceRevision: 'rev-1',
+        totalBytes: Buffer.byteLength(body), sha256: sha, mime: 'image/png', recovery,
+      });
+      expect(began.ok).toBe(false);
+      if (!began.ok) expect(began.errorCode).toBe('INTERNAL');
+    } finally {
+      fsyncSpy.mockRestore();
+    }
+    const taskDirs = fs.existsSync(path.join(fsyncRoot, 'tasks'))
+      ? await fs.promises.readdir(path.join(fsyncRoot, 'tasks'))
+      : [];
+    for (const id of taskDirs) {
+      expect(fs.existsSync(intentAbs(fsyncRoot, id))).toBe(false);
+      expect(fs.existsSync(blobAbs(fsyncRoot, id))).toBe(false);
+    }
+
+    const recoverRoot = path.join(tmp, 'intent-recover', ghostId);
+    const live = makeStore(recoverRoot, { maxTotalBytes: 20 });
+    const started = await beginChunk(live, 'intent-crash', 'x'.repeat(20));
+    expect(fs.existsSync(intentAbs(recoverRoot, started.stagingId))).toBe(true);
+    const origWrite = LibraryVault.prototype.write;
+    const writeSpy = vi.spyOn(LibraryVault.prototype, 'write').mockImplementation(async function (this: LibraryVault, req) {
+      if (typeof req.path === 'string' && req.path.endsWith('manifest.json')) {
+        return { ok: false, errorCode: 'INTERNAL', message: 'manifest write failed' };
+      }
+      return origWrite.call(this, req);
+    });
+    try {
+      const failed = await live.commit({ ghostId, stagingId: started.stagingId });
+      expect(failed.ok).toBe(false);
+      expect(fs.existsSync(blobAbs(recoverRoot, started.stagingId))).toBe(true);
+      expect(fs.existsSync(manifestAbs(recoverRoot, started.stagingId))).toBe(false);
+      expect(fs.existsSync(intentAbs(recoverRoot, started.stagingId))).toBe(true);
+    } finally {
+      writeSpy.mockRestore();
+    }
+    const restored = makeStore(recoverRoot, { maxTotalBytes: 20 });
+    const listed = await restored.list({ ghostId });
+    if (!listed.ok) throw new Error(`intent recover list: ${JSON.stringify(listed)}`);
+    expect(listed.items.map((item) => item.stagingId)).toEqual([started.stagingId]);
+    expect(listed.items[0]?.durable).toBe(true);
+    expect(fs.existsSync(manifestAbs(recoverRoot, started.stagingId))).toBe(true);
+    const read = await restored.read({ ghostId, stagingId: started.stagingId });
+    if (!read.ok) throw new Error(JSON.stringify(read));
+    expect(Buffer.from(read.content, 'base64').toString('utf8')).toBe('x'.repeat(20));
+    const leaked = await restored.begin({
+      ghostId, taskId: 'should-quota', sourceRevision: 'rev-1',
+      totalBytes: 1, sha256: sha256Of('y'), mime: 'image/png', recovery,
+    });
+    expect(leaked).toMatchObject({ ok: false, errorCode: 'STAGING_QUOTA' });
+    const released = await restored.release({
+      ghostId, stagingId: started.stagingId, ack: matchingAck({ sha256: started.digest, bytes: 20 }),
+    });
+    expect(released).toEqual({ ok: true, stagingId: started.stagingId, released: true });
+    expect(fs.existsSync(intentAbs(recoverRoot, started.stagingId))).toBe(false);
+    expect(fs.existsSync(blobAbs(recoverRoot, started.stagingId))).toBe(false);
+
+    const conflictId = randomUUID();
+    const conflictRoot = path.join(tmp, 'intent-conflict', ghostId);
+    await fs.promises.mkdir(path.join(conflictRoot, 'tasks', conflictId), { recursive: true });
+    await fs.promises.writeFile(path.join(conflictRoot, 'tasks', conflictId, 'blob.bin'), body);
+    await fs.promises.writeFile(path.join(conflictRoot, 'tasks', conflictId, 'intent.json'), JSON.stringify({
+      version: 1, intent: true,
+      stagingId: conflictId, ghostId, ownerScopeKey: 'local:owner-a:1',
+      taskId: 'guessed', sourceRevision: 'rev-1',
+      sha256: '0'.repeat(64), bytes: Buffer.byteLength(body), mime: 'image/png', recovery,
+    }));
+    const conflicted = makeStore(conflictRoot, { maxTotalBytes: 1024 });
+    const conflictList = await conflicted.list({ ghostId });
+    expect(conflictList).toMatchObject({ ok: false, errorCode: 'LIBRARY_UNAVAILABLE' });
+    expect(fs.existsSync(blobAbs(conflictRoot, conflictId))).toBe(true);
   });
 });
