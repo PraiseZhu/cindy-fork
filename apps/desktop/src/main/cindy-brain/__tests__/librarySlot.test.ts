@@ -397,8 +397,6 @@ describe('GhostLibrarySlot', () => {
     expect(fs.existsSync(candidate)).toBe(false);
     expect(fs.existsSync(path.join(defaultRootBase, GHOST_ID, 'keep.txt'))).toBe(false);
     expect(fs.existsSync(path.join(defaultRootBase, GHOST_ID, 'empty.txt'))).toBe(false);
-    expect((missingOpen as unknown as { libraryIdentity: string }).libraryIdentity).toBe(live.libraryIdentity);
-    expect((missingOpen as unknown as { libraryGeneration: number }).libraryGeneration).toBe(live.libraryGeneration);
 
     await fs.promises.rename(parked, candidate);
     const recovered = await slot.handleLibraryRequest(GHOST_ID, { op: 'open' });
@@ -419,7 +417,8 @@ describe('GhostLibrarySlot', () => {
     expect(fs.existsSync(path.join(customRoot, 'retry.txt'))).toBe(true);
 
     if (process.platform === 'win32') return;
-    await fs.promises.rm(candidate, { recursive: true });
+    const replaced = `${candidate}.replaced`;
+    await fs.promises.rename(candidate, replaced);
     await fs.promises.mkdir(candidate, { recursive: true });
     const moved = await slot.handleLibraryRequest(GHOST_ID, { op: 'open' });
     if (!moved.ok || moved.op !== 'open') throw new Error(JSON.stringify(moved));

@@ -407,14 +407,11 @@ export class GhostLibrarySlot {
     });
     const record = 'record' in resolution ? resolution.record : undefined;
     const generation = record?.generation ?? 0;
-    const identityRoot = drift !== null && record
-      ? path.join(record.realPathAtGrant, ghostId)
-      : root;
     const identity = mintLibraryEpochIdentity({
       ghostId,
       ownerScopeKey: scopeKey,
       generation,
-      rootDir: identityRoot,
+      rootDir: root,
       grantedAt: record?.grantedAt ?? 0,
     });
     return {
