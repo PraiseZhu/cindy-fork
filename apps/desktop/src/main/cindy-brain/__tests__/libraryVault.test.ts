@@ -4,7 +4,7 @@
  * os.tmpdir 临时目录(规则 23:生成物不落仓库工作区),零 Electron。
  * symlink 用例带能力探针(Windows 无特权时跳过;POSIX CI 实跑)。
  */
-import { describe, it, expect, beforeEach, afterEach, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, beforeAll, afterAll, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -275,6 +275,73 @@ describe('LibraryVault', () => {
       // staging 清空。
       const tmpEntries = await fs.promises.readdir(path.join(libraryRoot, '.cindy-library', 'tmp'));
       expect(tmpEntries).toEqual([]);
+      const dirSync = await vault.fsyncDir('assets');
+      expect(dirSync.ok).toBe(true);
+      if (dirSync.ok) {
+        if (process.platform === 'win32') expect(dirSync.fsynced).toBe(false);
+        else expect(dirSync.fsynced).toBe(true);
+      }
+      const residue = await vault.tmpResidueBytes();
+      expect(residue).toEqual({ ok: true, bytes: 0 });
+    });
+
+    it('fsyncCreatedAncestors 同步新建根的父目录项,只 fsync 根不等于根 entry 已耐久', async () => {
+      const nestedRoot = path.join(tmpRoot, 'owners', 'a', 'library-staging', 'test-ghost');
+      const vault = makeVault({ rootDir: () => nestedRoot });
+      const opened = await vault.open();
+      expect(opened.ok).toBe(true);
+      const parent = path.dirname(nestedRoot);
+      expect(fs.existsSync(parent)).toBe(true);
+      const synced = new Set<string>();
+      const origOpen = fs.promises.open.bind(fs.promises);
+      const spy = vi.spyOn(fs.promises, 'open').mockImplementation(async (file, flags, mode) => {
+        const handle = await origOpen(file, flags, mode);
+        if (typeof file === 'string' && flags === 'r') {
+          const origSync = handle.sync.bind(handle);
+          handle.sync = async () => {
+            synced.add(path.resolve(file));
+            return origSync();
+          };
+        }
+        return handle;
+      });
+      try {
+        const ok = await vault.fsyncCreatedAncestors();
+        expect(ok.ok).toBe(true);
+        if (process.platform === 'win32') {
+          if (ok.ok) expect(ok.fsynced).toBe(false);
+        } else {
+          if (ok.ok) expect(ok.fsynced).toBe(true);
+          expect(synced.has(path.resolve(parent))).toBe(true);
+        }
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it('fsyncCreatedAncestors 父目录 fsync 失败则 INTERNAL,不得当耐久', async () => {
+      const nestedRoot = path.join(tmpRoot, 'owners', 'b', 'library-staging', 'test-ghost');
+      const vault = makeVault({ rootDir: () => nestedRoot });
+      await vault.open();
+      const parent = path.resolve(path.dirname(nestedRoot));
+      const origOpen = fs.promises.open.bind(fs.promises);
+      const spy = vi.spyOn(fs.promises, 'open').mockImplementation(async (file, flags, mode) => {
+        if (typeof file === 'string' && path.resolve(file) === parent && flags === 'r') {
+          throw Object.assign(new Error('EIO'), { code: 'EIO' });
+        }
+        return origOpen(file, flags, mode);
+      });
+      try {
+        const failed = await vault.fsyncCreatedAncestors();
+        if (process.platform === 'win32') {
+          expect(failed).toEqual({ ok: true, fsynced: false });
+        } else {
+          expect(failed.ok).toBe(false);
+          if (!failed.ok) expect(failed.errorCode).toBe('INTERNAL');
+        }
+      } finally {
+        spy.mockRestore();
+      }
     });
 
     it('sha256 声明不符 → STREAM_INVALID 且不留目标文件', async () => {
@@ -347,6 +414,8 @@ describe('LibraryVault', () => {
 
       const flat = await vault.list({ path: 'canvases/c1' });
       if (flat.ok) expect(flat.entries.map((e) => e.path)).toEqual(['canvases/c1/state.json']);
+      const compatible = await vault.list({ recursive: false });
+      expect(compatible.ok).toBe(true);
     });
   });
 
@@ -481,6 +550,11 @@ describe('LibraryVault', () => {
       expect(r.ok).toBe(false);
       const d = await vault.delete({ path: 'escape-door/anything' });
       expect(d.ok).toBe(false);
+      const compatible = await vault.list({ recursive: false });
+      expect(compatible.ok).toBe(true);
+      const strict = await vault.list({ recursive: false, strict: true });
+      expect(strict.ok).toBe(false);
+      if (!strict.ok) expect(strict.errorCode).toBe('LIBRARY_UNAVAILABLE');
     });
   });
 
@@ -499,6 +573,8 @@ describe('LibraryVault', () => {
         expect(r.sha256).toBe(sha256Of(body));
         expect(r.bytes).toBe(Buffer.byteLength(body));
       }
+      const hashed = await vault.hashFile(rel);
+      expect(hashed).toEqual({ ok: true, path: rel, bytes: Buffer.byteLength(body), sha256: sha256Of(body) });
     });
 
     it('打开后目标 identity 变化 → INTERNAL 且不得返回字节', async () => {
