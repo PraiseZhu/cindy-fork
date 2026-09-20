@@ -807,6 +807,7 @@ public static class CindyLibraryInit {
   private const uint SYNCHRONIZE = 0x00100000;
   private const uint FILE_SHARE_READ_WRITE = 0x00000003;
   private const uint FILE_SHARE_ALL = 0x00000007;
+  private const uint FILE_OPEN = 0x00000001;
   private const uint FILE_CREATE = 0x00000002;
   private const uint FILE_OPEN_IF = 0x00000003;
   private const uint FILE_DIRECTORY_FILE = 0x00000001;
@@ -870,10 +871,18 @@ public static class CindyLibraryInit {
     return segment.IndexOf('/') < 0 && segment.IndexOf((char)92) < 0 && segment.IndexOf((char)0) < 0 && segment.IndexOf(':') < 0;
   }
 
-  private static SafeFileHandle CreateRelative(IntPtr root, string name, bool directory, uint disposition, uint access) {
-    if (!ValidSegment(name)) return null;
+  private enum RelativeStatus { Ok, Collision, Reparse, Failed }
+  private struct RelativeOpen {
+    public SafeFileHandle Handle;
+    public RelativeStatus Status;
+  }
+
+  private static RelativeOpen CreateRelative(IntPtr root, string name, bool directory, uint disposition, uint access) {
+    var failed = new RelativeOpen { Handle = null, Status = RelativeStatus.Failed };
+    if (!ValidSegment(name)) return failed;
     IntPtr nameBuffer = IntPtr.Zero;
     IntPtr unicodePointer = IntPtr.Zero;
+    SafeFileHandle opened = null;
     try {
       nameBuffer = Marshal.StringToHGlobalUni(name);
       var unicode = new UNICODE_STRING {
@@ -892,7 +901,6 @@ public static class CindyLibraryInit {
         SecurityQualityOfService = IntPtr.Zero
       };
       IO_STATUS_BLOCK statusBlock;
-      SafeFileHandle opened;
       uint options = FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_REPARSE_POINT |
         (directory ? FILE_DIRECTORY_FILE : FILE_NON_DIRECTORY_FILE);
       uint fileAttributes = directory ? FILE_ATTRIBUTE_DIRECTORY : FILE_ATTRIBUTE_NORMAL;
@@ -900,22 +908,36 @@ public static class CindyLibraryInit {
       int status = NtCreateFile(out opened, access, ref attributes, out statusBlock, IntPtr.Zero, fileAttributes,
         share, disposition, options, IntPtr.Zero, 0);
       if (status == STATUS_OBJECT_NAME_COLLISION) {
-        if (opened != null) opened.Dispose();
-        return null;
+        if (opened != null) { opened.Dispose(); opened = null; }
+        return new RelativeOpen { Handle = null, Status = RelativeStatus.Collision };
       }
       if (status < 0 || opened == null || opened.IsInvalid) {
-        if (opened != null) opened.Dispose();
-        return null;
+        if (opened != null) { opened.Dispose(); opened = null; }
+        return failed;
       }
       FILE_ATTRIBUTE_TAG_INFO tag;
-      if (!GetFileInformationByHandleEx(opened.DangerousGetHandle(), 9, out tag, (uint)Marshal.SizeOf(typeof(FILE_ATTRIBUTE_TAG_INFO))) ||
-          (tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
-        opened.Dispose();
-        return null;
+      if (!GetFileInformationByHandleEx(opened.DangerousGetHandle(), 9, out tag, (uint)Marshal.SizeOf(typeof(FILE_ATTRIBUTE_TAG_INFO)))) {
+        opened.Dispose(); opened = null;
+        return failed;
       }
-      return opened;
+      if ((tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+        opened.Dispose(); opened = null;
+        return new RelativeOpen { Handle = null, Status = RelativeStatus.Reparse };
+      }
+      if (directory && (tag.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0) {
+        opened.Dispose(); opened = null;
+        return failed;
+      }
+      if (!directory && (tag.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
+        opened.Dispose(); opened = null;
+        return failed;
+      }
+      var ok = new RelativeOpen { Handle = opened, Status = RelativeStatus.Ok };
+      opened = null;
+      return ok;
     } catch {
-      return null;
+      if (opened != null) opened.Dispose();
+      return failed;
     } finally {
       if (unicodePointer != IntPtr.Zero) Marshal.FreeHGlobal(unicodePointer);
       if (nameBuffer != IntPtr.Zero) Marshal.FreeHGlobal(nameBuffer);
@@ -931,39 +953,44 @@ public static class CindyLibraryInit {
     if (!GetFileInformationByHandle(parent, out parentInfo) ||
         (parentInfo.FileIndexHigh == 0 && parentInfo.FileIndexLow == 0)) return 2;
     uint dirAccess = FILE_LIST_DIRECTORY | FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY | FILE_TRAVERSE | FILE_READ_ATTRIBUTES | SYNCHRONIZE;
-    SafeFileHandle ghost = CreateRelative(parent, ghostId, true, FILE_OPEN_IF, dirAccess);
-    if (ghost == null) return 1;
+    RelativeOpen ghost = CreateRelative(parent, ghostId, true, FILE_OPEN_IF, dirAccess);
+    if (ghost.Status != RelativeStatus.Ok || ghost.Handle == null) return 1;
     try {
-      SafeFileHandle metaDir = CreateRelative(ghost.DangerousGetHandle(), ".cindy-library", true, FILE_OPEN_IF, dirAccess);
-      if (metaDir == null) return 1;
+      RelativeOpen metaDir = CreateRelative(ghost.Handle.DangerousGetHandle(), ".cindy-library", true, FILE_OPEN_IF, dirAccess);
+      if (metaDir.Status != RelativeStatus.Ok || metaDir.Handle == null) return 1;
       try {
-        SafeFileHandle tmp = CreateRelative(metaDir.DangerousGetHandle(), "tmp", true, FILE_OPEN_IF, dirAccess);
-        if (tmp == null) return 1;
-        tmp.Dispose();
-        SafeFileHandle backups = CreateRelative(metaDir.DangerousGetHandle(), "backups", true, FILE_OPEN_IF, dirAccess);
-        if (backups == null) return 1;
-        backups.Dispose();
+        RelativeOpen tmp = CreateRelative(metaDir.Handle.DangerousGetHandle(), "tmp", true, FILE_OPEN_IF, dirAccess);
+        if (tmp.Status != RelativeStatus.Ok || tmp.Handle == null) return 1;
+        tmp.Handle.Dispose();
+        RelativeOpen backups = CreateRelative(metaDir.Handle.DangerousGetHandle(), "backups", true, FILE_OPEN_IF, dirAccess);
+        if (backups.Status != RelativeStatus.Ok || backups.Handle == null) return 1;
+        backups.Handle.Dispose();
         uint fileAccess = FILE_WRITE_DATA | FILE_READ_ATTRIBUTES | SYNCHRONIZE;
-        SafeFileHandle meta = CreateRelative(metaDir.DangerousGetHandle(), "meta.json", false, FILE_CREATE, fileAccess);
-        if (meta == null) {
-          Console.Out.Write("exists");
-          return 0;
+        RelativeOpen meta = CreateRelative(metaDir.Handle.DangerousGetHandle(), "meta.json", false, FILE_CREATE, fileAccess);
+        if (meta.Status == RelativeStatus.Ok && meta.Handle != null) {
+          try {
+            byte[] bytes = Encoding.UTF8.GetBytes(metaJson);
+            uint written;
+            if (!WriteFile(meta.Handle.DangerousGetHandle(), bytes, (uint)bytes.Length, out written, IntPtr.Zero) || written != (uint)bytes.Length) return 1;
+            if (!FlushFileBuffers(meta.Handle.DangerousGetHandle())) return 1;
+            Console.Out.Write("created");
+            return 0;
+          } finally {
+            meta.Handle.Dispose();
+          }
         }
-        try {
-          byte[] bytes = Encoding.UTF8.GetBytes(metaJson);
-          uint written;
-          if (!WriteFile(meta.DangerousGetHandle(), bytes, (uint)bytes.Length, out written, IntPtr.Zero) || written != (uint)bytes.Length) return 1;
-          if (!FlushFileBuffers(meta.DangerousGetHandle())) return 1;
-          Console.Out.Write("created");
-          return 0;
-        } finally {
-          meta.Dispose();
-        }
+        if (meta.Handle != null) meta.Handle.Dispose();
+        if (meta.Status != RelativeStatus.Collision) return 1;
+        RelativeOpen existing = CreateRelative(metaDir.Handle.DangerousGetHandle(), "meta.json", false, FILE_OPEN, FILE_READ_ATTRIBUTES | SYNCHRONIZE);
+        if (existing.Status != RelativeStatus.Ok || existing.Handle == null) return 1;
+        existing.Handle.Dispose();
+        Console.Out.Write("exists");
+        return 0;
       } finally {
-        metaDir.Dispose();
+        metaDir.Handle.Dispose();
       }
     } finally {
-      ghost.Dispose();
+      ghost.Handle.Dispose();
     }
   }
 }
