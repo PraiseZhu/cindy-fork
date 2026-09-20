@@ -369,10 +369,12 @@ export class LibraryVault {
         return this.customRootUnavailable('disk-missing');
       }
       if (grant && real !== grant.realPathAtGrant) return this.customRootUnavailable('binding-moved');
+      const stAfter = await fs.promises.lstat(parent);
+      if (stAfter.isSymbolicLink() || !stAfter.isDirectory()) return this.customRootUnavailable('disk-missing');
       if (
         grant?.identity
         && grant.identity.ino !== 0
-        && (st.dev !== grant.identity.dev || st.ino !== grant.identity.ino)
+        && (stAfter.dev !== grant.identity.dev || stAfter.ino !== grant.identity.ino)
       ) {
         return this.customRootUnavailable('binding-moved');
       }
@@ -380,6 +382,37 @@ export class LibraryVault {
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === 'ENOENT') return this.customRootUnavailable('disk-missing');
       throw err;
+    }
+  }
+
+  /** Path vs held parent inode vs grant. Not an extra inspect loop and not an atomic mkdirat. */
+  private async assertHeldCustomParent(held: {
+    dev: number;
+    ino: number;
+  }): Promise<ReturnType<LibraryVault['customRootUnavailable']> | null> {
+    const parent = path.dirname(this.root);
+    try {
+      const st = await fs.promises.lstat(parent);
+      if (st.isSymbolicLink() || !st.isDirectory()) return this.customRootUnavailable('disk-missing');
+      if (held.ino !== 0 && (st.dev !== held.dev || st.ino !== held.ino)) {
+        return this.customRootUnavailable('binding-moved');
+      }
+      return this.inspectCustomParent();
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return this.customRootUnavailable('disk-missing');
+      throw err;
+    }
+  }
+
+  /** Best-effort: drop an empty root we just created on a replaced parent. */
+  private async rollbackEmptyCustomRoot(): Promise<void> {
+    try {
+      const st = await fs.promises.lstat(this.root);
+      if (st.isSymbolicLink() || !st.isDirectory()) return;
+      const names = await fs.promises.readdir(this.root);
+      if (names.length === 0) await fs.promises.rmdir(this.root);
+    } catch {
+      /* keep files stay in the renamed-away directory */
     }
   }
 
@@ -411,24 +444,43 @@ export class LibraryVault {
         if ((this.deps.locationKind ?? 'default') === 'custom') {
           const before = await this.inspectCustomParent();
           if (before) return before;
+          let parentHandle: fs.promises.FileHandle | null = null;
+          let createdRoot = false;
           try {
-            await fs.promises.mkdir(this.root);
-          } catch (err) {
-            if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
-              return this.customRootUnavailable('disk-missing');
+            try {
+              parentHandle = await fs.promises.open(path.dirname(this.root), fs.constants.O_RDONLY);
+            } catch (err) {
+              if ((err as NodeJS.ErrnoException).code === 'ENOENT') return this.customRootUnavailable('disk-missing');
+              throw err;
             }
-            if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
-            const st = await fs.promises.lstat(this.root);
-            if (st.isSymbolicLink() || !st.isDirectory()) {
-              return this.customRootUnavailable('disk-missing');
+            const held = await parentHandle.stat();
+            if (!held.isDirectory()) return this.customRootUnavailable('disk-missing');
+            const heldId = { dev: held.dev, ino: held.ino };
+            const heldBefore = await this.assertHeldCustomParent(heldId);
+            if (heldBefore) return heldBefore;
+            try {
+              await fs.promises.mkdir(this.root);
+              createdRoot = true;
+            } catch (err) {
+              if ((err as NodeJS.ErrnoException).code === 'ENOENT') return this.customRootUnavailable('disk-missing');
+              if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+              const st = await fs.promises.lstat(this.root);
+              if (st.isSymbolicLink() || !st.isDirectory()) {
+                return this.customRootUnavailable('disk-missing');
+              }
             }
+            const afterRoot = await this.assertHeldCustomParent(heldId);
+            if (afterRoot) {
+              if (createdRoot) await this.rollbackEmptyCustomRoot();
+              return afterRoot;
+            }
+            const skeleton = await this.mkdirCustomSkeleton();
+            if (skeleton) return skeleton;
+            const afterSkeleton = await this.assertHeldCustomParent(heldId);
+            if (afterSkeleton) return afterSkeleton;
+          } finally {
+            await parentHandle?.close().catch(() => undefined);
           }
-          const after = await this.inspectCustomParent();
-          if (after) return after;
-          const skeleton = await this.mkdirCustomSkeleton();
-          if (skeleton) return skeleton;
-          const afterSkeleton = await this.inspectCustomParent();
-          if (afterSkeleton) return afterSkeleton;
         } else {
           await fs.promises.mkdir(this.root, { recursive: true });
           await fs.promises.mkdir(this.tmpDir, { recursive: true });

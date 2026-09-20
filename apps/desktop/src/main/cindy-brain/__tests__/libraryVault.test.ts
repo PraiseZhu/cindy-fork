@@ -177,6 +177,53 @@ describe('LibraryVault', () => {
       expect(fs.existsSync(path.join(parked, 'mivo-canvas', 'keep.txt'))).toBe(true);
     });
 
+    it('最后一次成功 inspect 后、mkdir(root) 前换成同路径新 inode:不得在替换目录创建/写 meta', async () => {
+      if (process.platform === 'win32') return;
+      const parent = path.join(tmpRoot, 'picked-379');
+      const custom = path.join(parent, 'mivo-canvas');
+      await fs.promises.mkdir(custom, { recursive: true });
+      await fs.promises.writeFile(path.join(custom, 'keep.txt'), 'keep-me');
+      const parentStat = await fs.promises.lstat(parent);
+      const grant = {
+        realPathAtGrant: await fs.promises.realpath(parent),
+        identity: { dev: parentStat.dev, ino: parentStat.ino },
+      };
+      const first = makeVault({ rootDir: () => custom, locationKind: 'custom', customParentGrant: grant });
+      expect(await first.open()).toMatchObject({ ok: true, state: 'ready' });
+      const parked = `${parent}.parked`;
+      const realMkdir = fs.promises.mkdir.bind(fs.promises);
+      const observed = { injected: false, mkdirOnReplacement: false, mkdirTarget: '' };
+      const mkdirSpy = vi.spyOn(fs.promises, 'mkdir').mockImplementation(async (target, options) => {
+        const dest = String(target);
+        if (!observed.injected && dest === custom) {
+          observed.injected = true;
+          if (fs.existsSync(parent)) await fs.promises.rename(parent, parked);
+          await realMkdir(parent);
+          observed.mkdirTarget = dest;
+        }
+        const result = await realMkdir(target, options);
+        if (observed.injected && dest === custom) {
+          observed.mkdirOnReplacement = fs.existsSync(custom);
+        }
+        return result;
+      });
+      const raced = makeVault({ rootDir: () => custom, locationKind: 'custom', customParentGrant: grant });
+      let opened: Awaited<ReturnType<LibraryVault['open']>>;
+      try {
+        opened = await raced.open();
+      } finally {
+        mkdirSpy.mockRestore();
+      }
+      const replacementRoot = fs.existsSync(custom);
+      const replacementMeta = fs.existsSync(path.join(custom, '.cindy-library', 'meta.json'));
+      expect(observed.injected).toBe(true);
+      expect(opened).toMatchObject({ ok: true, state: 'unavailable' });
+      expect(['binding-moved', 'disk-missing']).toContain(opened.ok ? opened.reason : '');
+      expect(replacementRoot).toBe(false);
+      expect(replacementMeta).toBe(false);
+      expect(fs.existsSync(path.join(parked, 'mivo-canvas', 'keep.txt'))).toBe(true);
+    });
+
     it('default 缺失根仍可首次创建', async () => {
       const missing = path.join(tmpRoot, 'brand-new-default', 'ghost');
       const vault = makeVault({ rootDir: () => missing, locationKind: 'default' });
