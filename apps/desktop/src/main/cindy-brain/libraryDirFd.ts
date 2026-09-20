@@ -509,20 +509,20 @@ function windowsPowerShellPath(): string | null {
 export const PROVABLE_STAGING_NAME =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.(tmp|stream)$/i;
 
-/** Linux only: unlinkat-equivalent via /proc/self/fd. Unknown names kept. */
-export function sweepProvableStagingOnLinux(
+/**
+ * Age + empty streams Map cannot prove uuid.tmp/.stream are garbage:
+ * atomicWrite/stream may have fsynced a complete unique payload before rename.
+ * Diagnostic list only. No unlink. P2_tmp UNRESOLVED.
+ */
+export function listProvableStagingOnLinux(
   parentFd: number,
   ghostId: string,
-  activeStreamIds: ReadonlySet<string>,
-  nowMs: number,
-  maxAgeMs: number,
-): { ok: true; unlinked: number } | { ok: false; code: 'UNSUPPORTED' | 'IO' | 'MISSING' } {
+): { ok: true; names: string[] } | { ok: false; code: 'UNSUPPORTED' | 'IO' | 'MISSING' } {
   if (process.platform !== 'linux') return { ok: false, code: 'UNSUPPORTED' };
   if (!validSegment(ghostId) || !Number.isInteger(parentFd) || parentFd < 0) {
     return { ok: false, code: 'IO' };
   }
   const opened: number[] = [];
-  let unlinked = 0;
   try {
     const openDirAt = (dirFd: number, name: string): number => {
       let flags = fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW;
@@ -534,22 +534,8 @@ export function sweepProvableStagingOnLinux(
     const rootFd = openDirAt(parentFd, ghostId);
     const metaDirFd = openDirAt(rootFd, '.cindy-library');
     const tmpFd = openDirAt(metaDirFd, 'tmp');
-    const names = fs.readdirSync(`/proc/self/fd/${tmpFd}`);
-    const cutoff = nowMs - maxAgeMs;
-    for (const name of names) {
-      if (!PROVABLE_STAGING_NAME.test(name)) continue;
-      if (name.endsWith('.stream') && activeStreamIds.has(name.slice(0, -'.stream'.length))) continue;
-      const target = `/proc/self/fd/${tmpFd}/${name}`;
-      try {
-        const st = fs.statSync(target);
-        if (!st.isFile() || st.mtimeMs >= cutoff) continue;
-        fs.unlinkSync(target);
-        unlinked += 1;
-      } catch {
-        /* keep on error */
-      }
-    }
-    return { ok: true, unlinked };
+    const names = fs.readdirSync(`/proc/self/fd/${tmpFd}`).filter((name) => PROVABLE_STAGING_NAME.test(name));
+    return { ok: true, names };
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code;
     if (code === 'ENOENT' || code === 'ENOTDIR') return { ok: false, code: 'MISSING' };
