@@ -19,7 +19,7 @@ import {
   type LibraryFileIdentity,
   type LibraryReadHandle,
 } from '../libraryVault.js';
-import { initCustomLibraryTree } from '../libraryDirFd.js';
+import { initCustomLibraryTree, openExistingCustomLibrary } from '../libraryDirFd.js';
 
 const sha256Of = (s: string): string => createHash('sha256').update(s).digest('hex');
 
@@ -159,12 +159,12 @@ describe('LibraryVault', () => {
         rootDir: () => custom,
         locationKind: 'custom',
         customParentGrant: grant,
-        initCustomTree: async (req) => {
+        openExistingCustom: async (req) => {
           if (!injected) {
             injected = true;
             if (fs.existsSync(parent)) await fs.promises.rename(parent, parked);
           }
-          return initCustomLibraryTree(req);
+          return openExistingCustomLibrary(req);
         },
       });
       const missing = await raced.open();
@@ -194,13 +194,13 @@ describe('LibraryVault', () => {
         rootDir: () => custom,
         locationKind: 'custom',
         customParentGrant: grant,
-        initCustomTree: async (req) => {
+        openExistingCustom: async (req) => {
           if (!injected) {
             injected = true;
             if (fs.existsSync(parent)) await fs.promises.rename(parent, parked);
             await fs.promises.mkdir(parent);
           }
-          return initCustomLibraryTree(req);
+          return openExistingCustomLibrary(req);
         },
       });
       const opened = await raced.open();
@@ -267,6 +267,69 @@ describe('LibraryVault', () => {
         expect(opened).toMatchObject({ state: 'ready' });
         expect(fs.existsSync(path.join(parent, 'mivo-canvas', '.cindy-library', 'usage.json'))).toBe(false);
       }
+    });
+
+    it('已有 custom 再 open 走 existing,不调用 create helper', async () => {
+      const parent = path.join(tmpRoot, 'picked-exist');
+      const custom = path.join(parent, 'mivo-canvas');
+      await fs.promises.mkdir(custom, { recursive: true });
+      const parentStat = await fs.promises.lstat(parent);
+      const grant = {
+        realPathAtGrant: await fs.promises.realpath(parent),
+        identity: { dev: parentStat.dev, ino: parentStat.ino },
+      };
+      const first = makeVault({
+        rootDir: () => custom, locationKind: 'custom', customParentGrant: grant, ghostId: 'mivo-canvas',
+      });
+      expect(await first.open()).toMatchObject({ ok: true, state: 'ready' });
+      const init = vi.fn(async () => ({ ok: false as const, code: 'UNSUPPORTED' as const }));
+      const second = makeVault({
+        rootDir: () => custom, locationKind: 'custom', customParentGrant: grant, ghostId: 'mivo-canvas',
+        initCustomTree: init,
+      });
+      expect(await second.open()).toMatchObject({ ok: true, state: 'ready' });
+      expect(init).not.toHaveBeenCalled();
+    });
+
+    it('existing UNSUPPORTED 且无完整结构: permission 且不 mkdir', async () => {
+      const parent = path.join(tmpRoot, 'picked-win');
+      await fs.promises.mkdir(parent);
+      const custom = path.join(parent, 'mivo-canvas');
+      const parentStat = await fs.promises.lstat(parent);
+      const grant = {
+        realPathAtGrant: await fs.promises.realpath(parent),
+        identity: { dev: parentStat.dev, ino: parentStat.ino },
+      };
+      const vault = makeVault({
+        rootDir: () => custom, locationKind: 'custom', customParentGrant: grant, ghostId: 'mivo-canvas',
+        openExistingCustom: async () => ({ ok: false as const, code: 'UNSUPPORTED' as const }),
+        initCustomTree: async () => ({ ok: false as const, code: 'UNSUPPORTED' as const }),
+      });
+      const opened = await vault.open();
+      expect(opened).toMatchObject({ ok: true, state: 'unavailable', reason: 'permission' });
+      expect(fs.existsSync(custom)).toBe(false);
+    });
+
+    it('合法 usage.json 只读复用,不因 custom open 丢账本', async () => {
+      const parent = path.join(tmpRoot, 'picked-ledger');
+      const custom = path.join(parent, 'mivo-canvas');
+      await fs.promises.mkdir(custom, { recursive: true });
+      const parentStat = await fs.promises.lstat(parent);
+      const grant = {
+        realPathAtGrant: await fs.promises.realpath(parent),
+        identity: { dev: parentStat.dev, ino: parentStat.ino },
+      };
+      const first = makeVault({
+        rootDir: () => custom, locationKind: 'custom', customParentGrant: grant, ghostId: 'mivo-canvas',
+      });
+      expect(await first.open()).toMatchObject({ ok: true, state: 'ready' });
+      const w = await first.write({ path: 'keep.txt', content: 'abcdef' });
+      expect(w.ok).toBe(true);
+      const second = makeVault({
+        rootDir: () => custom, locationKind: 'custom', customParentGrant: grant, ghostId: 'mivo-canvas',
+      });
+      const opened = await second.open();
+      expect(opened).toMatchObject({ ok: true, state: 'ready', usedBytes: Buffer.byteLength('abcdef') });
     });
 
     it('default 缺失根仍可首次创建', async () => {

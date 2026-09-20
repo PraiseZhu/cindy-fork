@@ -310,16 +310,27 @@ export class GhostLibrarySlot {
 
   private async getOrCreateSession(ghostId: string, scopeKey: string | null): Promise<GhostLibrarySession> {
     let session = this.sessions.get(ghostId);
+    const capturedScope = session;
     if (session && session.ownerScopeKey !== scopeKey) {
-      await this.teardownSession(ghostId);
-      session = undefined;
+      await this.teardownSession(ghostId, capturedScope);
+      session = this.sessions.get(ghostId);
+      if (session === capturedScope) session = undefined;
     }
     const resolution = await this.confirmLiveCustomRoot(
       await this.deps.bindingStore.resolveLibraryRoot(ghostId),
     );
+    session = this.sessions.get(ghostId) ?? session;
+    if (session && session.ownerScopeKey !== scopeKey) {
+      const staleScope = session;
+      await this.teardownSession(ghostId, staleScope);
+      session = this.sessions.get(ghostId);
+      if (session === staleScope) session = undefined;
+    }
     if (session && !this.sessionMatchesResolution(session, resolution)) {
-      await this.teardownSession(ghostId);
-      session = undefined;
+      const staleRoot = session;
+      await this.teardownSession(ghostId, staleRoot);
+      session = this.sessions.get(ghostId);
+      if (session === staleRoot) session = undefined;
     }
     if (!session) {
       session = this.createSession(ghostId, resolution, scopeKey);
@@ -552,9 +563,10 @@ export class GhostLibrarySlot {
     }
   }
 
-  private async teardownSession(ghostId: string): Promise<void> {
+  private async teardownSession(ghostId: string, expected?: GhostLibrarySession): Promise<void> {
     const session = this.sessions.get(ghostId);
     if (!session) return;
+    if (expected && session !== expected) return;
     this.sessions.delete(ghostId);
     for (const [streamId, epoch] of this.writeEpochByStream) {
       if (epoch.ghostId === ghostId) this.writeEpochByStream.delete(streamId);
@@ -670,6 +682,22 @@ export class GhostLibrarySlot {
             reason: r.reason, usedBytes: 0, fileCount: 0, location: session.locationKind,
           };
           return { ...drifted, ...this.handshakeFields(session, 'unavailable') } as GhostPipeLibraryResult;
+        }
+        if (session.locationKind === 'custom') {
+          const live = await this.confirmLiveCustomRoot(
+            await this.deps.bindingStore.resolveLibraryRoot(ghostId),
+          );
+          if (live.kind !== 'custom' || live.root === null) {
+            const reason = live.kind === 'custom' && live.root === null && live.drift === 'binding-moved'
+              ? 'binding-moved'
+              : 'disk-missing';
+            await this.latchCustomUnavailable(session, ghostId, reason);
+            const drifted = {
+              ok: true as const, op: 'open' as const, state: 'unavailable' as const,
+              reason, usedBytes: 0, fileCount: 0, location: session.locationKind,
+            };
+            return { ...drifted, ...this.handshakeFields(session, 'unavailable') } as GhostPipeLibraryResult;
+          }
         }
         this.extraDirOpenerGhostId = ghostId;
         await this.syncAgentReadonlyExtraDir(ghostId, vault.getRootDir());

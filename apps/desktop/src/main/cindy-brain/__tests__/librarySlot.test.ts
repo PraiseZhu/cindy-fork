@@ -21,7 +21,7 @@ import {
 import { createHash } from 'node:crypto';
 import { LibraryBindingStore } from '../libraryBinding.js';
 import { LibraryVault } from '../libraryVault.js';
-import { initCustomLibraryTree } from '../libraryDirFd.js';
+import { initCustomLibraryTree, openExistingCustomLibrary } from '../libraryDirFd.js';
 import { createLibraryDbCore, type SqliteDatabaseConstructor } from '../libraryDbCore.js';
 import { LibrarySqlService } from '../librarySqlService.js';
 import {
@@ -504,12 +504,12 @@ describe('GhostLibrarySlot', () => {
     let injected = false;
     createVault.mockImplementation((d) => new LibraryVault({
       ...d,
-      initCustomTree: async (req) => {
+      openExistingCustom: async (req) => {
         if (!injected) {
           injected = true;
           if (fs.existsSync(candidate)) await fs.promises.rename(candidate, parked);
         }
-        return initCustomLibraryTree(req);
+        return openExistingCustomLibrary(req);
       },
     }));
     const after = await slot.handleLibraryRequest(GHOST_ID, { op: 'open' });
@@ -541,13 +541,13 @@ describe('GhostLibrarySlot', () => {
     let injected = false;
     createVault.mockImplementation((d) => new LibraryVault({
       ...d,
-      initCustomTree: async (req) => {
+      openExistingCustom: async (req) => {
         if (!injected) {
           injected = true;
           if (fs.existsSync(candidate)) await fs.promises.rename(candidate, parked);
           await fs.promises.mkdir(candidate);
         }
-        return initCustomLibraryTree(req);
+        return openExistingCustomLibrary(req);
       },
     }));
     const after = await slot.handleLibraryRequest(GHOST_ID, { op: 'open' });
@@ -605,6 +605,41 @@ describe('GhostLibrarySlot', () => {
     if (swapped) {
       expect(fs.existsSync(path.join(custom, 'user-keep.txt'))).toBe(true);
       expect(opened.authorizedReadonly).toBe(false);
+    }
+  });
+
+  it('旧 session teardown 只删自己捕获的引用,不踩并发新建的 session', async () => {
+    const bound = await bindingStore.setBinding(GHOST_ID, candidate);
+    expect(bound.ok).toBe(true);
+    const first = await slot.handleLibraryRequest(GHOST_ID, { op: 'open' });
+    if (!first.ok || first.op !== 'open') throw new Error(JSON.stringify(first));
+    expect(first.state).toBe('ready');
+    let release!: () => void;
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    let n = 0;
+    const origResolve = LibraryBindingStore.prototype.resolveLibraryRoot.bind(bindingStore);
+    resolveLibraryRoot.mockImplementation(async (id: string) => {
+      const i = ++n;
+      const res = await origResolve(id);
+      if (i >= 2) await gate;
+      return res;
+    });
+    const other = path.join(tmp, 'picked-concurrent');
+    await fs.promises.mkdir(other);
+    const pendingA = slot.handleLibraryRequest(GHOST_ID, { op: 'status' });
+    await Promise.resolve();
+    await bindingStore.setBinding(GHOST_ID, other);
+    const pendingB = slot.handleLibraryRequest(GHOST_ID, { op: 'status' });
+    release();
+    const [a, b] = await Promise.all([pendingA, pendingB]);
+    expect(a.ok).toBe(true);
+    expect(b.ok).toBe(true);
+    const later = await slot.handleLibraryRequest(GHOST_ID, { op: 'status' });
+    expect(later.ok).toBe(true);
+    if (later.ok && later.op === 'status') {
+      expect(later.state === 'ready' || later.state === 'unavailable').toBe(true);
     }
   });
 

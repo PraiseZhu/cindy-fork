@@ -27,7 +27,12 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 
 import { isSafeGhostRelativePath } from '../../shared/ghost.js';
-import { initCustomLibraryTree, type CustomTreeInitResult } from './libraryDirFd.js';
+import {
+  initCustomLibraryTree,
+  openExistingCustomLibrary,
+  type CustomExistingUsage,
+  type CustomTreeInitResult,
+} from './libraryDirFd.js';
 
 /** Library 操作的结构化错误码(fs 槽只有人话 message 的缺口在这里补上)。 */
 export type LibraryErrorCode =
@@ -164,6 +169,10 @@ export interface LibraryVaultDeps {
     ghostId: string;
     metaJson: string;
   }): Promise<CustomTreeInitResult>;
+  openExistingCustom?(req: {
+    parentFd: number;
+    ghostId: string;
+  }): Promise<import('./libraryDirFd.js').CustomExistingResult>;
 }
 
 /** Windows 保留设备名(与 fsSlot/dirDeposit 同口径;目录名撞上同样出事)。 */
@@ -422,6 +431,7 @@ export class LibraryVault {
       if (this.invalidated) {
         return fail('LIBRARY_UNAVAILABLE', 'Library 实例已作废(owner 切换/宿主收口);请重新 open');
       }
+      let customUsage: UsageLedger | null = null;
       try {
         if ((this.deps.locationKind ?? 'default') === 'custom') {
           const before = await this.inspectCustomParent();
@@ -450,28 +460,42 @@ export class LibraryVault {
             const heldId = { dev: held.dev, ino: held.ino };
             const heldBefore = await this.assertHeldCustomParent(heldId);
             if (heldBefore) return heldBefore;
-            const tree = await (this.deps.initCustomTree ?? initCustomLibraryTree)({
+            const existing = await (this.deps.openExistingCustom ?? openExistingCustomLibrary)({
               parentFd: parentHandle.fd,
               ghostId: dirSeg,
-              metaJson,
             });
-            if (!tree.ok) {
+            if (existing.ok) {
+              this.meta = existing.meta;
+              if (existing.usage) customUsage = existing.usage;
+            } else if (existing.code === 'MISSING') {
+              const tree = await (this.deps.initCustomTree ?? initCustomLibraryTree)({
+                parentFd: parentHandle.fd,
+                ghostId: dirSeg,
+                metaJson,
+              });
+              if (!tree.ok) {
+                this.state = 'unavailable';
+                this.unavailableReason = 'permission';
+                this.opened = true;
+                return { ok: true as const, state: this.state, reason: this.unavailableReason, usedBytes: 0, fileCount: 0 };
+              }
+              if (tree.createdMeta) {
+                const parsed = JSON.parse(metaJson) as LibraryMeta;
+                if (
+                  typeof parsed === 'object' && parsed !== null && parsed.version === 1 &&
+                  typeof parsed.ghostId === 'string' && typeof parsed.createdAt === 'number'
+                ) {
+                  this.meta = parsed;
+                }
+              }
+            } else {
               this.state = 'unavailable';
-              this.unavailableReason = tree.code === 'IO' ? 'permission' : 'permission';
+              this.unavailableReason = 'permission';
               this.opened = true;
               return { ok: true as const, state: this.state, reason: this.unavailableReason, usedBytes: 0, fileCount: 0 };
             }
             const afterTree = await this.assertHeldCustomParent(heldId);
             if (afterTree) return afterTree;
-            if (tree.createdMeta) {
-              const parsed = JSON.parse(metaJson) as LibraryMeta;
-              if (
-                typeof parsed === 'object' && parsed !== null && parsed.version === 1 &&
-                typeof parsed.ghostId === 'string' && typeof parsed.createdAt === 'number'
-              ) {
-                this.meta = parsed;
-              }
-            }
           } finally {
             if (parentHandle) {
               try {
@@ -531,9 +555,9 @@ export class LibraryVault {
       }
       }
 
-      // 用量:账本读不出就全量重扫(账本是缓存,真身是文件树)。custom 首次 open 只读扫描,不 persist/unlink。
-      let ledger: UsageLedger | null = null;
-      if (!(customOpen && this.meta)) {
+      // 用量:合法账本只读复用;坏/缺才 scan。custom 首次 open 不 persist/unlink。
+      let ledger: UsageLedger | null = customUsage;
+      if (!ledger) {
       try {
         const raw = JSON.parse(await fs.promises.readFile(this.usageFile, 'utf8')) as UsageLedger;
         if (typeof raw === 'object' && raw !== null && typeof raw.files === 'number' && typeof raw.bytes === 'number') {
