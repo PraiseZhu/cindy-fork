@@ -136,7 +136,7 @@ export interface LibraryVaultDeps {
    * 兜底——比假装知道更诚实。
    */
   getDiskFreeBytes?(root: string): Promise<number | null>;
-  /** 位置类别(仅透传给 status;binding 层提供,默认系统管理位置)。 */
+  /** 位置类别。custom 根的用户父目录消失时 open 必须 fail-closed,不得 recursive mkdir 空库。 */
   locationKind?: 'default' | 'custom';
   log?: {
     info: (msg: string, meta?: Record<string, unknown>) => void;
@@ -341,6 +341,26 @@ export class LibraryVault {
     return fsFailure(err, 'INTERNAL', message);
   }
 
+  /** Custom roots must not recreate a vanished user-selected parent. keep files stay in the renamed-away directory. */
+  private customRootUnavailable(): LibrarySuccess<{ state: LibraryState; reason: string | null; usedBytes: number; fileCount: number }> {
+    this.state = 'unavailable';
+    this.unavailableReason = 'disk-missing';
+    this.opened = true;
+    return { ok: true as const, state: this.state, reason: this.unavailableReason, usedBytes: 0, fileCount: 0 };
+  }
+
+  private async missingCustomParent(): Promise<ReturnType<LibraryVault['customRootUnavailable']> | null> {
+    const parent = path.dirname(this.root);
+    try {
+      const st = await fs.promises.lstat(parent);
+      if (st.isSymbolicLink() || !st.isDirectory()) return this.customRootUnavailable();
+      return null;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return this.customRootUnavailable();
+      throw err;
+    }
+  }
+
   /* ── 打开与状态 ─────────────────────────────────────────────────── */
 
   /**
@@ -353,10 +373,30 @@ export class LibraryVault {
         return fail('LIBRARY_UNAVAILABLE', 'Library 实例已作废(owner 切换/宿主收口);请重新 open');
       }
       try {
-        await fs.promises.mkdir(this.root, { recursive: true });
+        if ((this.deps.locationKind ?? 'default') === 'custom') {
+          const missing = await this.missingCustomParent();
+          if (missing) return missing;
+          try {
+            await fs.promises.mkdir(this.root);
+          } catch (err) {
+            if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+              return this.customRootUnavailable();
+            }
+            if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+            const st = await fs.promises.lstat(this.root);
+            if (st.isSymbolicLink() || !st.isDirectory()) {
+              return this.customRootUnavailable();
+            }
+          }
+        } else {
+          await fs.promises.mkdir(this.root, { recursive: true });
+        }
         await fs.promises.mkdir(this.tmpDir, { recursive: true });
         await fs.promises.mkdir(path.join(this.metaDir, 'backups'), { recursive: true });
       } catch (err) {
+        if ((this.deps.locationKind ?? 'default') === 'custom' && (err as NodeJS.ErrnoException).code === 'ENOENT') {
+          return this.customRootUnavailable();
+        }
         this.state = 'unavailable';
         this.unavailableReason = 'permission';
         this.deps.log?.warn('library open: cannot create root', { error: err instanceof Error ? err.message : String(err) });

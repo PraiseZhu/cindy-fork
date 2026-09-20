@@ -123,6 +123,31 @@ describe('LibraryVault', () => {
       expect(stat.isDirectory()).toBe(true);
     });
 
+    it('custom 用户父目录消失: open 报 disk-missing 且不重建空库; keep 仍在 rename 走的目录', async () => {
+      const parent = path.join(tmpRoot, 'picked');
+      const custom = path.join(parent, 'mivo-canvas');
+      await fs.promises.mkdir(custom, { recursive: true });
+      await fs.promises.writeFile(path.join(custom, 'keep.txt'), 'keep-me');
+      const first = makeVault({ rootDir: () => custom, locationKind: 'custom' });
+      const opened = await first.open();
+      expect(opened).toMatchObject({ ok: true, state: 'ready' });
+      await fs.promises.rename(parent, `${parent}.parked`);
+      const second = makeVault({ rootDir: () => custom, locationKind: 'custom' });
+      const missing = await second.open();
+      expect(missing).toMatchObject({ ok: true, state: 'unavailable', reason: 'disk-missing' });
+      expect(fs.existsSync(parent)).toBe(false);
+      expect(fs.existsSync(custom)).toBe(false);
+      expect(fs.existsSync(path.join(`${parent}.parked`, 'mivo-canvas', 'keep.txt'))).toBe(true);
+    });
+
+    it('default 缺失根仍可首次创建', async () => {
+      const missing = path.join(tmpRoot, 'brand-new-default', 'ghost');
+      const vault = makeVault({ rootDir: () => missing, locationKind: 'default' });
+      const opened = await vault.open();
+      expect(opened).toMatchObject({ ok: true, state: 'ready' });
+      expect(fs.existsSync(path.join(missing, '.cindy-library', 'meta.json'))).toBe(true);
+    });
+
     it('meta 损坏 → unavailable(corrupt),绝不静默重建空库', async () => {
       await fs.promises.mkdir(path.join(libraryRoot, '.cindy-library'), { recursive: true });
       await fs.promises.writeFile(path.join(libraryRoot, '.cindy-library', 'meta.json'), '{not json');

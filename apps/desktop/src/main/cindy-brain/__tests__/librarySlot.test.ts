@@ -431,6 +431,36 @@ describe('GhostLibrarySlot', () => {
     expect(fs.existsSync(path.join(candidate, GHOST_ID, 'keep.txt'))).toBe(false);
   });
 
+  it('delayed resolveLibraryRoot: stale custom after parent rename is disk-missing without recreating empty library', async () => {
+    const bound = await bindingStore.setBinding(GHOST_ID, candidate);
+    expect(bound.ok).toBe(true);
+    const open = await slot.handleLibraryRequest(GHOST_ID, { op: 'open' });
+    if (!open.ok || open.op !== 'open') throw new Error(JSON.stringify(open));
+    expect(open.state).toBe('ready');
+    const keep = await slot.handleLibraryRequest(GHOST_ID, { op: 'write', path: 'keep.txt', content: 'keep-me' });
+    expect(keep.ok).toBe(true);
+    const customRoot = path.join(candidate, GHOST_ID);
+    expect(fs.existsSync(path.join(customRoot, 'keep.txt'))).toBe(true);
+    const parked = `${candidate}.parked`;
+    resolveLibraryRoot.mockImplementation(async (ghostId: string) => {
+      const resolution = await LibraryBindingStore.prototype.resolveLibraryRoot.call(bindingStore, ghostId);
+      if (resolution.kind === 'custom' && resolution.root !== null) {
+        if (fs.existsSync(candidate)) await fs.promises.rename(candidate, parked);
+      }
+      return resolution;
+    });
+    const after = await slot.handleLibraryRequest(GHOST_ID, { op: 'open' });
+    if (!after.ok || after.op !== 'open') throw new Error(JSON.stringify(after));
+    expect(after.state).toBe('unavailable');
+    expect(after.reason).toBe('disk-missing');
+    expect(fs.existsSync(candidate)).toBe(false);
+    expect(fs.existsSync(customRoot)).toBe(false);
+    expect(fs.existsSync(path.join(parked, GHOST_ID, 'keep.txt'))).toBe(true);
+    expect(fs.existsSync(path.join(defaultRootBase, GHOST_ID, 'keep.txt'))).toBe(false);
+    const blocked = await slot.handleLibraryRequest(GHOST_ID, { op: 'write', path: 'empty.txt', content: 'nope' });
+    expect(blocked).toMatchObject({ ok: false, errorCode: 'LIBRARY_UNAVAILABLE' });
+  });
+
   it('重装自愈:meta 带 orphaned 标记时,会话建立自动清除', async () => {
     const root = path.join(defaultRootBase, GHOST_ID);
     await fs.promises.mkdir(path.join(root, '.cindy-library'), { recursive: true });

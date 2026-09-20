@@ -314,7 +314,9 @@ export class GhostLibrarySlot {
       await this.teardownSession(ghostId);
       session = undefined;
     }
-    const resolution = await this.deps.bindingStore.resolveLibraryRoot(ghostId);
+    const resolution = await this.confirmLiveCustomRoot(
+      await this.deps.bindingStore.resolveLibraryRoot(ghostId),
+    );
     if (session && !this.sessionMatchesResolution(session, resolution)) {
       await this.teardownSession(ghostId);
       session = undefined;
@@ -365,6 +367,23 @@ export class GhostLibrarySlot {
     } catch {
       return null;
     }
+  }
+
+  /** Stale custom resolution after the user parent vanished is disk-missing; do not open/mkdir. */
+  private async confirmLiveCustomRoot(
+    resolution: LibraryLocationResolution,
+  ): Promise<LibraryLocationResolution> {
+    if (resolution.kind !== 'custom' || resolution.root === null) return resolution;
+    const parent = path.dirname(resolution.root);
+    try {
+      const st = await fs.promises.lstat(parent);
+      if (st.isSymbolicLink() || !st.isDirectory()) {
+        return { kind: 'custom', root: null, drift: 'disk-missing', record: resolution.record };
+      }
+    } catch {
+      return { kind: 'custom', root: null, drift: 'disk-missing', record: resolution.record };
+    }
+    return resolution;
   }
 
   /** Cached sessions must re-check the live binding; a missing custom root is unavailable, not an empty mkdir. */
@@ -612,6 +631,14 @@ export class GhostLibrarySlot {
       case 'open': {
         const r = await vault.open();
         if (!r.ok) return vaultFail(r);
+        if (r.state === 'unavailable' && (r.reason === 'disk-missing' || r.reason === 'binding-moved')) {
+          session.drift = r.reason;
+          const drifted = {
+            ok: true as const, op: 'open' as const, state: 'unavailable' as const,
+            reason: r.reason, usedBytes: 0, fileCount: 0, location: session.locationKind,
+          };
+          return { ...drifted, ...this.handshakeFields(session, 'unavailable') } as GhostPipeLibraryResult;
+        }
         this.extraDirOpenerGhostId = ghostId;
         await this.syncAgentReadonlyExtraDir(ghostId, vault.getRootDir());
         const body = {
