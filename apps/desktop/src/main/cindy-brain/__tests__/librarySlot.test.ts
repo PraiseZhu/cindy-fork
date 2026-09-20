@@ -461,6 +461,91 @@ describe('GhostLibrarySlot', () => {
     expect(blocked).toMatchObject({ ok: false, errorCode: 'LIBRARY_UNAVAILABLE' });
   });
 
+  it('stale resolve 后 rename+同路径新 inode:不得建空库或授权错误根', async () => {
+    if (process.platform === 'win32') return;
+    const bound = await bindingStore.setBinding(GHOST_ID, candidate);
+    expect(bound.ok).toBe(true);
+    const open = await slot.handleLibraryRequest(GHOST_ID, { op: 'open' });
+    if (!open.ok || open.op !== 'open') throw new Error(JSON.stringify(open));
+    expect(open.state).toBe('ready');
+    const keep = await slot.handleLibraryRequest(GHOST_ID, { op: 'write', path: 'keep.txt', content: 'keep-me' });
+    expect(keep.ok).toBe(true);
+    const parked = `${candidate}.parked`;
+    resolveLibraryRoot.mockImplementation(async (ghostId: string) => {
+      const resolution = await LibraryBindingStore.prototype.resolveLibraryRoot.call(bindingStore, ghostId);
+      if (resolution.kind === 'custom' && resolution.root !== null && fs.existsSync(candidate)) {
+        await fs.promises.rename(candidate, parked);
+        await fs.promises.mkdir(candidate, { recursive: true });
+      }
+      return resolution;
+    });
+    const after = await slot.handleLibraryRequest(GHOST_ID, { op: 'open' });
+    if (!after.ok || after.op !== 'open') throw new Error(JSON.stringify(after));
+    expect(after.state).toBe('unavailable');
+    expect(after.reason).toBe('binding-moved');
+    expect(fs.existsSync(path.join(candidate, GHOST_ID, '.cindy-library', 'meta.json'))).toBe(false);
+    expect(fs.existsSync(path.join(parked, GHOST_ID, 'keep.txt'))).toBe(true);
+    expect(after.authorizedReadonly).toBe(false);
+    const extraRoots = syncAgentReadonlyExtraDir.mock.calls.filter((call) => call[0] === GHOST_ID).map((call) => call[1]);
+    expect(extraRoots.at(-1) ?? 'none').not.toBe(path.join(candidate, GHOST_ID));
+  });
+
+  it('已挂 extraDir 时 confirm 与 vault.open 间 disk-missing 必须撤 grant', async () => {
+    const bound = await bindingStore.setBinding(GHOST_ID, candidate);
+    expect(bound.ok).toBe(true);
+    const open = await slot.handleLibraryRequest(GHOST_ID, { op: 'open' });
+    if (!open.ok || open.op !== 'open') throw new Error(JSON.stringify(open));
+    expect(open.authorizedReadonly).toBe(true);
+    const grantedRoot = syncAgentReadonlyExtraDir.mock.calls.find((call) => call[0] === GHOST_ID && call[1] !== null)?.[1];
+    expect(typeof grantedRoot).toBe('string');
+    const parked = `${candidate}.parked`;
+    const vault = createVault.mock.results.at(-1)?.value as LibraryVault;
+    const orig = vault.open.bind(vault);
+    vault.open = async () => {
+      if (fs.existsSync(candidate)) await fs.promises.rename(candidate, parked);
+      return orig();
+    };
+    const raced = await slot.handleLibraryRequest(GHOST_ID, { op: 'open' });
+    if (!raced.ok || raced.op !== 'open') throw new Error(JSON.stringify(raced));
+    expect(raced.state).toBe('unavailable');
+    expect(raced.reason).toBe('disk-missing');
+    expect(raced.authorizedReadonly).toBe(false);
+    const nullGrants = syncAgentReadonlyExtraDir.mock.calls.filter((call) => call[0] === GHOST_ID && call[1] === null);
+    expect(nullGrants.length).toBeGreaterThan(0);
+  });
+
+  it('auto-open 失败后同盘归位只 status 须恢复', async () => {
+    const bound = await bindingStore.setBinding(GHOST_ID, candidate);
+    expect(bound.ok).toBe(true);
+    const open = await slot.handleLibraryRequest(GHOST_ID, { op: 'open' });
+    if (!open.ok || open.op !== 'open') throw new Error(JSON.stringify(open));
+    await slot.handleLibraryRequest(GHOST_ID, { op: 'write', path: 'keep.txt', content: 'keep-me' });
+    const parked = `${candidate}.parked`;
+    let vanishOnOpen = true;
+    createVault.mockImplementation((deps) => {
+      const vault = new LibraryVault(deps);
+      const orig = vault.open.bind(vault);
+      vault.open = async () => {
+        if (vanishOnOpen && fs.existsSync(candidate)) await fs.promises.rename(candidate, parked);
+        return orig();
+      };
+      return vault;
+    });
+    await slot.disposeAll();
+    const statusMissing = await slot.handleLibraryRequest(GHOST_ID, { op: 'status' });
+    if (!statusMissing.ok || statusMissing.op !== 'status') throw new Error(JSON.stringify(statusMissing));
+    expect(statusMissing.state).toBe('unavailable');
+    expect(statusMissing.reason).toBe('disk-missing');
+    vanishOnOpen = false;
+    await fs.promises.rename(parked, candidate);
+    const statusRestored = await slot.handleLibraryRequest(GHOST_ID, { op: 'status' });
+    if (!statusRestored.ok || statusRestored.op !== 'status') throw new Error(JSON.stringify(statusRestored));
+    expect(statusRestored.state).toBe('ready');
+    const reread = await slot.handleLibraryRequest(GHOST_ID, { op: 'read', path: 'keep.txt' });
+    if (!reread.ok || reread.op !== 'read') throw new Error(JSON.stringify(reread));
+    expect(reread.content).toBe('keep-me');
+  });
+
   it('重装自愈:meta 带 orphaned 标记时,会话建立自动清除', async () => {
     const root = path.join(defaultRootBase, GHOST_ID);
     await fs.promises.mkdir(path.join(root, '.cindy-library'), { recursive: true });

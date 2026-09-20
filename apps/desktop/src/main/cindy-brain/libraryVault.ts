@@ -138,6 +138,11 @@ export interface LibraryVaultDeps {
   getDiskFreeBytes?(root: string): Promise<number | null>;
   /** 位置类别。custom 根的用户父目录消失时 open 必须 fail-closed,不得 recursive mkdir 空库。 */
   locationKind?: 'default' | 'custom';
+  /** Custom parent identity from binding; compared at mkdir so a replaced inode cannot mint an empty library. */
+  customParentGrant?: {
+    realPathAtGrant: string;
+    identity: { dev: number; ino: number } | null;
+  };
   log?: {
     info: (msg: string, meta?: Record<string, unknown>) => void;
     warn: (msg: string, meta?: Record<string, unknown>) => void;
@@ -341,22 +346,39 @@ export class LibraryVault {
     return fsFailure(err, 'INTERNAL', message);
   }
 
-  /** Custom roots must not recreate a vanished user-selected parent. keep files stay in the renamed-away directory. */
-  private customRootUnavailable(): LibrarySuccess<{ state: LibraryState; reason: string | null; usedBytes: number; fileCount: number }> {
+  /** Custom roots must not recreate a vanished or replaced user-selected parent. keep files stay in the renamed-away directory. */
+  private customRootUnavailable(
+    reason: 'disk-missing' | 'binding-moved' = 'disk-missing',
+  ): LibrarySuccess<{ state: LibraryState; reason: string | null; usedBytes: number; fileCount: number }> {
     this.state = 'unavailable';
-    this.unavailableReason = 'disk-missing';
+    this.unavailableReason = reason;
     this.opened = true;
     return { ok: true as const, state: this.state, reason: this.unavailableReason, usedBytes: 0, fileCount: 0 };
   }
 
-  private async missingCustomParent(): Promise<ReturnType<LibraryVault['customRootUnavailable']> | null> {
+  private async inspectCustomParent(): Promise<ReturnType<LibraryVault['customRootUnavailable']> | null> {
     const parent = path.dirname(this.root);
+    const grant = this.deps.customParentGrant;
     try {
       const st = await fs.promises.lstat(parent);
-      if (st.isSymbolicLink() || !st.isDirectory()) return this.customRootUnavailable();
+      if (st.isSymbolicLink() || !st.isDirectory()) return this.customRootUnavailable('disk-missing');
+      let real: string;
+      try {
+        real = await fs.promises.realpath(parent);
+      } catch {
+        return this.customRootUnavailable('disk-missing');
+      }
+      if (grant && real !== grant.realPathAtGrant) return this.customRootUnavailable('binding-moved');
+      if (
+        grant?.identity
+        && grant.identity.ino !== 0
+        && (st.dev !== grant.identity.dev || st.ino !== grant.identity.ino)
+      ) {
+        return this.customRootUnavailable('binding-moved');
+      }
       return null;
     } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return this.customRootUnavailable();
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return this.customRootUnavailable('disk-missing');
       throw err;
     }
   }
@@ -374,20 +396,22 @@ export class LibraryVault {
       }
       try {
         if ((this.deps.locationKind ?? 'default') === 'custom') {
-          const missing = await this.missingCustomParent();
-          if (missing) return missing;
+          const before = await this.inspectCustomParent();
+          if (before) return before;
           try {
             await fs.promises.mkdir(this.root);
           } catch (err) {
             if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
-              return this.customRootUnavailable();
+              return this.customRootUnavailable('disk-missing');
             }
             if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
             const st = await fs.promises.lstat(this.root);
             if (st.isSymbolicLink() || !st.isDirectory()) {
-              return this.customRootUnavailable();
+              return this.customRootUnavailable('disk-missing');
             }
           }
+          const after = await this.inspectCustomParent();
+          if (after) return after;
         } else {
           await fs.promises.mkdir(this.root, { recursive: true });
         }
