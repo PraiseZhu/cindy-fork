@@ -1056,4 +1056,67 @@ describe('LibraryStagingStore 故障恢复', () => {
     const abortFirst = await store.abort({ ghostId, stagingId: first.stagingId });
     expect(abortFirst).toMatchObject({ ok: true, aborted: true });
   });
+
+  it('闲置清扫 unlink 失败后本次 begin 仍计入残片额度', async () => {
+    let now = 1_000;
+    const root = path.join(tmp, 'idle-residue', ghostId);
+    const store = makeStore(root, {
+      maxConcurrentWrites: 2,
+      maxTotalBytes: 60,
+      streamIdleTimeoutMs: 10,
+      now: () => now,
+    });
+    const payload = 'x'.repeat(50);
+    const first = await store.begin({
+      ghostId, taskId: 'idle-residue', sourceRevision: 'r',
+      totalBytes: payload.length, sha256: sha256Of(payload), mime: 'image/png', recovery,
+    });
+    if (!first.ok) throw new Error(JSON.stringify(first));
+    const chunk = await store.chunk({
+      ghostId, stagingId: first.stagingId, seq: 1,
+      content: Buffer.from(payload).toString('base64'), encoding: 'base64',
+    });
+    if (!chunk.ok) throw new Error(JSON.stringify(chunk));
+    const realUnlink = fs.promises.unlink.bind(fs.promises);
+    const unlinkSpy = vi.spyOn(fs.promises, 'unlink').mockImplementation(async (target, ...rest) => {
+      if (String(target).includes(`${path.sep}.cindy-library${path.sep}tmp${path.sep}`)) {
+        throw Object.assign(new Error('EACCES unlink tmp'), { code: 'EACCES' });
+      }
+      return realUnlink(target, ...rest);
+    });
+    now = 1_020;
+    const second = await store.begin({
+      ghostId, taskId: 'after-residue', sourceRevision: 'r',
+      totalBytes: 20, sha256: sha256Of('y'.repeat(20)), mime: 'image/png', recovery,
+    });
+    unlinkSpy.mockRestore();
+    expect(second).toMatchObject({ ok: false, errorCode: 'STAGING_QUOTA' });
+  });
+
+  it('磁盘保留只扣未写入剩余;commitPending 不再重复占预留', async () => {
+    const store = makeStore(path.join(tmp, 'unwritten-reserve', ghostId), {
+      maxConcurrentWrites: 2,
+      maxTotalBytes: 10_000,
+      maxTaskBytes: 10_000,
+      maxChunkBytes: 10_000,
+      reserveBytes: 10,
+      getDiskFreeBytes: async () => 1000,
+    });
+    const payload = 'z'.repeat(80);
+    const first = await store.begin({
+      ghostId, taskId: 'partial', sourceRevision: 'r',
+      totalBytes: payload.length, sha256: sha256Of(payload), mime: 'image/png', recovery,
+    });
+    if (!first.ok) throw new Error(JSON.stringify(first));
+    const chunk = await store.chunk({
+      ghostId, stagingId: first.stagingId, seq: 1,
+      content: Buffer.from(payload).toString('base64'), encoding: 'base64',
+    });
+    if (!chunk.ok) throw new Error(JSON.stringify(chunk));
+    const next = await store.begin({
+      ghostId, taskId: 'fits-remaining', sourceRevision: 'r',
+      totalBytes: 960, sha256: sha256Of('n'.repeat(960)), mime: 'image/png', recovery,
+    });
+    expect(next.ok).toBe(true);
+  });
 });

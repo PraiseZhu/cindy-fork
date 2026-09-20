@@ -205,6 +205,7 @@ interface UploadRecord {
   nextSeq: number;
   lastChunk: Buffer | null;
   lastAt: number;
+  written: number;
   /** writeCommit succeeded; keep mapping until manifest+dirsync durable. */
   commitPending: boolean;
 }
@@ -526,6 +527,16 @@ export class LibraryStagingStore {
     }
   }
 
+  /** Bytes declared but not yet on disk. commitPending blobs are already landed. */
+  private unwrittenReservationBytes(): number {
+    let total = 0;
+    for (const upload of this.uploads.values()) {
+      if (upload.commitPending) continue;
+      total += Math.max(0, upload.totalBytes - upload.written);
+    }
+    return total;
+  }
+
   private async checkDiskReserveUnlocked(extraBytes: number): Promise<LibraryStagingFailure | null> {
     if (!this.deps.getDiskFreeBytes) return null;
     let free: number | null = null;
@@ -534,7 +545,7 @@ export class LibraryStagingStore {
     } catch {
       return null;
     }
-    if (free !== null && free - this.trackedUploadBytes() - extraBytes < this.limits.reserveBytes) {
+    if (free !== null && free - this.unwrittenReservationBytes() - extraBytes < this.limits.reserveBytes) {
       return fail('DISK_FULL', `磁盘剩余空间低于保留水位(${this.limits.reserveBytes} 字节);请清理磁盘或确认归档后释放`);
     }
     return null;
@@ -794,6 +805,11 @@ export class LibraryStagingStore {
         return fail('ALREADY_EXISTS', '同一 task/revision 已有不同元数据的原件');
       }
       await this.sweepIdleUploadsUnlocked();
+      if (this.closedTmpStale) {
+        const residue = await this.refreshClosedTmp();
+        if (residue) return residue;
+        this.closedTmpStale = false;
+      }
       if (this.uploads.size >= this.limits.maxConcurrentWrites) {
         return fail('STAGING_BUSY', '并发上传已达上限,请稍后重试');
       }
@@ -845,6 +861,7 @@ export class LibraryStagingStore {
         nextSeq: 1,
         lastChunk: null,
         lastAt: this.now(),
+        written: 0,
         commitPending: false,
       });
       this.byTask.set(taskKey(taskId, sourceRevision), stagingId);
@@ -893,6 +910,7 @@ export class LibraryStagingStore {
       upload.nextSeq = req.seq + 1;
       upload.lastChunk = decoded;
       upload.lastAt = this.now();
+      upload.written += decoded.byteLength;
       return { ok: true as const, accepted: chunk.accepted };
     });
   }
