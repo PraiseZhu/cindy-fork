@@ -36,13 +36,14 @@ describe('LibraryStagingStore 故障恢复', () => {
       listPageSize?: number;
       now?: () => number;
       getDiskFreeBytes?: () => Promise<number | null>;
+      ownerScopeKey?: string;
     } = {},
   ): LibraryStagingStore =>
     new LibraryStagingStore({
       rootDir: root,
-      ownerScopeKey: 'local:owner-a:1',
+      ownerScopeKey: extra.ownerScopeKey ?? 'local:owner-a:1',
       ghostId,
-      captureOwnerScope: () => scope,
+      captureOwnerScope: () => extra.ownerScopeKey ?? scope,
       createVault: (deps) => new LibraryVault({
         ...deps,
         limits: {
@@ -1118,5 +1119,31 @@ describe('LibraryStagingStore 故障恢复', () => {
       totalBytes: 960, sha256: sha256Of('n'.repeat(960)), mime: 'image/png', recovery,
     });
     expect(next.ok).toBe(true);
+  });
+
+  it('同 owner 进程重启 generation 变化后仍恢复磁盘 durable,不报 manifest 字段非法', async () => {
+    const root = path.join(tmp, 'gen-restart', ghostId);
+    const first = makeStore(root, { ownerScopeKey: 'local:local-v1:2', maxTotalBytes: 1024 });
+    const committed = await commitOne(first, 'restart-task', body);
+    const onDisk = JSON.parse(await fs.promises.readFile(manifestAbs(root, committed.stagingId), 'utf8')) as {
+      ownerScopeKey: string;
+      version: number;
+      durable: boolean;
+    };
+    expect(onDisk).toMatchObject({ ownerScopeKey: 'local:local-v1:2', version: 1, durable: true });
+    expect(fs.existsSync(blobAbs(root, committed.stagingId))).toBe(true);
+
+    const restarted = makeStore(root, { ownerScopeKey: 'local:local-v1:0', maxTotalBytes: 1024 });
+    const listed = await restarted.list({ ghostId });
+    if (!listed.ok) throw new Error(JSON.stringify(listed));
+    expect(listed.items.map((item) => item.stagingId)).toEqual([committed.stagingId]);
+    const read = await restarted.read({ ghostId, stagingId: committed.stagingId });
+    if (!read.ok) throw new Error(JSON.stringify(read));
+    expect(read.sha256).toBe(committed.digest);
+
+    const otherOwner = makeStore(root, { ownerScopeKey: 'local:owner-b:0', maxTotalBytes: 1024 });
+    expect(await otherOwner.list({ ghostId })).toMatchObject({
+      ok: false, errorCode: 'LIBRARY_UNAVAILABLE', message: 'staging manifest 字段非法',
+    });
   });
 });

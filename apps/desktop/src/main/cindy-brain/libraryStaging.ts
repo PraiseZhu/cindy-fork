@@ -254,6 +254,16 @@ function receiptOf(record: DurableRecord): LibraryStagingReceipt {
   };
 }
 
+/** Disk identity ignores process-lifetime generation (`local:id:2` ≡ `local:id:0`). */
+function durableOwnerScopeKey(scopeKey: string): string {
+  const parsed = /^(local|cloud|signed-out):(.+):(\d+)$/.exec(scopeKey);
+  return parsed ? `${parsed[1]}:${parsed[2]}` : scopeKey;
+}
+
+function sameDurableOwner(persisted: unknown, live: string): boolean {
+  return typeof persisted === 'string' && durableOwnerScopeKey(persisted) === durableOwnerScopeKey(live);
+}
+
 function parseTaskIdentity(
   parsed: Record<string, unknown>,
   stagingId: string,
@@ -265,7 +275,7 @@ function parseTaskIdentity(
   if (
     parsed.stagingId !== stagingId
     || parsed.ghostId !== ghostId
-    || parsed.ownerScopeKey !== ownerScopeKey
+    || !sameDurableOwner(parsed.ownerScopeKey, ownerScopeKey)
     || typeof parsed.taskId !== 'string' || parsed.taskId.length === 0 || parsed.taskId.length > TASK_ID_MAX
     || typeof parsed.sourceRevision !== 'string' || parsed.sourceRevision.length === 0 || parsed.sourceRevision.length > TASK_ID_MAX
     || typeof parsed.sha256 !== 'string' || !HEX64.test(parsed.sha256)
