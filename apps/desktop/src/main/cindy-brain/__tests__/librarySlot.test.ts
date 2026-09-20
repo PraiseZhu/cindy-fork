@@ -21,6 +21,7 @@ import {
 import { createHash } from 'node:crypto';
 import { LibraryBindingStore } from '../libraryBinding.js';
 import { LibraryVault } from '../libraryVault.js';
+import { initCustomLibraryTree } from '../libraryDirFd.js';
 import { createLibraryDbCore, type SqliteDatabaseConstructor } from '../libraryDbCore.js';
 import { LibrarySqlService } from '../librarySqlService.js';
 import {
@@ -498,23 +499,20 @@ describe('GhostLibrarySlot', () => {
     expect(open.state).toBe('ready');
     const keep = await slot.handleLibraryRequest(GHOST_ID, { op: 'write', path: 'keep.txt', content: 'keep-me' });
     expect(keep.ok).toBe(true);
+    await slot.disposeAll();
     const parked = `${candidate}.parked`;
-    const realMkdir = fs.promises.mkdir.bind(fs.promises);
     let injected = false;
-    const mkdirSpy = vi.spyOn(fs.promises, 'mkdir').mockImplementation(async (target, options) => {
-      const dest = String(target);
-      if (!injected && dest.includes(`${path.sep}.cindy-library`)) {
-        injected = true;
-        if (fs.existsSync(candidate)) await fs.promises.rename(candidate, parked);
-      }
-      return realMkdir(target, options);
-    });
-    let after: Awaited<ReturnType<GhostLibrarySlot['handleLibraryRequest']>>;
-    try {
-      after = await slot.handleLibraryRequest(GHOST_ID, { op: 'open' });
-    } finally {
-      mkdirSpy.mockRestore();
-    }
+    createVault.mockImplementation((d) => new LibraryVault({
+      ...d,
+      initCustomTree: async (req) => {
+        if (!injected) {
+          injected = true;
+          if (fs.existsSync(candidate)) await fs.promises.rename(candidate, parked);
+        }
+        return initCustomLibraryTree(req);
+      },
+    }));
+    const after = await slot.handleLibraryRequest(GHOST_ID, { op: 'open' });
     if (!after.ok || after.op !== 'open') throw new Error(JSON.stringify(after));
     expect(injected).toBe(true);
     expect(after.state).toBe('unavailable');
@@ -540,29 +538,21 @@ describe('GhostLibrarySlot', () => {
     await slot.disposeAll();
     const parked = `${candidate}.parked`;
     const custom = path.join(candidate, GHOST_ID);
-    const isGhostRoot = (dest: string): boolean =>
-      path.basename(dest) === GHOST_ID && !dest.includes(`${path.sep}.cindy-library`);
-    const realMkdir = fs.promises.mkdir.bind(fs.promises);
-    const observed = { injected: false, mkdirOnReplacement: false };
-    const mkdirSpy = vi.spyOn(fs.promises, 'mkdir').mockImplementation(async (target, options) => {
-      const dest = String(target);
-      if (!observed.injected && isGhostRoot(dest)) {
-        observed.injected = true;
-        if (fs.existsSync(candidate)) await fs.promises.rename(candidate, parked);
-        await realMkdir(candidate);
-      }
-      const result = await realMkdir(target, options);
-      if (observed.injected && isGhostRoot(dest)) observed.mkdirOnReplacement = fs.existsSync(custom);
-      return result;
-    });
-    let after: Awaited<ReturnType<GhostLibrarySlot['handleLibraryRequest']>>;
-    try {
-      after = await slot.handleLibraryRequest(GHOST_ID, { op: 'open' });
-    } finally {
-      mkdirSpy.mockRestore();
-    }
+    let injected = false;
+    createVault.mockImplementation((d) => new LibraryVault({
+      ...d,
+      initCustomTree: async (req) => {
+        if (!injected) {
+          injected = true;
+          if (fs.existsSync(candidate)) await fs.promises.rename(candidate, parked);
+          await fs.promises.mkdir(candidate);
+        }
+        return initCustomLibraryTree(req);
+      },
+    }));
+    const after = await slot.handleLibraryRequest(GHOST_ID, { op: 'open' });
     if (!after.ok || after.op !== 'open') throw new Error(JSON.stringify(after));
-    expect(observed.injected).toBe(true);
+    expect(injected).toBe(true);
     expect(after.state).toBe('unavailable');
     expect(after.reason).toBe('binding-moved');
     expect(after.authorizedReadonly).toBe(false);

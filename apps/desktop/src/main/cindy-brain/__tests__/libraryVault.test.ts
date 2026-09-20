@@ -19,6 +19,7 @@ import {
   type LibraryFileIdentity,
   type LibraryReadHandle,
 } from '../libraryVault.js';
+import { initCustomLibraryTree } from '../libraryDirFd.js';
 
 const sha256Of = (s: string): string => createHash('sha256').update(s).digest('hex');
 
@@ -153,23 +154,20 @@ describe('LibraryVault', () => {
       const first = makeVault({ rootDir: () => custom, locationKind: 'custom', customParentGrant: grant });
       expect(await first.open()).toMatchObject({ ok: true, state: 'ready' });
       const parked = `${parent}.parked`;
-      const realMkdir = fs.promises.mkdir.bind(fs.promises);
       let injected = false;
-      const mkdirSpy = vi.spyOn(fs.promises, 'mkdir').mockImplementation(async (target, options) => {
-        const dest = String(target);
-        if (!injected && dest.includes(`${path.sep}.cindy-library`)) {
-          injected = true;
-          if (fs.existsSync(parent)) await fs.promises.rename(parent, parked);
-        }
-        return realMkdir(target, options);
+      const raced = makeVault({
+        rootDir: () => custom,
+        locationKind: 'custom',
+        customParentGrant: grant,
+        initCustomTree: async (req) => {
+          if (!injected) {
+            injected = true;
+            if (fs.existsSync(parent)) await fs.promises.rename(parent, parked);
+          }
+          return initCustomLibraryTree(req);
+        },
       });
-      const raced = makeVault({ rootDir: () => custom, locationKind: 'custom', customParentGrant: grant });
-      let missing: Awaited<ReturnType<LibraryVault['open']>>;
-      try {
-        missing = await raced.open();
-      } finally {
-        mkdirSpy.mockRestore();
-      }
+      const missing = await raced.open();
       expect(injected).toBe(true);
       expect(missing).toMatchObject({ ok: true, state: 'unavailable', reason: 'disk-missing' });
       expect(fs.existsSync(parent)).toBe(false);
@@ -191,36 +189,25 @@ describe('LibraryVault', () => {
       const first = makeVault({ rootDir: () => custom, locationKind: 'custom', customParentGrant: grant });
       expect(await first.open()).toMatchObject({ ok: true, state: 'ready' });
       const parked = `${parent}.parked`;
-      const realMkdir = fs.promises.mkdir.bind(fs.promises);
-      const observed = { injected: false, mkdirOnReplacement: false, mkdirTarget: '' };
-      const mkdirSpy = vi.spyOn(fs.promises, 'mkdir').mockImplementation(async (target, options) => {
-        const dest = String(target);
-        if (!observed.injected && dest === custom) {
-          observed.injected = true;
-          if (fs.existsSync(parent)) await fs.promises.rename(parent, parked);
-          await realMkdir(parent);
-          observed.mkdirTarget = dest;
-        }
-        const result = await realMkdir(target, options);
-        if (observed.injected && dest === custom) {
-          observed.mkdirOnReplacement = fs.existsSync(custom);
-        }
-        return result;
+      let injected = false;
+      const raced = makeVault({
+        rootDir: () => custom,
+        locationKind: 'custom',
+        customParentGrant: grant,
+        initCustomTree: async (req) => {
+          if (!injected) {
+            injected = true;
+            if (fs.existsSync(parent)) await fs.promises.rename(parent, parked);
+            await fs.promises.mkdir(parent);
+          }
+          return initCustomLibraryTree(req);
+        },
       });
-      const raced = makeVault({ rootDir: () => custom, locationKind: 'custom', customParentGrant: grant });
-      let opened: Awaited<ReturnType<LibraryVault['open']>>;
-      try {
-        opened = await raced.open();
-      } finally {
-        mkdirSpy.mockRestore();
-      }
-      const replacementRoot = fs.existsSync(custom);
-      const replacementMeta = fs.existsSync(path.join(custom, '.cindy-library', 'meta.json'));
-      expect(observed.injected).toBe(true);
-      expect(opened).toMatchObject({ ok: true, state: 'unavailable' });
-      expect(['binding-moved', 'disk-missing']).toContain(opened.ok ? opened.reason : '');
-      expect(replacementRoot).toBe(false);
-      expect(replacementMeta).toBe(false);
+      const opened = await raced.open();
+      expect(injected).toBe(true);
+      expect(opened).toMatchObject({ ok: true, state: 'unavailable', reason: 'binding-moved' });
+      expect(fs.existsSync(custom)).toBe(false);
+      expect(fs.existsSync(path.join(custom, '.cindy-library', 'meta.json'))).toBe(false);
       expect(fs.existsSync(path.join(parked, 'mivo-canvas', 'keep.txt'))).toBe(true);
     });
 

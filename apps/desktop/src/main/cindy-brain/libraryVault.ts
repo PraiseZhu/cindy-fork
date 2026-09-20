@@ -27,6 +27,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 
 import { isSafeGhostRelativePath } from '../../shared/ghost.js';
+import { initCustomLibraryTree, type CustomTreeInitResult } from './libraryDirFd.js';
 
 /** Library 操作的结构化错误码(fs 槽只有人话 message 的缺口在这里补上)。 */
 export type LibraryErrorCode =
@@ -157,6 +158,12 @@ export interface LibraryVaultDeps {
    * 读路径打开注入点,仅单测。生产缺省走 O_RDONLY|O_NOFOLLOW,失败不得回落裸 open。
    */
   openForRead?(absPath: string, flags: number): Promise<LibraryReadHandle>;
+  /** Custom first-create via held parent fd. Tests may inject; production uses libraryDirFd. */
+  initCustomTree?(req: {
+    parentFd: number;
+    ghostId: string;
+    metaJson: string;
+  }): Promise<CustomTreeInitResult>;
 }
 
 /** Windows 保留设备名(与 fsSlot/dirDeposit 同口径;目录名撞上同样出事)。 */
@@ -385,7 +392,7 @@ export class LibraryVault {
     }
   }
 
-  /** Path vs held parent inode vs grant. Not an extra inspect loop and not an atomic mkdirat. */
+  /** Path vs held parent inode vs grant after fd-relative create. */
   private async assertHeldCustomParent(held: {
     dev: number;
     ino: number;
@@ -404,31 +411,6 @@ export class LibraryVault {
     }
   }
 
-  /** Best-effort: drop an empty root we just created on a replaced parent. */
-  private async rollbackEmptyCustomRoot(): Promise<void> {
-    try {
-      const st = await fs.promises.lstat(this.root);
-      if (st.isSymbolicLink() || !st.isDirectory()) return;
-      const names = await fs.promises.readdir(this.root);
-      if (names.length === 0) await fs.promises.rmdir(this.root);
-    } catch {
-      /* keep files stay in the renamed-away directory */
-    }
-  }
-
-  /** Custom skeleton never uses recursive mkdir: that would rebuild a vanished user parent. */
-  private async mkdirCustomSkeleton(): Promise<ReturnType<LibraryVault['customRootUnavailable']> | null> {
-    for (const dir of [this.metaDir, this.tmpDir, path.join(this.metaDir, 'backups')]) {
-      try {
-        await fs.promises.mkdir(dir);
-      } catch (err) {
-        if ((err as NodeJS.ErrnoException).code === 'ENOENT') return this.customRootUnavailable('disk-missing');
-        if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
-      }
-    }
-    return null;
-  }
-
   /* ── 打开与状态 ─────────────────────────────────────────────────── */
 
   /**
@@ -445,10 +427,20 @@ export class LibraryVault {
           const before = await this.inspectCustomParent();
           if (before) return before;
           let parentHandle: fs.promises.FileHandle | null = null;
-          let createdRoot = false;
           try {
+            const parent = path.dirname(this.root);
+            const dirSeg = path.basename(this.root);
+            const metaGhost = this.deps.ghostId || dirSeg;
+            const metaJson = JSON.stringify({
+              version: 1,
+              ghostId: metaGhost,
+              createdAt: this.now(),
+            });
+            let openFlags = fs.constants.O_RDONLY;
+            if (fs.constants.O_DIRECTORY) openFlags |= fs.constants.O_DIRECTORY;
+            if (fs.constants.O_NOFOLLOW) openFlags |= fs.constants.O_NOFOLLOW;
             try {
-              parentHandle = await fs.promises.open(path.dirname(this.root), fs.constants.O_RDONLY);
+              parentHandle = await fs.promises.open(parent, openFlags);
             } catch (err) {
               if ((err as NodeJS.ErrnoException).code === 'ENOENT') return this.customRootUnavailable('disk-missing');
               throw err;
@@ -458,28 +450,27 @@ export class LibraryVault {
             const heldId = { dev: held.dev, ino: held.ino };
             const heldBefore = await this.assertHeldCustomParent(heldId);
             if (heldBefore) return heldBefore;
-            try {
-              await fs.promises.mkdir(this.root);
-              createdRoot = true;
-            } catch (err) {
-              if ((err as NodeJS.ErrnoException).code === 'ENOENT') return this.customRootUnavailable('disk-missing');
-              if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
-              const st = await fs.promises.lstat(this.root);
-              if (st.isSymbolicLink() || !st.isDirectory()) {
-                return this.customRootUnavailable('disk-missing');
+            const tree = await (this.deps.initCustomTree ?? initCustomLibraryTree)({
+              parentFd: parentHandle.fd,
+              ghostId: dirSeg,
+              metaJson,
+            });
+            if (!tree.ok) {
+              this.state = 'unavailable';
+              this.unavailableReason = tree.code === 'IO' ? 'permission' : 'permission';
+              this.opened = true;
+              return { ok: true as const, state: this.state, reason: this.unavailableReason, usedBytes: 0, fileCount: 0 };
+            }
+            const afterTree = await this.assertHeldCustomParent(heldId);
+            if (afterTree) return afterTree;
+          } finally {
+            if (parentHandle) {
+              try {
+                await parentHandle.close();
+              } catch {
+                /* still close */
               }
             }
-            const afterRoot = await this.assertHeldCustomParent(heldId);
-            if (afterRoot) {
-              if (createdRoot) await this.rollbackEmptyCustomRoot();
-              return afterRoot;
-            }
-            const skeleton = await this.mkdirCustomSkeleton();
-            if (skeleton) return skeleton;
-            const afterSkeleton = await this.assertHeldCustomParent(heldId);
-            if (afterSkeleton) return afterSkeleton;
-          } finally {
-            await parentHandle?.close().catch(() => undefined);
           }
         } else {
           await fs.promises.mkdir(this.root, { recursive: true });
@@ -510,6 +501,12 @@ export class LibraryVault {
         this.meta = parsed;
       } catch (err) {
         if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+          if ((this.deps.locationKind ?? 'default') === 'custom') {
+            this.opened = true;
+            this.state = 'unavailable';
+            this.unavailableReason = 'permission';
+            return { ok: true as const, state: this.state, reason: this.unavailableReason, usedBytes: 0, fileCount: 0 };
+          }
           this.meta = { version: 1, ghostId: this.deps.ghostId ?? '', createdAt: this.now() };
           const w = await this.writeMetaUnlocked();
           if (w) return w;
