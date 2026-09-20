@@ -4,7 +4,7 @@
  * os.tmpdir 临时目录(规则 23:生成物不落仓库工作区),零 Electron。
  * symlink 用例带能力探针(Windows 无特权时跳过;POSIX CI 实跑)。
  */
-import { describe, it, expect, beforeEach, afterEach, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, beforeAll, afterAll, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -138,6 +138,43 @@ describe('LibraryVault', () => {
       expect(fs.existsSync(parent)).toBe(false);
       expect(fs.existsSync(custom)).toBe(false);
       expect(fs.existsSync(path.join(`${parent}.parked`, 'mivo-canvas', 'keep.txt'))).toBe(true);
+    });
+
+    it('custom 最后一次 inspect 后、骨架 mkdir 前父目录被移走:不得 recursive 重建空库', async () => {
+      const parent = path.join(tmpRoot, 'picked-411');
+      const custom = path.join(parent, 'mivo-canvas');
+      await fs.promises.mkdir(custom, { recursive: true });
+      await fs.promises.writeFile(path.join(custom, 'keep.txt'), 'keep-me');
+      const parentStat = await fs.promises.lstat(parent);
+      const grant = {
+        realPathAtGrant: await fs.promises.realpath(parent),
+        identity: { dev: parentStat.dev, ino: parentStat.ino },
+      };
+      const first = makeVault({ rootDir: () => custom, locationKind: 'custom', customParentGrant: grant });
+      expect(await first.open()).toMatchObject({ ok: true, state: 'ready' });
+      const parked = `${parent}.parked`;
+      const realMkdir = fs.promises.mkdir.bind(fs.promises);
+      let injected = false;
+      const mkdirSpy = vi.spyOn(fs.promises, 'mkdir').mockImplementation(async (target, options) => {
+        const dest = String(target);
+        if (!injected && dest.includes(`${path.sep}.cindy-library`)) {
+          injected = true;
+          if (fs.existsSync(parent)) await fs.promises.rename(parent, parked);
+        }
+        return realMkdir(target, options);
+      });
+      const raced = makeVault({ rootDir: () => custom, locationKind: 'custom', customParentGrant: grant });
+      let missing: Awaited<ReturnType<LibraryVault['open']>>;
+      try {
+        missing = await raced.open();
+      } finally {
+        mkdirSpy.mockRestore();
+      }
+      expect(injected).toBe(true);
+      expect(missing).toMatchObject({ ok: true, state: 'unavailable', reason: 'disk-missing' });
+      expect(fs.existsSync(parent)).toBe(false);
+      expect(fs.existsSync(path.join(custom, '.cindy-library', 'meta.json'))).toBe(false);
+      expect(fs.existsSync(path.join(parked, 'mivo-canvas', 'keep.txt'))).toBe(true);
     });
 
     it('default 缺失根仍可首次创建', async () => {

@@ -383,6 +383,19 @@ export class LibraryVault {
     }
   }
 
+  /** Custom skeleton never uses recursive mkdir: that would rebuild a vanished user parent. */
+  private async mkdirCustomSkeleton(): Promise<ReturnType<LibraryVault['customRootUnavailable']> | null> {
+    for (const dir of [this.metaDir, this.tmpDir, path.join(this.metaDir, 'backups')]) {
+      try {
+        await fs.promises.mkdir(dir);
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === 'ENOENT') return this.customRootUnavailable('disk-missing');
+        if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+      }
+    }
+    return null;
+  }
+
   /* ── 打开与状态 ─────────────────────────────────────────────────── */
 
   /**
@@ -412,11 +425,15 @@ export class LibraryVault {
           }
           const after = await this.inspectCustomParent();
           if (after) return after;
+          const skeleton = await this.mkdirCustomSkeleton();
+          if (skeleton) return skeleton;
+          const afterSkeleton = await this.inspectCustomParent();
+          if (afterSkeleton) return afterSkeleton;
         } else {
           await fs.promises.mkdir(this.root, { recursive: true });
+          await fs.promises.mkdir(this.tmpDir, { recursive: true });
+          await fs.promises.mkdir(path.join(this.metaDir, 'backups'), { recursive: true });
         }
-        await fs.promises.mkdir(this.tmpDir, { recursive: true });
-        await fs.promises.mkdir(path.join(this.metaDir, 'backups'), { recursive: true });
       } catch (err) {
         if ((this.deps.locationKind ?? 'default') === 'custom' && (err as NodeJS.ErrnoException).code === 'ENOENT') {
           return this.customRootUnavailable();
