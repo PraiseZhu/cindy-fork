@@ -3307,6 +3307,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
     // 计算本地 skill 文件夹 hash（30s 缓存在 renderer 侧）
     // manifest 是参与 hash 的文件清单(path + sha256),用于 dirty 排查
+    comparePublished: (params: import('../shared/skillhubPublishComparison').SkillhubPublishComparisonParams): Promise<import('../shared/skillhubPublishComparison').SkillhubPublishComparison> => ipcRenderer.invoke('skillhub:compare-published', params),
+
     getFolderHash: (
       absolutePath: string,
     ): Promise<{

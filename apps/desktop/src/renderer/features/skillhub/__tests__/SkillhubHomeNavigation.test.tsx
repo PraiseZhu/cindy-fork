@@ -87,11 +87,14 @@ function CatalogHarness({ entry = '/skillhub/local' }: {
     <MemoryRouter initialEntries={['/before', entry]}>
       <NavigationControls />
       <Routes>
-        <Route path="/skillhub/local" element={<SkillhubLocalLayout />}>
+        <Route element={<SkillhubLocalLayout />}>
+          <Route path="/skillhub/detail" element={<DetailNavigation />} />
+          <Route path="/skillhub/local">
           <Route index element={null} />
           <Route path="by-path" element={<DetailNavigation />} />
           <Route path=":kind/global/:name" element={<DetailNavigation />} />
           <Route path=":kind/project/:hash/:name" element={<DetailNavigation />} />
+          </Route>
         </Route>
         <Route path="/settings" element={<SkillhubHomeView embedded />} />
         <Route path="*" element={null} />
@@ -148,7 +151,7 @@ describe('Skill home navigation', () => {
     list.scrollTop = 720;
     fireEvent.click(screen.getByRole('button', { name: /calendar-tools/ }));
     expect(screen.queryByRole('radio', { name: 'skillhub.home.local' })).toBeNull();
-    expect(screen.getByTestId('location').textContent).toContain(`/skill/${scope}/`);
+    expect(new URLSearchParams(screen.getByTestId('location').textContent!.split('?')[1]).get('scope')).toBe(scope);
     expect(list.isConnected).toBe(true);
     expect(list.closest('[inert]')?.getAttribute('aria-hidden')).toBe('true');
     expect(screen.queryByRole('main')).toBeNull();
@@ -191,8 +194,11 @@ describe('Skill home navigation', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Rename skill' }));
     const location = screen.getByTestId('location').textContent;
-    expect(location).toContain(`/skill/${scope}/`);
-    expect(location).toContain('/calendar-renamed?engine=claude-code&source=renamed-source');
+    const query = new URLSearchParams(location!.split('?')[1]);
+    expect(query.get('scope')).toBe(scope);
+    expect(query.get('name')).toBe('calendar-renamed');
+    expect(query.get('engine')).toBe('claude-code');
+    expect(query.get('source')).toBe('renamed-source');
     expect(screen.getByTestId('navigation-state').textContent).toBe(detailState);
     expect(list.isConnected).toBe(true);
 
@@ -218,7 +224,7 @@ describe('Skill home navigation', () => {
     fireEvent.click(screen.getByRole('button', { name: /calendar-tools/ }));
     fireEvent.click(screen.getByRole('button', { name: 'Detail Back' }));
     await waitFor(() => expectTab('local'));
-    expect(screen.getByTestId('location').textContent).toBe('/skillhub/local');
+    expect(screen.getByTestId('location').textContent?.split('?')[0]).toBe('/skillhub/local');
     expect((screen.getByRole('textbox', { name: 'skillhub.home.search' }) as HTMLInputElement).value)
       .toBe('calendar');
   });
@@ -239,7 +245,7 @@ describe('Skill home navigation', () => {
       state: { from: '/skillhub/market', resetHistory: true },
     });
     fireEvent.click(screen.getByRole('button', { name: 'Rename skill' }));
-    expect(screen.getByTestId('location').textContent).toContain('/calendar-renamed?');
+    expect(new URLSearchParams(screen.getByTestId('location').textContent!.split('?')[1]).get('name')).toBe('calendar-renamed');
     fireEvent.click(screen.getByRole('button', { name: 'Detail Back' }));
     expect(screen.getByTestId('location').textContent).toBe('/skillhub/market');
   });
@@ -278,6 +284,7 @@ describe('Skill home navigation', () => {
     '/skillhub/local/skill/global/calendar-tools',
     '/skillhub/local/skill/project/repo-hash/calendar-tools',
     '/skillhub/local/by-path?path=%2Fskills%2Fcalendar-tools',
+    '/skillhub/detail?view=local&kind=skill&scope=global&name=calendar-tools',
   ])('does not mount a hidden catalog for a direct detail URL: %s', (entry) => {
     renderCatalog(entry);
     expect(document.querySelector('main')).toBeNull();

@@ -22,7 +22,7 @@ import { WorkdirBrowseRoute } from '@/features/cc-agent/workdir-browse/WorkdirBr
 import { IssueTrackerFeatureLayout } from '@/features/issue-tracker/IssueTrackerFeatureLayout';
 import { SkillhubFeatureLayout } from '@/features/skillhub/SkillhubFeatureLayout';
 import { SkillhubLocalLayout } from '@/features/skillhub/SkillhubLocalLayout';
-import { SkillhubDetailView } from '@/features/skillhub/SkillhubDetailView';
+import { SkillhubDetailRoute, LegacySkillDetailRedirect } from '@/features/skillhub/SkillhubDetailRoute';
 import { SkillhubMarketListView } from '@/features/skillhub/SkillhubMarketListView';
 import { MakerExperimentalView } from '@/features/maker-experimental/MakerExperimentalView';
 import { SchedulerPage } from '@/features/scheduler';
@@ -153,18 +153,17 @@ export const router = createHashRouter([
                     children: [
                       { index: true, element: <Navigate to="/skillhub/local" replace /> },
                       {
-                        path: 'local',
                         element: <SkillhubLocalLayout />,
                         children: [
+                          { path: 'detail', element: <SkillhubDetailRoute /> },
                           {
-                            index: true,
-                            element: null,
-                          },
-                          { path: 'by-path', element: <SkillhubDetailView /> },
-                          { path: ':kind/global/:name', element: <SkillhubDetailView /> },
-                          {
-                            path: ':kind/project/:projectHash/:name',
-                            element: <SkillhubDetailView />,
+                            path: 'local',
+                            children: [
+                              { index: true, element: null },
+                              { path: 'by-path', element: <LegacySkillDetailRedirect /> },
+                              { path: ':kind/global/:name', element: <LegacySkillDetailRedirect /> },
+                              { path: ':kind/project/:projectHash/:name', element: <LegacySkillDetailRedirect /> },
+                            ],
                           },
                         ],
                       },
@@ -172,16 +171,15 @@ export const router = createHashRouter([
                         path: 'market',
                         children: [
                           { index: true, element: <SkillhubMarketListView /> },
-                          // 全屏详情页/旧管理整页已移除(详情与管理统一走市场列表内的浮窗),
-                          // 旧 URL 一律 fallback 回 market 列表
+                          // Existing market bookmarks resolve to the shared detail page.
                           {
                             path: 'manage/:name',
-                            element: <Navigate to="/skillhub/market" replace />,
+                            element: <LegacySkillDetailRedirect market />,
                           },
-                          { path: ':name', element: <Navigate to="/skillhub/market" replace /> },
+                          { path: ':name', element: <LegacySkillDetailRedirect market /> },
                           {
                             path: ':kind/:name',
-                            element: <Navigate to="/skillhub/market" replace />,
+                            element: <LegacySkillDetailRedirect market />,
                           },
                         ],
                       },

@@ -11190,6 +11190,21 @@
     "projectSkillNotLoaded": "目前的 Pi 任務尚未載入此專案 Skill，新任務會自動嘗試載入"
   },
   "skillhub": {
+    "unifiedDetail": {
+      "contentSource": "內容來源",
+      "local": "本機",
+      "market": "市場",
+      "marketUnavailable": "暫時無法讀取市場資訊，本機副本仍可使用。",
+      "retry": "重試"
+    },
+    "publishComparison": {
+      "updateAvailable": "可發佈更新",
+      "pendingChanges": "提交審核後，本機又有改動",
+      "unavailable": "暫時無法檢查發佈更新",
+      "diffTitle": "與線上 v{{version}} 的差異",
+      "summaryBadge": "摘要",
+      "summaryNote": "檔案為二進位、過大或無法完整預覽，僅顯示檔案大小。"
+    },
     "home": {
       "title": "技能",
       "description": "管理本地技能，或從 Skill Hub 發現並安裝更多技能。",
@@ -11417,6 +11432,8 @@
       "installError": "未知錯誤"
     },
     "marketCard": {
+      "updateAvailable": "取得更新",
+      "updateFailed": "更新失敗，請重試",
       "visibilityPublic": "公開",
       "visibilityDept": "團隊",
       "visibilityPrivate": "個人",

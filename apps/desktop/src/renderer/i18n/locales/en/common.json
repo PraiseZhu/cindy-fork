@@ -11206,6 +11206,21 @@
     "projectSkillNotLoaded": "This Pi task hasn't loaded this project Skill. New tasks will automatically try to load it."
   },
   "skillhub": {
+    "unifiedDetail": {
+      "contentSource": "Content source",
+      "local": "Local",
+      "market": "Market",
+      "marketUnavailable": "Market details are unavailable. You can still use your local copy.",
+      "retry": "Retry"
+    },
+    "publishComparison": {
+      "updateAvailable": "Update available to publish",
+      "pendingChanges": "Further local changes since submission",
+      "unavailable": "Unable to check for publication updates",
+      "diffTitle": "Changes from online v{{version}}",
+      "summaryBadge": "Summary",
+      "summaryNote": "Binary or large file, or full text unavailable. Showing file sizes."
+    },
     "home": {
       "title": "Skills",
       "description": "Manage local skills, or discover and install more from Skill Hub.",
@@ -11433,6 +11448,8 @@
       "installError": "Unknown error"
     },
     "marketCard": {
+      "updateAvailable": "Get update",
+      "updateFailed": "Update failed. Please try again.",
       "visibilityPublic": "Public",
       "visibilityDept": "Team",
       "visibilityPrivate": "Personal",

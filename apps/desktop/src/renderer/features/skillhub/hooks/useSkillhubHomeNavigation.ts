@@ -2,6 +2,7 @@ import { useCallback } from 'react';
 import { useLocation, useNavigate, type Location } from 'react-router-dom';
 
 import type { HomeCatalogTab } from '../lib/homeMarketFilter';
+import { skillDetailReturnRoute, withSkillDetailReturn } from '../lib/detailRoutes';
 import { buildLocalSkillRoute } from '../lib/localRoutes';
 
 interface HomeViewState {
@@ -21,11 +22,12 @@ export function useSkillhubHomeNavigation(navigationLocation?: Location) {
   const location = navigationLocation ?? currentLocation;
   const navigate = useNavigate();
   const navState = location.state as SkillhubNavigationState | null;
-  const savedTab = navState?.skillhubHome?.catalogTab;
+  const search = new URLSearchParams(location.search);
+  const savedTab = navState?.skillhubHome?.catalogTab ?? search.get('tab');
   const catalogTab: HomeCatalogTab = savedTab === 'local' || savedTab === 'organization'
     ? savedTab
     : 'public';
-  const query = typeof navState?.skillhubHome?.query === 'string' ? navState.skillhubHome.query : '';
+  const query = typeof navState?.skillhubHome?.query === 'string' ? navState.skillhubHome.query : search.get('q') ?? '';
 
   const updateHomeState = useCallback((patch: Partial<HomeViewState>) => {
     // Replace the current entry: typing or changing tabs must not add Back steps.
@@ -43,7 +45,7 @@ export function useSkillhubHomeNavigation(navigationLocation?: Location) {
   }, [updateHomeState]);
 
   const openLocalSkill = (skill: Parameters<typeof buildLocalSkillRoute>[0]) => {
-    navigate(buildLocalSkillRoute(skill), {
+    navigate(withSkillDetailReturn(buildLocalSkillRoute(skill), `${location.pathname}${location.search}`), {
       state: {
         from: '/skillhub/local',
         resetHistory: true,
@@ -54,12 +56,12 @@ export function useSkillhubHomeNavigation(navigationLocation?: Location) {
 
   const replaceLocalSkill = (skill: Parameters<typeof buildLocalSkillRoute>[0]) => {
     // A rename replaces the current detail, retaining both its source and list filters.
-    navigate(buildLocalSkillRoute(skill), { replace: true, state: location.state });
+    navigate(withSkillDetailReturn(buildLocalSkillRoute(skill), skillDetailReturnRoute(search, navState?.from === '/skillhub/market' ? '/skillhub/market' : '/skillhub/local')), { replace: true, state: location.state });
   };
 
   const backToCatalog = () => {
     const target = navState?.from === '/skillhub/market' ? '/skillhub/market' : '/skillhub/local';
-    navigate(target, { state: { skillhubHome: navState?.skillhubHome } });
+    navigate(skillDetailReturnRoute(search, target), { state: { skillhubHome: navState?.skillhubHome } });
   };
 
   return { catalogTab, query, setCatalogTab, setQuery, openLocalSkill, replaceLocalSkill, backToCatalog };

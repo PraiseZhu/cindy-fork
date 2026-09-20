@@ -11190,6 +11190,21 @@
     "projectSkillNotLoaded": "当前 Pi 任务尚未加载此项目 Skill，新任务会自动尝试加载"
   },
   "skillhub": {
+    "unifiedDetail": {
+      "contentSource": "内容来源",
+      "local": "本地",
+      "market": "市场",
+      "marketUnavailable": "暂时无法读取市场信息，本地副本仍可使用。",
+      "retry": "重试"
+    },
+    "publishComparison": {
+      "updateAvailable": "可发布更新",
+      "pendingChanges": "提交审核后，本地又有改动",
+      "unavailable": "暂时无法检查发布更新",
+      "diffTitle": "与线上 v{{version}} 的差异",
+      "summaryBadge": "摘要",
+      "summaryNote": "文件为二进制、过大或无法完整预览，仅显示文件大小。"
+    },
     "home": {
       "title": "技能",
       "description": "管理本地技能，或从 Skill Hub 发现并安装更多技能。",
@@ -11417,6 +11432,8 @@
       "installError": "未知错误"
     },
     "marketCard": {
+      "updateAvailable": "获取更新",
+      "updateFailed": "更新失败，请重试",
       "visibilityPublic": "公开",
       "visibilityDept": "团队",
       "visibilityPrivate": "个人",
