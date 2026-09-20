@@ -387,7 +387,7 @@ describe('LibraryVault', () => {
       expect(PROVABLE_STAGING_NAME.test('meta.json')).toBe(false);
     });
 
-    it('Windows 新建 custom 仍 unsupported,不 mkdir', async () => {
+    it('Windows 新建 custom 走稳定 parent handle 首建 ready', async () => {
       if (process.platform !== 'win32') return;
       const parent = path.join(tmpRoot, 'picked-win-new');
       await fs.promises.mkdir(parent);
@@ -401,8 +401,8 @@ describe('LibraryVault', () => {
         rootDir: () => custom, locationKind: 'custom', customParentGrant: grant, ghostId: 'mivo-canvas',
       });
       const opened = await vault.open();
-      expect(opened).toMatchObject({ ok: true, state: 'unavailable', reason: 'permission' });
-      expect(fs.existsSync(custom)).toBe(false);
+      expect(opened).toMatchObject({ ok: true, state: 'ready' });
+      expect(fs.existsSync(path.join(custom, '.cindy-library', 'meta.json'))).toBe(true);
     });
 
     it('default 缺失根仍可首次创建', async () => {
