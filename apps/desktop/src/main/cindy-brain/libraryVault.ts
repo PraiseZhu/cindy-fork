@@ -463,6 +463,15 @@ export class LibraryVault {
             }
             const afterTree = await this.assertHeldCustomParent(heldId);
             if (afterTree) return afterTree;
+            if (tree.createdMeta) {
+              const parsed = JSON.parse(metaJson) as LibraryMeta;
+              if (
+                typeof parsed === 'object' && parsed !== null && parsed.version === 1 &&
+                typeof parsed.ghostId === 'string' && typeof parsed.createdAt === 'number'
+              ) {
+                this.meta = parsed;
+              }
+            }
           } finally {
             if (parentHandle) {
               try {
@@ -486,9 +495,11 @@ export class LibraryVault {
         this.deps.log?.warn('library open: cannot create root', { error: err instanceof Error ? err.message : String(err) });
         return { ok: true as const, state: this.state, reason: this.unavailableReason, usedBytes: 0, fileCount: 0 };
       }
-      await this.sweepStaleTmp();
+      const customOpen = (this.deps.locationKind ?? 'default') === 'custom';
+      if (!customOpen) await this.sweepStaleTmp();
 
-      // meta:已存在必须可解析(不可用 ≠ 空);不存在则首建。
+      // meta:已存在必须可解析(不可用 ≠ 空);不存在则首建。custom 首次 open 用 held-fd 已写的 meta,不再 path 写。
+      if (!this.meta) {
       try {
         const raw = await fs.promises.readFile(this.metaFile, 'utf8');
         const parsed = JSON.parse(raw) as LibraryMeta;
@@ -501,7 +512,7 @@ export class LibraryVault {
         this.meta = parsed;
       } catch (err) {
         if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
-          if ((this.deps.locationKind ?? 'default') === 'custom') {
+          if (customOpen) {
             this.opened = true;
             this.state = 'unavailable';
             this.unavailableReason = 'permission';
@@ -518,9 +529,11 @@ export class LibraryVault {
           return { ok: true as const, state: this.state, reason: this.unavailableReason, usedBytes: 0, fileCount: 0 };
         }
       }
+      }
 
-      // 用量:账本读不出就全量重扫(账本是缓存,真身是文件树)。
+      // 用量:账本读不出就全量重扫(账本是缓存,真身是文件树)。custom 首次 open 只读扫描,不 persist/unlink。
       let ledger: UsageLedger | null = null;
+      if (!(customOpen && this.meta)) {
       try {
         const raw = JSON.parse(await fs.promises.readFile(this.usageFile, 'utf8')) as UsageLedger;
         if (typeof raw === 'object' && raw !== null && typeof raw.files === 'number' && typeof raw.bytes === 'number') {
@@ -529,6 +542,7 @@ export class LibraryVault {
       } catch {
         /* 损坏/缺失 → 重扫 */
       }
+      }
       if (!ledger) {
         const scanned = await this.scanUsageUnlocked();
         if (scanned.tripped) {
@@ -536,7 +550,7 @@ export class LibraryVault {
           this.usage = { files: scanned.files, bytes: scanned.bytes, updatedAt: this.now(), mutations: 0 };
         } else {
           this.usage = { files: scanned.files, bytes: scanned.bytes, updatedAt: this.now(), mutations: 0 };
-          await this.persistUsageUnlocked();
+          if (!customOpen) await this.persistUsageUnlocked();
         }
       } else {
         this.usage = ledger;

@@ -211,6 +211,64 @@ describe('LibraryVault', () => {
       expect(fs.existsSync(path.join(parked, 'mivo-canvas', 'keep.txt'))).toBe(true);
     });
 
+    it('D: initCustomLibraryTree 后 sweep readdir 换根不得写 replacement usage.json', async () => {
+      if (process.platform === 'win32') return;
+      const parent = path.join(tmpRoot, 'picked-D');
+      const custom = path.join(parent, 'mivo-canvas');
+      await fs.promises.mkdir(parent);
+      const parentStat = await fs.promises.lstat(parent);
+      const grant = {
+        realPathAtGrant: await fs.promises.realpath(parent),
+        identity: { dev: parentStat.dev, ino: parentStat.ino },
+      };
+      const parked = `${parent}.parked`;
+      let afterInit = false;
+      let swapped = false;
+      const origReaddir = fs.promises.readdir.bind(fs.promises);
+      const origRename = fs.promises.rename.bind(fs.promises);
+      const origMkdir = fs.promises.mkdir.bind(fs.promises);
+      const origWriteFile = fs.promises.writeFile.bind(fs.promises);
+      const readdirSpy = vi.spyOn(fs.promises, 'readdir').mockImplementation(async (target, options) => {
+        const dest = String(target);
+        if (afterInit && !swapped && dest.includes(`${path.sep}mivo-canvas${path.sep}.cindy-library${path.sep}tmp`)) {
+          swapped = true;
+          if (fs.existsSync(parent)) await origRename(parent, parked);
+          await origMkdir(parent);
+          await origMkdir(custom);
+          await origMkdir(path.join(custom, '.cindy-library'));
+          await origMkdir(path.join(custom, '.cindy-library', 'tmp'));
+          await origWriteFile(path.join(custom, '.cindy-library', 'meta.json'), JSON.stringify({
+            version: 1, ghostId: 'mivo-canvas', createdAt: 1,
+          }));
+          await origWriteFile(path.join(custom, 'user-keep.txt'), 'user');
+          await origWriteFile(path.join(custom, '.cindy-library', 'tmp', 'old.tmp'), 'stale');
+        }
+        return origReaddir(target, options);
+      });
+      const vault = makeVault({
+        rootDir: () => custom,
+        locationKind: 'custom',
+        customParentGrant: grant,
+        ghostId: 'mivo-canvas',
+        initCustomTree: async (req) => {
+          const r = await initCustomLibraryTree(req);
+          afterInit = true;
+          return r;
+        },
+      });
+      const opened = await vault.open();
+      readdirSpy.mockRestore();
+      expect(opened.ok).toBe(true);
+      expect(fs.existsSync(path.join(custom, '.cindy-library', 'usage.json'))).toBe(false);
+      if (swapped) {
+        expect(fs.existsSync(path.join(custom, 'user-keep.txt'))).toBe(true);
+        expect(opened).toMatchObject({ state: 'unavailable' });
+      } else {
+        expect(opened).toMatchObject({ state: 'ready' });
+        expect(fs.existsSync(path.join(parent, 'mivo-canvas', '.cindy-library', 'usage.json'))).toBe(false);
+      }
+    });
+
     it('default 缺失根仍可首次创建', async () => {
       const missing = path.join(tmpRoot, 'brand-new-default', 'ghost');
       const vault = makeVault({ rootDir: () => missing, locationKind: 'default' });

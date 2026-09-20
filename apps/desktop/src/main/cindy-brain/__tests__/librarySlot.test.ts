@@ -563,6 +563,51 @@ describe('GhostLibrarySlot', () => {
     expect(extraRoots.at(-1) ?? 'none').not.toBe(custom);
   });
 
+  it('D: helper 后 tmp readdir 换根不得写 usage.json 且拒授权替换根', async () => {
+    if (process.platform === 'win32') return;
+    const bound = await bindingStore.setBinding(GHOST_ID, candidate);
+    expect(bound.ok).toBe(true);
+    const parked = `${candidate}.parked`;
+    const custom = path.join(candidate, GHOST_ID);
+    let afterInit = false;
+    let swapped = false;
+    const origReaddir = fs.promises.readdir.bind(fs.promises);
+    const origRename = fs.promises.rename.bind(fs.promises);
+    const origMkdir = fs.promises.mkdir.bind(fs.promises);
+    const origWriteFile = fs.promises.writeFile.bind(fs.promises);
+    const readdirSpy = vi.spyOn(fs.promises, 'readdir').mockImplementation(async (target, options) => {
+      const dest = String(target);
+      if (afterInit && !swapped && dest.includes(`${path.sep}${GHOST_ID}${path.sep}.cindy-library${path.sep}tmp`)) {
+        swapped = true;
+        if (fs.existsSync(candidate)) await origRename(candidate, parked);
+        await origMkdir(candidate);
+        await origMkdir(custom);
+        await origMkdir(path.join(custom, '.cindy-library', 'tmp'), { recursive: true });
+        await origWriteFile(path.join(custom, '.cindy-library', 'meta.json'), JSON.stringify({
+          version: 1, ghostId: GHOST_ID, createdAt: 1,
+        }));
+        await origWriteFile(path.join(custom, 'user-keep.txt'), 'user');
+      }
+      return origReaddir(target, options);
+    });
+    createVault.mockImplementation((d) => new LibraryVault({
+      ...d,
+      initCustomTree: async (req) => {
+        const r = await initCustomLibraryTree(req);
+        afterInit = true;
+        return r;
+      },
+    }));
+    const opened = await slot.handleLibraryRequest(GHOST_ID, { op: 'open' });
+    readdirSpy.mockRestore();
+    if (!opened.ok || opened.op !== 'open') throw new Error(JSON.stringify(opened));
+    expect(fs.existsSync(path.join(custom, '.cindy-library', 'usage.json'))).toBe(false);
+    if (swapped) {
+      expect(fs.existsSync(path.join(custom, 'user-keep.txt'))).toBe(true);
+      expect(opened.authorizedReadonly).toBe(false);
+    }
+  });
+
   it('已挂 extraDir 时 confirm 与 vault.open 间 disk-missing 必须撤 grant', async () => {
     const bound = await bindingStore.setBinding(GHOST_ID, candidate);
     expect(bound.ok).toBe(true);
