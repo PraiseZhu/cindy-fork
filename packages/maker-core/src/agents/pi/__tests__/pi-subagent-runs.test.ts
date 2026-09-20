@@ -13,6 +13,7 @@ import {
   verifyPiSubagentRunnerIdentity,
   listPiSubagentRunDiagnostics,
   listPiSubagentRuns,
+  scanPiSubagentRuns,
   acquirePiSubagentLaunchFence,
   clearStalePiSubagentLaunchFence,
   isPiSubagentLaunchFenceActive,
@@ -191,6 +192,38 @@ afterEach(async () => {
 });
 
 describe('PI durable subagent run store', () => {
+  it('selects only the newest generation of a logical task before delivering historical payloads', async () => {
+    const root = await makeRoot();
+    const older = status('123e4567-e89b-42d3-a456-4266141740ab', {
+      taskId: 'same-task', state: 'completed', startedAt: 10,
+    });
+    const newer = status('123e4567-e89b-42d3-a456-4266141740ac', {
+      taskId: 'same-task', state: 'completed', startedAt: 20,
+    });
+    await writeStatus(root, older);
+    await writeStatus(root, newer);
+    const discovered = [];
+    for await (const run of scanPiSubagentRuns(root, { latestPerTask: true })) discovered.push(run);
+    expect(discovered.map((run) => run.runId)).toEqual([newer.runId]);
+  });
+
+  it('streams historical status files lazily and closes the directory after early cancellation', async () => {
+    const root = await makeRoot();
+    const ids = ['123e4567-e89b-42d3-a456-4266141740ab', '123e4567-e89b-42d3-a456-4266141740ac'];
+    for (const id of ids) await writeStatus(root, status(id, { state: 'completed' }));
+    const iterator = scanPiSubagentRuns(root);
+    const first = await iterator.next();
+    expect(first.done).toBe(false);
+    // The other status has not been read or retained while the consumer is suspended.
+    const other = ids.find((id) => id !== first.value!.runId)!;
+    await writeFile(path.join(root, other, 'status.json'), 'corrupt');
+    expect((await iterator.next()).done).toBe(true);
+    const early = scanPiSubagentRuns(root);
+    await early.next();
+    await early.return(undefined);
+    await rm(root, { recursive: true, force: true });
+  });
+
   it('records a host-observed runner failure without rewriting completed child results', async () => {
     const root = await makeRoot();
     const runId = '123e4567-e89b-42d3-a456-4266141740ab';

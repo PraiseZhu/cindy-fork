@@ -108,6 +108,10 @@ describe('local Cindy version snapshots', () => {
     publishPersonalVersion(h.userData, first);
     const a = await verifyPersonalVersion(h.userData, first, h.original);
     expect(a.builtAt).toBe(h.builtAt);
+    expect(a.version).toBe(`Cindy Make ${first.slice(0, 8)}`);
+    expect(
+      listPersonalVersions(h.userData, h.original).find((item) => item.id === first)?.version,
+    ).toBe(`Cindy Make ${first.slice(0, 8)}`);
     await writeFile(path.join(h.resources, 'app.asar'), 'application B');
     const second = (await h.retain())!;
     expect(second).not.toBe(first);

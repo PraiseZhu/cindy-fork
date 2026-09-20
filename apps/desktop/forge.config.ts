@@ -814,6 +814,8 @@ function extraResourcesForTarget(targetPlatform: string): string[] {
     // Input bytes for upgrading retired preset avatars to ordinary managed images.
     'resources/legacy-teammate-avatars',
     'resources/teammate-portrait-gallery.png',
+    // Cindy-owned Agent Skills are materialized under userData on startup.
+    'resources/system-skills',
     'resources/tools',
     'drizzle',
     'resources/cc-manager',
@@ -1237,6 +1239,8 @@ function buildRemoteDesktopInput(platform: ForgePlatform, arch: ForgeArch): void
         if (location.error || location.status !== 0)
           throw new Error('Remote credentials output unavailable');
         outputs.push(path.join(location.stdout.trim(), 'cindy-macos-remote-credentials'));
+        fs.cpSync(path.join(location.stdout.trim(), 'CindyRemoteCredentials_CindyRemoteCredentials.bundle'),
+          path.join(destDir, 'CindyRemoteCredentials_CindyRemoteCredentials.bundle'), { recursive: true });
       }
       const credential = path.join(destDir, 'cindy-macos-remote-credentials');
       if (outputs.length === 1) fs.copyFileSync(outputs[0], credential);
@@ -1365,6 +1369,45 @@ function buildWindowsTaskbarAddon(platform: ForgePlatform, arch: ForgeArch): voi
       path.join(build, target, 'release', 'cindy_windows_taskbar.dll'),
       path.join(dest, 'cindy-windows-taskbar.node'),
     );
+  } finally {
+    fs.rmSync(build, { recursive: true, force: true });
+  }
+}
+
+function buildWindowsAtomicRenameHelper(platform: ForgePlatform, arch: ForgeArch): void {
+  if (process.platform !== 'win32' || platform !== 'win32') return;
+  const target =
+    arch === 'arm64' ? 'aarch64-pc-windows-msvc' : arch === 'x64' ? 'x86_64-pc-windows-msvc' : null;
+  if (!target) throw new Error(`[forge] Unsupported Windows atomic rename architecture: ${arch}`);
+  const source = path.join(__dirname, 'native', 'windows-atomic-rename', 'main.rs');
+  const build = fs.mkdtempSync(path.join(os.tmpdir(), 'cindy-atomic-rename-build-'));
+  const output = path.join(build, 'cindy-windows-atomic-rename.exe');
+  try {
+    const userRustc = path.join(os.homedir(), '.cargo', 'bin', 'rustc.exe');
+    const result = spawnSync(
+      fs.existsSync(userRustc) ? userRustc : 'rustc',
+      [
+        source,
+        '--edition=2021',
+        '-C',
+        'opt-level=s',
+        '-C',
+        'panic=abort',
+        '--target',
+        target,
+        '-o',
+        output,
+      ],
+      { stdio: 'inherit', windowsHide: true },
+    );
+    if (result.error || result.status !== 0) {
+      throw new Error(
+        `[forge] Windows atomic rename build failed: ${result.error?.message ?? result.status}`,
+      );
+    }
+    const dest = path.join(__dirname, 'resources', 'tools', 'windows-atomic-rename');
+    fs.mkdirSync(dest, { recursive: true });
+    fs.copyFileSync(output, path.join(dest, 'cindy-windows-atomic-rename.exe'));
   } finally {
     fs.rmSync(build, { recursive: true, force: true });
   }
@@ -1696,6 +1739,9 @@ if (isWin) {
   makers.unshift(
     new MakerNSIS({
       getAppBuilderConfig: async () => ({
+        directories: {
+          buildResources: path.join(__dirname, 'resources'),
+        },
         // NSIS installer(Setup.exe)与 uninstaller(Uninstall <App>.exe)的签名。
         // 这是签卸载器的唯一入口(Issue #998):uninstaller 由 NSIS 编译期两遍生成后
         // 嵌入 installer,postPackage 阶段还不存在、也没有独立成品文件可事后补签,
@@ -1973,6 +2019,7 @@ const config: ForgeConfig = {
       buildMacVoiceInputTextInsertionHelper(platform, arch);
       buildMacXboxGamepadHelper(platform, arch);
       buildWindowsGamepadHelper(platform, arch);
+      buildWindowsAtomicRenameHelper(platform, arch);
       buildWindowsTaskbarAddon(platform, arch);
       buildMacVoiceInputModifierShortcutListener(platform, arch);
       buildMacAgentIslandHelper(platform, arch);

@@ -238,10 +238,11 @@ export async function getCindyMakeHistory(selectedRunId?: string): Promise<Cindy
     state.upstreamMerge.hasWorkspace
       ? state.upstreamMerge
       : undefined;
-  const busy =
+  const globalBusy =
     !!buildJob || cindyMakeTestController.hasActiveJobs() || cindyMakeManager.hasActiveWork();
   const items: CindyMakeHistoryItem[] = [];
   for (const record of h.store.list()) {
+    if (record.hiddenAt !== undefined) continue;
     const row = rows.find((entry) => entry.id === record.sessionId);
     const report = state.tasks?.[record.runId];
     const cleanup = state.taskActions?.[record.sessionId];
@@ -287,9 +288,39 @@ export async function getCindyMakeHistory(selectedRunId?: string): Promise<Cindy
                   : 'editing';
     let changedSinceCompletion =
       !!completion?.continuedAt || laterMessage || running(record.sessionId);
+    if (
+      completed &&
+      row?.status === 'active' &&
+      completion &&
+      (['starting', 'ready'].includes(completion.test?.status ?? '') ||
+        ['waiting', 'checking', 'merging', 'packaging', 'publishing'].includes(
+          completion.personal?.status ?? '',
+        ))
+    ) {
+      // Reuse the task card's live job lookup and restart recovery. Settings must
+      // never independently guess whether a persisted test is still running.
+      try {
+        const current = await cindyMakeTestController.act(
+          record.sessionId,
+          completion.id,
+          'status',
+        );
+        Object.assign(completion, current);
+        if (current.continuedAt) completed = false;
+      } catch {
+        // A newer user message/clear can invalidate the completion during this read.
+        // Drop its controls; do not fail the entire history or revive an old test.
+        completed = false;
+      }
+      h.check();
+      if (!completed) {
+        lifecycle = 'editing';
+        changedSinceCompletion = true;
+      }
+    }
     let verifiedSource = sourceAvailable;
     let personalHead: string | undefined;
-    if (selectedRunId === record.runId && sourceAvailable && !busy && !pendingMerge) {
+    if (selectedRunId === record.runId && sourceAvailable && !globalBusy && !pendingMerge) {
       let checkedBranch = false;
       try {
         const signal = AbortSignal.timeout(15000);
@@ -422,11 +453,21 @@ export async function getCindyMakeHistory(selectedRunId?: string): Promise<Cindy
     )
       integration = 'unknown';
     const operation = pendingMerge?.feature?.runId === record.runId ? pendingMerge : undefined;
+    const targetBusy =
+      running(record.sessionId) ||
+      cindyMakeManager.isTaskPreparing(record.sessionId) ||
+      cleanup?.status === 'running' ||
+      cindyMakeTestController.isUsingWorkspace?.(workspace) === true;
+    const blockedByGlobalWork = globalBusy || (!!pendingMerge && !operation);
     const version = record.versions.at(-1);
     const needsBuild =
       !!last &&
       (version?.operationId !== last.id || (!!personalHead && version?.commit !== personalHead));
     const taskBuilding = cindyMakeTestController.isBuilding(record.sessionId);
+    const test =
+      completed && lifecycle === 'ready' && completion?.lastAction !== 'build'
+        ? completion?.test
+        : undefined;
     const taskBuild = completion?.personal;
     const projectedBuild =
       taskBuild && !taskBuilding && !['ready', 'failed'].includes(taskBuild.status)
@@ -439,6 +480,7 @@ export async function getCindyMakeHistory(selectedRunId?: string): Promise<Cindy
       workspaceAvailable,
       sourceAvailable: verifiedSource,
       completed,
+      test,
       buildFailed: completion?.personal?.status === 'failed',
       needsBuild,
       buildSourceAvailable,
@@ -450,11 +492,8 @@ export async function getCindyMakeHistory(selectedRunId?: string): Promise<Cindy
               (receipt) => receipt.beforeTree !== receipt.tree,
             ),
       newChanges: completion?.tree !== last?.taskTree,
-      busy:
-        busy ||
-        (!!pendingMerge && !operation) ||
-        record.runId !== selectedRunId ||
-        running(record.sessionId),
+      busy: blockedByGlobalWork || record.runId !== selectedRunId || running(record.sessionId),
+      allowCleanupWhileBusy: blockedByGlobalWork && !targetBusy && !operation,
       conflict: !!operation,
       recoverableFailure: operation?.status === 'failed' && !operation.feature?.awaitingResolution,
     });
@@ -463,6 +502,7 @@ export async function getCindyMakeHistory(selectedRunId?: string): Promise<Cindy
       lifecycle,
       integration,
       build: projectedBuild,
+      test,
       completionId: completed ? completion?.id : undefined,
       resolutionSessionId: operation?.sessionId,
       conflict: !!operation?.feature?.awaitingResolution,
@@ -479,8 +519,9 @@ export async function getCindyMakeHistory(selectedRunId?: string): Promise<Cindy
       needsBuild,
       actions: historyActions,
       actionReason:
-        historyActions.length === 0
-          ? busy || !!pendingMerge || running(record.sessionId)
+        historyActions.length === 0 ||
+        (targetBusy && historyActions.length === 1 && historyActions[0] === 'open')
+          ? blockedByGlobalWork || running(record.sessionId)
             ? 'busy'
             : record.runId !== selectedRunId
               ? 'checking'
@@ -494,14 +535,15 @@ export async function getCindyMakeHistory(selectedRunId?: string): Promise<Cindy
                       ? 'sourceUnavailable'
                       : 'ended'
           : undefined,
+      canHide: !targetBusy && !['starting', 'ready'].includes(test?.status ?? ''),
     });
   }
   const build = readCindyMakeBuildState();
   h.check();
   return {
     items,
-    busy: busy || !!pendingMerge,
-    canBuild: buildSourceAvailable && !busy && !pendingMerge,
+    busy: globalBusy || !!pendingMerge,
+    canBuild: buildSourceAvailable && !globalBusy && !pendingMerge,
     build,
   };
 }
@@ -511,8 +553,12 @@ export function readCindyMakeBuildState(): CindyMakePersonalBuildState | undefin
   const h = context();
   let build = h.store.readBuild();
   const activeBuild = cindyMakeTestController.activeBuild();
-  if (build && !buildJob && !(activeBuild?.buildId && activeBuild.buildId === build.buildId)
-    && !['ready', 'failed'].includes(build.status)) {
+  if (
+    build &&
+    !buildJob &&
+    !(activeBuild?.buildId && activeBuild.buildId === build.buildId) &&
+    !['ready', 'failed'].includes(build.status)
+  ) {
     build = { ...build, status: 'failed', stopping: undefined, error: 'interrupted' };
     h.store.saveBuild(build);
   }
@@ -530,10 +576,22 @@ export async function actCindyMakeHistory(
   const state = await getCindyMakeHistory(runId);
   h.check();
   const item = state.items.find((entry) => entry.runId === runId);
-  if (!item || !item.actions.includes(action as MakeHistoryAction))
+  const canHide = action === 'hide' && item?.canHide === true;
+  // Keep a stale cleanup button harmless when this record itself is still
+  // running, preparing, being tested, or already cleaning.  The snapshot
+  // carries the stable reason so Renderer can show the actionable busy tip
+  // immediately instead of reporting a generic unavailable action.
+  if (item?.actionReason === 'busy' && ['end', 'retry-cleanup', 'hide'].includes(action))
+    throwIpcError('PRECONDITION_FAILED', 'busy');
+  if (!item || (!item.actions.includes(action as MakeHistoryAction) && !canHide))
     throwIpcError('PRECONDITION_FAILED', 'unavailable');
   if (action === 'build') return generateHistoryPersonalVersion();
-  if (action === 'end' || action === 'retry-cleanup')
+  if (action === 'hide') {
+    // An ended record has already gone through the canonical task cleanup path.
+    // Active/cleanup records must finish that path before they become dismissible.
+    if (item.lifecycle !== 'ended') await manageCindyMakeTask(item.sessionId, 'end');
+    h.store.hide(runId);
+  } else if (action === 'end' || action === 'retry-cleanup')
     await manageCindyMakeTask(item.sessionId, 'end');
   else if (action === 'test' || action === 'continue')
     await actCindyMakeTest(

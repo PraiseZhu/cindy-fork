@@ -16,10 +16,10 @@ const candidate: CindyMakeMergeState = {
   baselineCommit: 'b'.repeat(40),
   hasWorkspace: true,
 };
-function harness(initial?: SavedUpstreamMerge) {
+function harness(initial?: SavedUpstreamMerge, actualWorkspace = !!initial?.state.hasWorkspace) {
   let saved = initial ? structuredClone(initial) : undefined;
   let owner = 'alice';
-  let workspace = !!initial?.state.hasWorkspace;
+  let workspace = actualWorkspace;
   const deps: UpstreamMergeDependencies = {
     read: () => saved,
     write: vi.fn((next) => {
@@ -57,6 +57,9 @@ function harness(initial?: SavedUpstreamMerge) {
     saved: () => saved,
     setOwner: (next: string) => {
       owner = next;
+    },
+    setWorkspace: (next: boolean) => {
+      workspace = next;
     },
   };
 }
@@ -135,10 +138,28 @@ describe('upstream merge lifecycle', () => {
   });
   it('automatically applies a clean update and never creates an agent task', async () => {
     const h = harness();
-    expect(await h.controller.update()).toMatchObject({ status: 'merged' });
+    h.deps.cleanup = vi.fn(async () => h.setWorkspace(false));
+    expect(await h.controller.update()).toMatchObject({ status: 'merged', hasWorkspace: false });
     expect(h.deps.session).not.toHaveBeenCalled();
     expect(h.saved()?.state.commit).toBe('c'.repeat(40));
     expect(h.deps.cleanup).toHaveBeenCalledOnce();
+  });
+  it('normalizes a completed merge whose candidate worktree was already removed', () => {
+    const h = harness(
+      {
+        state: {
+          ...candidate,
+          status: 'merged',
+          hasWorkspace: true,
+          commit: 'c'.repeat(40),
+        },
+      },
+      false,
+    );
+    expect(h.controller.status()).toMatchObject({ status: 'merged', hasWorkspace: false });
+    expect(h.saved()).toMatchObject({
+      state: { status: 'merged', hasWorkspace: false },
+    });
   });
   it('deduplicates simultaneous updates and opens one independent conflict task with the chosen model', async () => {
     const h = harness();

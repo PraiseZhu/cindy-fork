@@ -1,10 +1,11 @@
 import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { expect, it } from 'vitest';
 import {
   applyUpstreamMerge,
+  cleanupMergedCandidate,
   prepareUpstreamMerge,
   mergeWorktree,
   mergeBranch,
@@ -109,6 +110,73 @@ it('rebases locally committed personal changes onto the latest official main and
     expect(
       await h.git(['rev-parse', 'refs/cindy-make/backups/' + h.state.id + '/personal'], h.source),
     ).toBe(result.baselineCommit);
+    expect(await cleanupMergedCandidate(h.userData, result, h.git)).toBe(true);
+    await expect(h.git(['rev-parse', mergeBranch(h.state.id)], h.source)).rejects.toBeTruthy();
+    await expect(stat(mergeWorktree(h.userData, h.state.id))).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+    expect(await h.git(['rev-parse', 'cindy-personal'], h.source)).toBe(result.commit);
+    expect(
+      await h.git(['rev-parse', 'refs/cindy-make/backups/' + h.state.id + '/personal'], h.source),
+    ).toBe(result.baselineCommit);
+  } finally {
+    await h.clean();
+  }
+}, 30_000);
+
+it('preserves unfinished or session-owned candidates, new files and commits added after adoption', async () => {
+  const h = await fixture(false);
+  try {
+    const result = await prepareUpstreamMerge(h.userData, h.state, h.git, async () => {});
+    const worktree = mergeWorktree(h.userData, h.state.id);
+    expect(
+      await cleanupMergedCandidate(h.userData, { ...result, status: 'conflict' }, h.git),
+    ).toBe(false);
+    expect(
+      await cleanupMergedCandidate(h.userData, { ...result, sessionId: 'active-task' }, h.git),
+    ).toBe(false);
+    await writeFile(path.join(worktree, 'later.txt'), 'new work\n');
+    expect(await cleanupMergedCandidate(h.userData, result, h.git)).toBe(false);
+    expect(await readFile(path.join(worktree, 'later.txt'), 'utf8')).toBe('new work\n');
+    await h.commit(worktree, 'later work');
+    const later = await h.git(['rev-parse', 'HEAD'], worktree);
+    expect(await cleanupMergedCandidate(h.userData, result, h.git)).toBe(false);
+    expect(await h.git(['rev-parse', mergeBranch(h.state.id)], h.source)).toBe(later);
+  } finally {
+    await h.clean();
+  }
+}, 30_000);
+
+it('finishes branch cleanup after directory removal but preserves a branch checked out elsewhere', async () => {
+  const h = await fixture(false);
+  try {
+    const result = await prepareUpstreamMerge(h.userData, h.state, h.git, async () => {});
+    await h.git(['worktree', 'remove', mergeWorktree(h.userData, h.state.id)], h.source);
+    const other = path.join(h.userData, 'other-worktree');
+    await h.git(['worktree', 'add', other, mergeBranch(h.state.id)], h.source);
+    expect(await cleanupMergedCandidate(h.userData, result, h.git)).toBe(false);
+    expect(await h.git(['rev-parse', 'HEAD'], other)).toBe(result.commit);
+    await h.git(['worktree', 'remove', other], h.source);
+    expect(await cleanupMergedCandidate(h.userData, result, h.git)).toBe(true);
+    expect(await h.git(['branch', '--list', mergeBranch(h.state.id)], h.source)).toBe('');
+  } finally {
+    await h.clean();
+  }
+}, 30_000);
+
+it('refuses to delete a branch moved between cleanup verification and ref deletion', async () => {
+  const h = await fixture(false);
+  try {
+    const result = await prepareUpstreamMerge(h.userData, h.state, h.git, async () => {});
+    const ref = 'refs/heads/' + mergeBranch(h.state.id);
+    const racingGit: typeof h.git = async (args, cwd, indexFile) => {
+      if (args[0] === 'update-ref' && args.includes('-d') && args.includes(ref))
+        await h.git(['update-ref', ref, h.baselineCommit], h.source);
+      return h.git(args, cwd, indexFile);
+    };
+    await expect(cleanupMergedCandidate(h.userData, result, racingGit)).rejects.toBeTruthy();
+    expect(await h.git(['rev-parse', ref], h.source)).toBe(h.baselineCommit);
+    expect(await h.git(['rev-parse', 'cindy-personal'], h.source)).toBe(result.commit);
   } finally {
     await h.clean();
   }

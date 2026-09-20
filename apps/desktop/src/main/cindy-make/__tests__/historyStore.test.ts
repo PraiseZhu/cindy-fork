@@ -64,6 +64,7 @@ it('keeps ended history, deduplicates operation receipts, and does not confuse b
     tree: 'e'.repeat(40),
   });
   store.end('aaaa', 4);
+  store.hide('aaaa', 5);
   store.seed({ ...record, endedAt: 99 });
   writeFileSync(path.join(dir, 'build-state.json'), JSON.stringify({ status: 'ready' }));
   store.saveBuild({ status: 'ready', commit: 'b'.repeat(40), generatedAt: 4 });
@@ -84,7 +85,8 @@ it('keeps ended history, deduplicates operation receipts, and does not confuse b
   expect(new CindyMakeHistoryStore(dir).list()).toEqual(restored);
   expect(restored[0]).toMatchObject({
     endedAt: 4,
-    updatedAt: 4,
+    hiddenAt: 5,
+    updatedAt: 5,
     receipts: [receipt],
     completions: [{ id: 'turn' }],
   });

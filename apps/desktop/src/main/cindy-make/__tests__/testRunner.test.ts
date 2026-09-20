@@ -43,14 +43,16 @@ function processHarness() {
   );
   const controller = new AbortController();
   const progress = vi.fn();
+  const diagnostics = vi.fn();
   const process = launchMakeTest(
     task,
-    path.join(profile, 'node'),
-    { PATH: '/tools', XDT_USER_DATA_DIR: '/host' },
+    { node: path.join(profile, 'node'), pnpm: path.join(profile, 'tools', 'pnpm.cmd') },
+    { PATH: '/tools', XDT_USER_DATA_DIR: '/host', npm_execpath: '/host/pnpm.cjs' },
     'global',
     controller.signal,
     spawn,
     progress,
+    diagnostics,
   );
   void process.ready.catch(() => {});
   const verdict = (extra: Partial<Record<string, string>> = {}) => {
@@ -74,6 +76,7 @@ function processHarness() {
   return {
     process,
     progress,
+    diagnostics,
     spawn,
     kill,
     controller,
@@ -100,6 +103,40 @@ beforeEach(() => {
 afterEach(() => vi.useRealTimers());
 
 describe('isolated Make test runner', () => {
+  it('records a wrapper failure code across chunks without raw output or free-form messages', async () => {
+    const h = processHarness();
+    h.emit(
+      'compiler output with private data\r\nDESKTOP_DEV_STEP=launching\r\nDESKTOP_DEV_VERDICT=failed\r\n',
+    );
+    expect(h.kill).not.toHaveBeenCalled();
+    h.emit('co');
+    h.emit('de=DEV_PROCESS_EXITED\r\nmessage=private credentials and paths\r\n');
+    await expect(h.process.ready).rejects.toMatchObject({ code: 'launchFailed' });
+    expect(h.diagnostics).toHaveBeenCalledWith(
+      expect.objectContaining({
+        event: 'failed',
+        reason: 'wrapperFailed',
+        step: 'launching',
+        wrapperCode: 'DEV_PROCESS_EXITED',
+      }),
+    );
+    expect(JSON.stringify(h.diagnostics.mock.calls)).not.toMatch(/private|credentials|compiler/);
+    expect(h.kill).toHaveBeenCalledOnce();
+  });
+  it('bounds incomplete failure verdicts and rejects unknown diagnostic codes', async () => {
+    vi.useFakeTimers();
+    const h = processHarness();
+    h.emit('DESKTOP_DEV_VERDICT=failed\r\n');
+    await vi.advanceTimersByTimeAsync(250);
+    await expect(h.process.ready).rejects.toMatchObject({ code: 'launchFailed' });
+    const next = processHarness();
+    next.emit('DESKTOP_DEV_VERDICT=failed\r\ncode=PRIVATE_SECRET\r\n');
+    await expect(next.process.ready).rejects.toMatchObject({ code: 'launchFailed' });
+    expect(next.diagnostics).toHaveBeenCalledWith(
+      expect.objectContaining({ wrapperCode: 'UNKNOWN' }),
+    );
+    expect(JSON.stringify(next.diagnostics.mock.calls)).not.toContain('PRIVATE_SECRET');
+  });
   it('reports bounded known steps across PTY chunks and ignores raw output and late progress', async () => {
     const h = processHarness();
     h.emit('DESKTOP_DEV_ST');
@@ -172,6 +209,9 @@ describe('isolated Make test runner', () => {
     ]);
     expect(h.spawn.mock.calls[0][2].cwd).toBe(task.workingDir);
     expect(h.spawn.mock.calls[0][2].env).not.toHaveProperty('XDT_USER_DATA_DIR');
+    expect(h.spawn.mock.calls[0][2].env?.npm_execpath).toBe(
+      path.join(profile, 'tools', 'pnpm.cmd'),
+    );
     const text = h.verdict();
     h.emit(text.slice(0, 17));
     h.emit(text.slice(17));

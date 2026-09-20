@@ -51,6 +51,8 @@ export interface PersonalVersion {
   protocol: 1;
   id: string;
   profile: VersionProfile;
+  /** User-facing Cindy Make label. Older snapshots may not have this field. */
+  version?: string;
   title: string;
   commit: string;
   tree?: string;
@@ -143,6 +145,11 @@ export function readPersonalVersion(profile: string, id: string): PersonalVersio
   if (
     typeof item.title !== 'string' ||
     item.title.length > 4096 ||
+    (item.version !== undefined &&
+      (typeof item.version !== 'string' ||
+        item.version.length < 1 ||
+        item.version.length > 128 ||
+        !/^Cindy Make [A-Za-z0-9-]{8}$/.test(item.version))) ||
     typeof item.builtAt !== 'string' ||
     !Number.isFinite(Date.parse(item.builtAt)) ||
     typeof item.commit !== 'string' ||
@@ -289,6 +296,7 @@ export function listPersonalVersions(
           {
             id,
             kind: 'personal' as const,
+            ...(item.version ? { version: item.version } : {}),
             title: item.title,
             commit: item.commit,
             builtAt: item.builtAt,
@@ -348,6 +356,7 @@ export async function retainPersonalVersion(input: {
       protocol: 1,
       id,
       profile: input.profile,
+      version: `Cindy Make ${id.slice(0, 8)}`,
       title: input.title,
       commit: input.commit,
       ...(input.tree ? { tree: input.tree } : {}),

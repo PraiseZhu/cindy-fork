@@ -12,6 +12,7 @@ const h = vi.hoisted(() => ({
   write: vi.fn(),
   broadcast: vi.fn(),
   launch: vi.fn(),
+  probe: vi.fn(),
   verify: vi.fn(),
   build: vi.fn(),
   saveBuild: vi.fn(),
@@ -53,7 +54,7 @@ vi.mock('../personalBuild.js', () => ({
 }));
 vi.mock('../toolchainEnvironment.js', () => ({
   createMakeToolchainEnvironment: async () => ({
-    probe: async () => ({ status: 'ok', path: process.execPath }),
+    probe: h.probe,
   }),
   resolveMakeToolEnvironment: async () => ({}),
 }));
@@ -145,6 +146,10 @@ beforeEach(() => {
   h.current = true;
   h.laterUser = false;
   h.profile = path.join(os.tmpdir(), 'make-runtime-unit');
+  h.probe.mockReset().mockImplementation(async (command) => ({
+    status: 'ok',
+    path: command === 'pnpm' ? path.join(h.profile, 'tools', 'pnpm.cmd') : process.execPath,
+  }));
   h.row = {
     id: 'session',
     source: 'cindy-make',
@@ -191,6 +196,10 @@ describe('Cindy Make test IPC ownership and persistence', () => {
       );
       expect(steps).toEqual(['environment', 'workspace', 'stopping', 'assets', 'launching']);
       expect(h.verify).toHaveBeenCalledOnce();
+      expect(h.launch.mock.calls[0][1]).toEqual({
+        node: process.execPath,
+        pnpm: path.join(h.profile, 'tools', 'pnpm.cmd'),
+      });
       expect(JSON.parse(String(h.card.agentMeta)).otherMetadata).toBe('preserved');
     } finally {
       close();
@@ -198,6 +207,21 @@ describe('Cindy Make test IPC ownership and persistence', () => {
       h.broadcast.mockReset();
     }
   });
+  it.each([{ status: 'missing' }, { status: 'ok', path: 'pnpm.cmd' }])(
+    'does not launch when the checked pnpm entry is unavailable: %j',
+    async (pnpm) => {
+      h.probe.mockImplementation(async (command) =>
+        command === 'pnpm' ? pnpm : { status: 'ok', path: process.execPath },
+      );
+      await actCindyMakeTest('session', 'completion', 'start');
+      await vi.waitFor(() => expect(cindyMakeTestController.hasActiveJobs()).toBe(false));
+      expect(JSON.parse(String(h.card.agentMeta)).cindyMakeCompletion.test).toMatchObject({
+        status: 'failed',
+        error: 'environment',
+      });
+      expect(h.launch).not.toHaveBeenCalled();
+    },
+  );
   it('does not start a completion build while Settings owns another build', async () => {
     const release = cindyMakeManager.claimPersonalBuild();
     try {

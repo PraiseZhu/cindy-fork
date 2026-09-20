@@ -63,6 +63,7 @@ export class CindyMakeHistoryStore {
       typeof value.request !== 'string' ||
       !Number.isFinite(value.createdAt) ||
       !Number.isFinite(value.updatedAt) ||
+      (value.hiddenAt !== undefined && !Number.isFinite(value.hiddenAt)) ||
       !Array.isArray(value.completions) ||
       !Array.isArray(value.receipts) ||
       !value.receipts.every(validFeatureReceipt) ||
@@ -245,5 +246,9 @@ export class CindyMakeHistoryStore {
   end(runId: string, at = Date.now()): void {
     const record = this.read(runId);
     if (record && !record.endedAt) this.save({ ...record, endedAt: at, updatedAt: at });
+  }
+  hide(runId: string, at = Date.now()): void {
+    const record = this.read(runId);
+    if (record && !record.hiddenAt) this.save({ ...record, hiddenAt: at, updatedAt: at });
   }
 }

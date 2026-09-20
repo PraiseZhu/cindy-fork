@@ -108,15 +108,23 @@ export class UpstreamMergeController {
   private active?: Promise<unknown>;
   constructor(private readonly deps: UpstreamMergeDependencies) {
     this.saved = deps.read();
-    if (this.saved && this.saved.state.status !== 'merged') {
+    if (this.saved) {
       const state = this.saved.state;
-      this.save({
+      const recovered = {
         ...state,
         hasWorkspace: deps.hasWorkspace(state),
         ...(['fetching', 'merging', 'checking'].includes(state.status)
           ? { status: 'failed' as const, error: 'interrupted' as const }
           : {}),
-      });
+      };
+      // A completed merge removes its candidate worktree. Recompute this bit on
+      // every restore so an older state file cannot keep the UI looking busy.
+      if (
+        recovered.status !== state.status ||
+        recovered.error !== state.error ||
+        recovered.hasWorkspace !== state.hasWorkspace
+      )
+        this.save(recovered);
     }
     this.status();
   }
@@ -159,6 +167,15 @@ export class UpstreamMergeController {
     }
     this.save(result);
   }
+  private async cleanupCompleted(state: CindyMakeMergeState): Promise<void> {
+    await this.deps.cleanup(state);
+    // Cleanup may be deferred (for example after a crash). Read the actual
+    // worktree state before clearing the persisted flag.
+    if (this.saved?.state.id !== state.id || this.saved.state.status !== 'merged') return;
+    const hasWorkspace = this.deps.hasWorkspace(state);
+    if (this.saved.state.hasWorkspace !== hasWorkspace)
+      this.save({ ...this.saved.state, hasWorkspace });
+  }
   private async run(work: () => Promise<void>): Promise<CindyMakeMergeState | undefined> {
     if (this.active) {
       await this.active.catch(() => undefined);
@@ -195,7 +212,7 @@ export class UpstreamMergeController {
       if (result.status === 'conflict' && owner && this.deps.owner() === owner) {
         await this.createResolutionTask(options, owner);
       }
-      if (result.status === 'merged') await this.deps.cleanup(result);
+      if (result.status === 'merged') await this.cleanupCompleted(result);
       await this.deps.refresh().catch(() => undefined);
     });
   }
@@ -228,7 +245,7 @@ export class UpstreamMergeController {
           );
         await this.acceptResult(result, isCurrent);
         if (result.status === 'merged') {
-          await this.deps.cleanup(result);
+          await this.cleanupCompleted(result);
           return;
         }
       }
@@ -269,7 +286,7 @@ export class UpstreamMergeController {
       );
       await this.acceptResult(result, isCurrent);
       if (result.status === 'merged') {
-        await this.deps.cleanup(result);
+        await this.cleanupCompleted(result);
       } else if (result.status === 'conflict' && isCurrent())
         await this.createResolutionTask(options, owner);
       await this.deps.refresh().catch(() => undefined);

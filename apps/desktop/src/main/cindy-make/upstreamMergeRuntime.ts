@@ -8,7 +8,7 @@ import { readAtomicFileSync, atomicWriteFileSync } from '../utils/atomicWriteFil
 import { throwIpcError } from '../utils/ipcValidate.js';
 import { captureDataOwnerBroadcastScope } from '../device-link/broadcast-tap.js';
 import { createLogger } from '../logger.js';
-import { makeSourceRoot, makeSourceCheckoutPath } from './sourcePaths.js';
+import { makeSourceRoot } from './sourcePaths.js';
 import {
   createMakeToolchainEnvironment,
   resolveMakeToolEnvironment,
@@ -16,7 +16,6 @@ import {
 import { readCurrentCindySourceStatus } from './sourcePreparation.js';
 import { createLatestSourceVersionReader } from './latestSourceVersion.js';
 import { runSourceGit } from './sourceGit.js';
-import { snapshotContent } from './sourceContent.js';
 import { cindyMakeManager } from './manager.js';
 import { validateCindyMakeTaskStart } from './taskRuntime.js';
 import { ensureUpstreamMergeSession, assertUpstreamMergeSession } from './upstreamMergeSession.js';
@@ -30,6 +29,7 @@ import {
   mergeError,
   prepareFeatureMerge,
   applyFeatureMerge,
+  cleanupMergedCandidate,
   type MergeGit,
 } from './upstreamMerge.js';
 
@@ -154,17 +154,7 @@ export function configureUpstreamMerge(isRunning: (id: string) => boolean): void
         if (state.sessionId) return;
         // Only reclaim the exact file tree already adopted by the personal checkout.
         try {
-          const run = await git();
-          await verifyMergeWorktree(userData, state, run);
-          if (
-            !state.tree ||
-            (await snapshotContent(run, mergeWorktree(userData, state.id))) !== state.tree
-          )
-            return;
-          await run(
-            ['worktree', 'remove', '--force', mergeWorktree(userData, state.id)],
-            makeSourceCheckoutPath(userData),
-          );
+          await cleanupMergedCandidate(userData, state, await git());
         } catch {
           log.warn('Upstream merge completed; worktree cleanup deferred', {
             operationId: state.id,

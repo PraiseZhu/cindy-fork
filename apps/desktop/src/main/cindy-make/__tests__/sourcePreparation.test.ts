@@ -568,6 +568,7 @@ describe('Source and dependency preparation', () => {
     await expect(readCurrentCindySourceStatus(root, env)).resolves.toMatchObject({
       status: 'ready',
       branch: 'cindy-personal',
+      commit: 'a'.repeat(40),
       baseCommit: undefined,
       mainCommit: 'b'.repeat(40),
       currentBranch: 'cindy-personal',

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { StrictMode } from 'react';
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { setDataOwnerGeneration } from '@/contexts/dataOwnerGeneration';
 import { MAKE_DOCTOR_CHECK_IDS, type MakeDoctorReport } from '../../../../shared/cindyMakeDoctor';
@@ -135,14 +135,17 @@ describe('Make preflight confirmation boundary', () => {
     },
   );
 
-  it.each(['cancel', 'wait'])('creates no task on %s', async (choice) => {
+  it('closes to wait for upstream without creating a task', async () => {
     const view = open();
     await finishChecks();
-    fireEvent.click(
-      screen.getByRole('button', {
-        name: choice === 'wait' ? 'cindyMake.upstream.wait' : 'settings.cindyMake.create.cancel',
-      }),
-    );
+    expect(screen.queryByRole('button', { name: 'cindyMake.upstream.wait' })).toBeNull();
+    const card = screen.getByRole('region', { name: 'cindyMake.title' });
+    expect(within(card).queryByRole('button', { name: 'cindyMake.upstream.personal' })).toBeNull();
+    const buttons = screen.getAllByRole('button');
+    const cancel = screen.getByRole('button', { name: 'settings.cindyMake.create.cancel' });
+    const personal = screen.getByRole('button', { name: 'cindyMake.upstream.personal' });
+    expect(buttons.indexOf(cancel)).toBeLessThan(buttons.indexOf(personal));
+    fireEvent.click(screen.getByRole('button', { name: 'settings.cindyMake.create.cancel' }));
     expect(view.close).toHaveBeenCalledWith(false);
     expect(h.create).not.toHaveBeenCalled();
   });

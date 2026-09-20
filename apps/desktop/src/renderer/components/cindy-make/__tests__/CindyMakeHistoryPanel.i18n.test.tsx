@@ -159,7 +159,7 @@ describe('Cindy Make history with real translations', () => {
         </MemoryRouter>,
       );
       expect(await screen.findByRole('heading', { name: title + ' · 1' })).toBeTruthy();
-      expect(screen.getByRole('button', { name: build })).toBeTruthy();
+      expect(screen.queryByRole('button', { name: build })).toBeNull();
       expect(screen.getByRole('button', { name: integrate })).toBeTruthy();
       expect(screen.getByText(counts)).toBeTruthy();
       for (const [key, value] of strings({

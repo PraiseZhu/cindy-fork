@@ -2,6 +2,8 @@
 export {
   createVllmResponsesCompatibilityRule,
   stripToolUseProviderSpecificFieldsFromBody,
+  stripNonCanonicalResponsesItemIdsFromBody,
+  createResponsesItemIdPrefixRecoveryRule,
   stripToolUseProviderSpecificFields,
   stripEncryptedContentFromBody,
   stripImageGenerationItemsWithoutIdFromBody,

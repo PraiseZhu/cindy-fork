@@ -765,11 +765,70 @@ async function readSmallJson(file: string): Promise<unknown> {
   if (stat.isSymbolicLink() || !stat.isFile() || stat.size > MAX_STATUS_BYTES) {
     throw new Error('oversized, linked, or non-file subagent status');
   }
-  return JSON.parse(await fs.readFile(file, 'utf8')) as unknown;
+  const handle = await fs.open(file, 'r');
+  try {
+    // Bound the actual read as well as the preflight stat: a concurrent writer
+    // must not turn a small status into an unbounded readFile allocation.
+    const buffer = Buffer.allocUnsafe(stat.size + 1);
+    let used = 0;
+    while (used < buffer.length) {
+      const { bytesRead } = await handle.read(buffer, used, buffer.length - used, used);
+      if (bytesRead === 0) break;
+      used += bytesRead;
+    }
+    if (used > stat.size) throw new Error('subagent status changed size while reading');
+    return JSON.parse(buffer.toString('utf8', 0, used)) as unknown;
+  } finally { await handle.close(); }
 }
 
 export function isPiSubagentTerminal(state: PiSubagentRunState): boolean {
   return state === 'completed' || state === 'failed' || state === 'stopped';
+}
+
+/** Empty/settled roots do not need the cadence used for active approvals. */
+export const PI_SUBAGENT_ACTIVE_POLL_MS = 500;
+export const PI_SUBAGENT_IDLE_POLL_MS = 2_000;
+
+/** Background polling consumes one bounded status at a time, not Promise.all(history). */
+export async function* scanPiSubagentRuns(
+  root: string,
+  options: { latestPerTask?: boolean } = {},
+): AsyncGenerator<PiSubagentRunStatus> {
+  if (options.latestPerTask) {
+    // Directory order is not generation order. Select using small identities
+    // first so an old run cannot publish a result/approval before its successor.
+    // Re-read only the selected payloads instead of retaining every output.
+    const newest = new Map<string, { runId: string; startedAt: number }>();
+    for await (const status of scanPiSubagentRuns(root)) {
+      const previous = newest.get(status.taskId);
+      if (!previous || status.startedAt > previous.startedAt
+        || (status.startedAt === previous.startedAt && status.runId.localeCompare(previous.runId) > 0)) {
+        newest.set(status.taskId, { runId: status.runId, startedAt: status.startedAt });
+      }
+    }
+    for (const [taskId, selected] of newest) {
+      let status: PiSubagentRunStatus | null;
+      try {
+        status = parseStatus(await readSmallJson(path.join(root, selected.runId, 'status.json')), selected.runId);
+      } catch { continue; }
+      if (status?.taskId === taskId && status.startedAt === selected.startedAt
+        && !isPiSubagentRunStale(status, Date.now())) yield status;
+    }
+    return;
+  }
+  let directory: Awaited<ReturnType<typeof fs.opendir>>;
+  try { directory = await fs.opendir(root); } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+    throw error;
+  }
+  for await (const entry of directory) {
+    if (!entry.isDirectory() || !RUN_DIR_RE.test(entry.name)) continue;
+    let status: PiSubagentRunStatus | null;
+    try {
+      status = parseStatus(await readSmallJson(path.join(root, entry.name, 'status.json')), entry.name);
+    } catch { continue; }
+    if (status && !isPiSubagentRunStale(status, Date.now())) yield status;
+  }
 }
 
 /**
@@ -1406,23 +1465,9 @@ export async function listPiSubagentRunDirectoryIds(root: string): Promise<strin
 }
 
 export async function listPiSubagentRuns(root: string): Promise<PiSubagentRunStatus[]> {
-  const runIds = await listRunDirectoryIds(root);
-  const now = Date.now();
-  const statuses = await Promise.all(runIds
-    .map(async (runId): Promise<PiSubagentRunStatus | null> => {
-      try {
-        return parseStatus(
-          await readSmallJson(path.join(root, runId, 'status.json')),
-          runId,
-        );
-      } catch {
-        return null;
-      }
-    }));
-  return statuses
-    .filter((status): status is PiSubagentRunStatus => status !== null)
-    .filter((status) => !isPiSubagentRunStale(status, now))
-    .sort((left, right) => right.startedAt - left.startedAt || right.runId.localeCompare(left.runId));
+  const statuses: PiSubagentRunStatus[] = [];
+  for await (const status of scanPiSubagentRuns(root)) statuses.push(status);
+  return statuses.sort((left, right) => right.startedAt - left.startedAt || right.runId.localeCompare(left.runId));
 }
 
 export async function listPiSubagentRunDiagnostics(root: string): Promise<PiSubagentRunDiagnostic[]> {

@@ -120,8 +120,16 @@ vi.mock('@cindy/anthropic-compat-proxy', async (importOriginal) => {
         /image generation items without [`']?id[`']? are not supported/i.test(text),
       strip: () => null,
     }),
+    createResponsesItemIdPrefixRecoveryRule: () => ({
+      id: 'responses_item_id_prefix',
+      enabled: () => true,
+      matches: (text: string) =>
+        /Invalid\s+["']input\[\d+\]\.id["']:\s*["'](?!(?:fc|fco|ctc|ctco)_)[^"']+["']\.?\s+Expected an ID that begins with ["'](?:msg|rs)["']/i.test(text),
+      strip: () => null,
+    }),
     stripEncryptedContentFromBody: () => null,
     stripImageGenerationItemsWithoutIdFromBody: () => null,
+    stripNonCanonicalResponsesItemIdsFromBody: () => null,
     stripNonAnthropicFields: mockState.stripNonAnthropicFields,
     // 视觉桥 transform：默认短路（controller 未注入 → shouldBridge 恒 false → null 透传）。
     createVisionBridgeTransform: () => (() => null),
@@ -2730,13 +2738,13 @@ describe('codex proxy host', () => {
         // upstream 是函数形态(每请求现取,model-access 下发可运行期换 endpoint);
         // 断言其当前求值 = 网关 base + /v1
         upstream: expect.any(Function),
-        // [encrypted activeStrip, image generation activeStrip, provider-aware Guardian reviewer, locked Subagent route, instructions 注入, locked Subagent exec guard, Gateway 原生 web_search, 跨来源压缩块兼容, xAI ModelInput activeStrip, exec function adapter, strict gateway history 兼容, xAI ModelInput sanitize, DeepSeek V4 custom tool 兼容, xAI Responses 兼容, XD Gateway Grok 兼容, ByteDance Seed tool 兼容, MiniMax effort 兼容, provider model rewrite, provider 参数归一, 视觉桥(controller 未注入 → 短路透传), 工具 ID 校正, stripNonAnthropicFields]
+        // [encrypted activeStrip, image generation activeStrip, provider-aware Guardian reviewer, locked Subagent route, instructions 注入, locked Subagent exec guard, Gateway 原生 web_search, 跨来源压缩块兼容, xAI ModelInput activeStrip, responses item id activeStrip(#4738), exec function adapter, strict gateway history 兼容, xAI ModelInput sanitize, DeepSeek V4 custom tool 兼容, xAI Responses 兼容, XD Gateway Grok 兼容, ByteDance Seed tool 兼容, MiniMax effort 兼容, provider model rewrite, provider 参数归一, 视觉桥(controller 未注入 → 短路透传), 工具 ID 校正, stripNonAnthropicFields]
         transformRequest: [
           expect.any(Function), expect.any(Function), expect.any(Function), expect.any(Function), expect.any(Function),
           expect.any(Function), expect.any(Function), expect.any(Function), expect.any(Function), expect.any(Function),
           expect.any(Function), expect.any(Function), expect.any(Function), expect.any(Function), expect.any(Function),
           expect.any(Function), expect.any(Function), expect.any(Function), expect.any(Function),
-          expect.any(Function), expect.any(Function), expect.any(Function),
+          expect.any(Function), expect.any(Function), expect.any(Function), expect.any(Function),
         ],
         transformResponse: expect.any(Function),
         routingTransform: expect.any(Function),
@@ -2744,6 +2752,7 @@ describe('codex proxy host', () => {
         recoveryRules: expect.arrayContaining([
           expect.objectContaining({ id: 'encrypted_content' }),
           expect.objectContaining({ id: 'image_generation_id' }),
+          expect.objectContaining({ id: 'responses_item_id_prefix' }),
           expect.objectContaining({ id: 'xai_model_input' }),
         ]),
       }),
@@ -2849,6 +2858,11 @@ describe('codex proxy host', () => {
       threadId: 'thread-image',
       message: 'Image generation items without `id` are not supported for this request.',
     })).toBe('image_generation_id');
+    expect(host.armCodexHttpRecovery({
+      sessionId: 'session-msg-id',
+      threadId: 'thread-msg-id',
+      message: "Invalid 'input[290].id': 'chatcmpl-8f2a1c_msg_0'. Expected an ID that begins with 'msg'.",
+    })).toBe('responses_item_id_prefix');
 
     expect(proxyOpts.resolveWebSocketUpstream(ctxForThread('thread-encrypted'))).toBeNull();
     expect(proxyOpts.resolveWebSocketUpstream(ctxForThread('thread-image'))).toBeNull();
@@ -6401,7 +6415,7 @@ describe('codex proxy host', () => {
     await host.ensureCodexProxyReady();
 
     const transforms = mockState.createAnthropicCompatProxy.mock.calls[0]?.[0]?.transformRequest ?? [];
-    expect(transforms).toHaveLength(23); // encrypted activeStrip, image generation activeStrip, provider-aware Guardian reviewer, locked Subagent route, instructions 注入, locked Subagent exec guard, Gateway 原生 web_search, 跨来源压缩块兼容, xAI ModelInput activeStrip, exec function adapter, strict gateway history 兼容, xAI ModelInput sanitize, DeepSeek V4 custom tool 兼容, xAI Responses 兼容, XD Gateway Grok 兼容, ByteDance Seed tool 兼容, MiniMax effort 兼容, provider model rewrite, provider 参数归一, 视觉桥(短路), 工具 ID 校正, stripNonAnthropicFields, dump
+    expect(transforms).toHaveLength(24); // encrypted activeStrip, image generation activeStrip, provider-aware Guardian reviewer, locked Subagent route, instructions 注入, locked Subagent exec guard, Gateway 原生 web_search, 跨来源压缩块兼容, xAI ModelInput activeStrip, responses item id activeStrip(#4738), exec function adapter, strict gateway history 兼容, xAI ModelInput sanitize, DeepSeek V4 custom tool 兼容, xAI Responses 兼容, XD Gateway Grok 兼容, ByteDance Seed tool 兼容, MiniMax effort 兼容, provider model rewrite, provider 参数归一, 视觉桥(短路), 工具 ID 校正, stripNonAnthropicFields, dump
     const ctx = {
       method: 'POST',
       url: '/v1/responses',

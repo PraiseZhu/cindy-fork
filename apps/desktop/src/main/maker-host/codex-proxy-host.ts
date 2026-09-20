@@ -29,6 +29,7 @@ import {
   createActiveStripTransform,
   createEncryptedContentRecoveryRule,
   createImageGenerationIdRecoveryRule,
+  createResponsesItemIdPrefixRecoveryRule,
   createInstructionsInjectionTransform,
   createInstructionsRegistry,
   createXaiModelInputRecoveryRule,
@@ -38,6 +39,7 @@ import {
   sanitizeXaiModelInputFromBody,
   stripEncryptedContentFromBody,
   stripImageGenerationItemsWithoutIdFromBody,
+  stripNonCanonicalResponsesItemIdsFromBody,
   stripNonAnthropicFields,
   type ForwardLifecycleFailure,
   type ForwardLifecycleObserver,
@@ -109,6 +111,7 @@ import { xaiServerSideTools } from './xai-server-side-tools.js';
 import {
   encryptedStripController,
   imageGenerationStripController,
+  responsesItemIdStripController,
   xaiModelInputStripController,
 } from './thread-strip-controllers.js';
 import { createMakerLogger } from './logger-adapter.js';
@@ -200,6 +203,9 @@ const encryptedContentRecoveryRule = createEncryptedContentRecoveryRule({
 const imageGenerationIdRecoveryRule = createImageGenerationIdRecoveryRule({
   onRetry: (threadId, model) => imageGenerationStripController.markActive(threadId, model),
 });
+const responsesItemIdPrefixRecoveryRule = createResponsesItemIdPrefixRecoveryRule({
+  onRetry: (threadId, model) => responsesItemIdStripController.markActive(threadId, model),
+});
 const xaiModelInputRecoveryRule = createXaiModelInputRecoveryRule({
   onRetry: (threadId, model) => xaiModelInputStripController.markActive(threadId, model),
 });
@@ -207,6 +213,7 @@ const vllmResponsesCompatibilityRule = createVllmResponsesCompatibilityRule();
 const CODEX_BODY_RECOVERY_RULES = [
   encryptedContentRecoveryRule,
   imageGenerationIdRecoveryRule,
+  responsesItemIdPrefixRecoveryRule,
   xaiModelInputRecoveryRule,
   vllmResponsesCompatibilityRule,
 ] as const;
@@ -2899,6 +2906,13 @@ function createTransformRequestChain(
       controller: xaiModelInputStripController,
       enabled: () => true,
       strip: sanitizeXaiModelInputFromBody,
+    }),
+    // issue #4738: 上游拒绝过一次不合规 message/reasoning id 后, 该 thread 后续每次发送
+    // 前都预洗, 避免每轮先 400 再重试。
+    createActiveStripTransform({
+      controller: responsesItemIdStripController,
+      enabled: () => true,
+      strip: stripNonCanonicalResponsesItemIdsFromBody,
     }),
     // Providers that explicitly lack Responses custom tools still accept ordinary
     // functions. Adapt before provider sanitizers, then restore custom_tool_call

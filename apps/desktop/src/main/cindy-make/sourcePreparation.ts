@@ -133,6 +133,9 @@ export async function readCurrentCindySourceStatus(
       return {
         ...status,
         ...revisions,
+        ...(personalCommit && /^[0-9a-f]{7,64}$/i.test(personalCommit)
+          ? { commit: personalCommit }
+          : {}),
         branch: CINDY_PERSONAL_BRANCH,
       };
     }
@@ -169,6 +172,8 @@ function toSourceStatus(progress: SourcePreparationProgress): MakeSourceStatus {
     mainRemoteCommit: progress.mainRemoteCommit,
     mainBehind: progress.mainBehind,
     mainAhead: progress.mainAhead,
+    personalBehind: progress.personalBehind,
+    personalAhead: progress.personalAhead,
     ...(progress.error ? { error: progress.error } : {}),
     ...(progress.phase ? { phase: progress.phase } : {}),
     ...(progress.progress ? { progress: progress.progress } : {}),

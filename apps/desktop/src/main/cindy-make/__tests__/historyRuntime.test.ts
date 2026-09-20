@@ -18,10 +18,10 @@ const h = vi.hoisted(() => ({
   artifactPath: vi.fn(),
   showItem: vi.fn(),
   build: vi.fn(),
-  testBuild: undefined as
-    | { buildId: string; status: string; stopping?: boolean }
-    | undefined,
+  testBuild: undefined as { buildId: string; status: string; stopping?: boolean } | undefined,
   cancelTestBuild: vi.fn(),
+  testStatus: vi.fn(),
+  testUsing: false,
 }));
 const store = {
   readBuild: vi.fn(),
@@ -78,7 +78,9 @@ vi.mock('../taskManagement.js', () => ({ manageCindyMakeTask: h.end }));
 vi.mock('../testRuntime.js', () => ({
   actCindyMakeTest: vi.fn(),
   cindyMakeTestController: {
-    hasActiveJobs: () => !!h.testBuild,
+    hasActiveJobs: () => !!h.testBuild || h.testUsing,
+    isUsingWorkspace: () => h.testUsing,
+    act: h.testStatus,
     isBuilding: () => !!h.testBuild,
     activeBuild: () => h.testBuild,
     cancelBuild: h.cancelTestBuild,
@@ -152,6 +154,8 @@ beforeEach(() => {
   h.running = false;
   h.busy = false;
   h.testBuild = undefined;
+  h.testUsing = false;
+  h.testStatus.mockReset();
   h.cancelTestBuild.mockReset();
   vi.spyOn(cindyMakeManager, 'getState').mockImplementation(() => h.state);
   h.exists = true;
@@ -195,6 +199,55 @@ beforeEach(() => {
   ];
 });
 describe('history Main admission and owner boundary', () => {
+  it.each(['starting', 'ready', 'failed', 'stopped'] as const)(
+    'projects the completion card test receipt: %s',
+    async (status) => {
+      const meta = JSON.parse(h.cards[0].agentMeta).cindyMakeCompletion;
+      const test = {
+        status,
+        step: 'launching',
+        ...(status === 'failed' ? { error: 'launchFailed' } : {}),
+      };
+      h.cards[0].agentMeta = JSON.stringify({
+        cindyMakeCompletion: { ...meta, lastAction: 'test', test },
+      });
+      h.testUsing = ['starting', 'ready'].includes(status);
+      h.testStatus.mockResolvedValue({ ...meta, lastAction: 'test', test });
+      const item = (await getCindyMakeHistory('aaaa')).items[0];
+      expect(item.test).toEqual(test);
+      expect(item.completions.at(-1)?.test).toEqual(test);
+      if (status === 'starting') expect(item.actions).toEqual(['open']);
+      else if (status === 'ready') expect(item.actions).toEqual(['open', 'continue']);
+      else expect(item.actions).toContain('test');
+      expect(item.canHide).toBe(!h.testUsing);
+    },
+  );
+  it('uses the card controller to reconcile an interrupted test after restart', async () => {
+    const meta = JSON.parse(h.cards[0].agentMeta).cindyMakeCompletion;
+    h.cards[0].agentMeta = JSON.stringify({
+      cindyMakeCompletion: { ...meta, test: { status: 'starting' } },
+    });
+    const recovered = { ...meta, test: { status: 'stopped', error: 'interrupted' } };
+    h.testStatus.mockResolvedValue(recovered);
+    const item = (await getCindyMakeHistory('aaaa')).items[0];
+    expect(h.testStatus).toHaveBeenCalledWith('session', 'complete', 'status');
+    expect(item.test).toEqual(recovered.test);
+    expect(item.completions.at(-1)?.test).toEqual(recovered.test);
+    expect(item.actions).toContain('test');
+  });
+  it('does not present a previous round test failure during continued editing', async () => {
+    const meta = JSON.parse(h.cards[0].agentMeta).cindyMakeCompletion;
+    h.cards[0].agentMeta = JSON.stringify({
+      cindyMakeCompletion: {
+        ...meta,
+        continuedAt: 4,
+        test: { status: 'failed', error: 'launchFailed' },
+      },
+    });
+    const item = (await getCindyMakeHistory('aaaa')).items[0];
+    expect(item.test).toBeUndefined();
+    expect(item.actions).not.toContain('test');
+  });
   it('releases history integration and builds after real manager preparation and failed cleanup settle', async () => {
     const runId = 'prepared-history';
     const report = {
@@ -413,6 +466,15 @@ describe('history Main admission and owner boundary', () => {
     });
     expect((await getCindyMakeHistory('aaaa')).items[0].actions).not.toContain('integrate');
     await expect(actCindyMakeHistory('aaaa', 'integrate')).rejects.toThrow();
+  });
+  it('returns busy immediately for a stale cleanup action on the running task', async () => {
+    h.running = true;
+    await expect(actCindyMakeHistory('aaaa', 'hide')).rejects.toThrow('busy');
+    expect(h.end).not.toHaveBeenCalled();
+  });
+  it('keeps cleanup available for an idle history record while another task owns global work', async () => {
+    h.busy = true;
+    expect((await getCindyMakeHistory('aaaa')).items[0].actions).toContain('end');
   });
   it('never writes captured task data into an owner that changed while the read was pending', async () => {
     h.current = false;

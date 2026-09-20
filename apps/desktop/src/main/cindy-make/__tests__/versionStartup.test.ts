@@ -185,8 +185,17 @@ describe('one original version type for Dev and installed Cindy', () => {
     expect(h.spawn).not.toHaveBeenCalled();
   });
   it('rejects a declared endpoint realm that differs from the running original', async () => {
-    await writeFile(path.join(root, 'checkout/config/endpoint.json'), JSON.stringify({ schemaVersion: 1, region: 'cn', authApiBaseUrl: 'https://auth.example.invalid' }));
-    await expect(startup.rememberOriginalVersion(originalExec)).rejects.toMatchObject({ code: 'unavailable' });
+    await writeFile(
+      path.join(root, 'checkout/config/endpoint.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        region: 'cn',
+        authApiBaseUrl: 'https://auth.example.invalid',
+      }),
+    );
+    await expect(startup.rememberOriginalVersion(originalExec)).rejects.toMatchObject({
+      code: 'unavailable',
+    });
     expect(h.spawn).not.toHaveBeenCalled();
   });
   it('pins a validated launch to its original profile and consumes launch arguments before ordinary relaunch', async () => {
@@ -310,6 +319,10 @@ describe('one original version type for Dev and installed Cindy', () => {
     expect(store.selectedVersion(h.profile)).toBe('original');
   });
   it('starts the original Dev through the complete existing runner and retains its PTY until exit', async () => {
+    vi.stubEnv('DISPLAY', ':8');
+    vi.stubEnv('WAYLAND_DISPLAY', 'wayland-1');
+    vi.stubEnv('XDG_RUNTIME_DIR', '/run/user/1000');
+    vi.stubEnv('DBUS_SESSION_BUS_ADDRESS', 'unix:path=/run/user/1000/bus');
     saveOriginal();
     const value = launchRequest({ state: 'pending' });
     process.argv.push('--cindy-version-profile=' + h.profile, '--cindy-version-helper=' + value.id);
@@ -317,6 +330,12 @@ describe('one original version type for Dev and installed Cindy', () => {
     const kill = vi.fn(() => onExit());
     h.pty.mockImplementation((_node, _args, options) => {
       expect(options.env.CINDY_VERSION_LAUNCH).toBe(value.id);
+      expect(options.env).toMatchObject({
+        DISPLAY: ':8',
+        WAYLAND_DISPLAY: 'wayland-1',
+        XDG_RUNTIME_DIR: '/run/user/1000',
+        DBUS_SESSION_BUS_ADDRESS: 'unix:path=/run/user/1000/bus',
+      });
       queueMicrotask(() => {
         const file = startup.versionRequestPath(h.profile, value.id);
         store.writeVersionJson(file, {
