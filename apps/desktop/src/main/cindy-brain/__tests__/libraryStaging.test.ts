@@ -30,7 +30,12 @@ describe('LibraryStagingStore 故障恢复', () => {
       maxTotalBytes?: number;
       maxConcurrentWrites?: number;
       maxChunkBytes?: number;
+      maxTaskBytes?: number;
+      reserveBytes?: number;
+      streamIdleTimeoutMs?: number;
       listPageSize?: number;
+      now?: () => number;
+      getDiskFreeBytes?: () => Promise<number | null>;
     } = {},
   ): LibraryStagingStore =>
     new LibraryStagingStore({
@@ -45,12 +50,15 @@ describe('LibraryStagingStore 故障恢复', () => {
           ...(extra.listPageSize !== undefined ? { listPageSize: extra.listPageSize } : {}),
         },
       }),
-      getDiskFreeBytes: async () => 1024 ** 4,
+      getDiskFreeBytes: extra.getDiskFreeBytes ?? (async () => 1024 ** 4),
+      now: extra.now,
       limits: {
         maxTotalBytes: extra.maxTotalBytes ?? 64,
         maxConcurrentWrites: extra.maxConcurrentWrites ?? 2,
-        reserveBytes: 1,
+        reserveBytes: extra.reserveBytes ?? 1,
         ...(extra.maxChunkBytes !== undefined ? { maxChunkBytes: extra.maxChunkBytes } : {}),
+        ...(extra.maxTaskBytes !== undefined ? { maxTaskBytes: extra.maxTaskBytes } : {}),
+        ...(extra.streamIdleTimeoutMs !== undefined ? { streamIdleTimeoutMs: extra.streamIdleTimeoutMs } : {}),
       },
     });
 
@@ -987,5 +995,65 @@ describe('LibraryStagingStore 故障恢复', () => {
     const conflictList = await conflicted.list({ ghostId });
     expect(conflictList).toMatchObject({ ok: false, errorCode: 'LIBRARY_UNAVAILABLE' });
     expect(fs.existsSync(blobAbs(conflictRoot, conflictId))).toBe(true);
+  });
+
+  it('闲置未完成上传超时后让出并发槽,不扫 commitPending/durable', async () => {
+    let now = 1_000;
+    const store = makeStore(path.join(tmp, 'idle-busy', ghostId), {
+      maxConcurrentWrites: 1,
+      maxTotalBytes: 1024,
+      streamIdleTimeoutMs: 10,
+      now: () => now,
+    });
+    const first = await store.begin({
+      ghostId, taskId: 'idle-one', sourceRevision: 'r',
+      totalBytes: 4, sha256: sha256Of('idle'), mime: 'image/png', recovery,
+    });
+    if (!first.ok) throw new Error(JSON.stringify(first));
+    const busy = await store.begin({
+      ghostId, taskId: 'blocked', sourceRevision: 'r',
+      totalBytes: 4, sha256: sha256Of('next'), mime: 'image/png', recovery,
+    });
+    expect(busy).toMatchObject({ ok: false, errorCode: 'STAGING_BUSY' });
+    now = 1_020;
+    const second = await store.begin({
+      ghostId, taskId: 'after-idle', sourceRevision: 'r',
+      totalBytes: 4, sha256: sha256Of('next'), mime: 'image/png', recovery,
+    });
+    if (!second.ok) throw new Error(JSON.stringify(second));
+    expect(second.stagingId).not.toBe(first.stagingId);
+    expect(fs.existsSync(intentAbs(path.join(tmp, 'idle-busy', ghostId), first.stagingId))).toBe(false);
+    expect(await store.abort({ ghostId, stagingId: second.stagingId })).toMatchObject({ ok: true, aborted: true });
+
+    const durable = await commitOne(store, 'keep-durable', 'keep');
+    now = 2_000;
+    const stillListed = await store.list({ ghostId });
+    if (!stillListed.ok) throw new Error(JSON.stringify(stillListed));
+    expect(stillListed.items.map((item) => item.stagingId)).toContain(durable.stagingId);
+  });
+
+  it('并发预留计入磁盘保留水位,不删已落地 commitPending 原件', async () => {
+    const gib = 1024 ** 3;
+    const store = makeStore(path.join(tmp, 'reserve', ghostId), {
+      maxConcurrentWrites: 2,
+      maxTotalBytes: 8 * gib,
+      maxTaskBytes: 4 * gib,
+      reserveBytes: gib,
+      getDiskFreeBytes: async () => 6 * gib,
+    });
+    const hashA = 'a'.repeat(64);
+    const hashB = 'b'.repeat(64);
+    const first = await store.begin({
+      ghostId, taskId: 'reserve-a', sourceRevision: 'r',
+      totalBytes: 3 * gib, sha256: hashA, mime: 'image/png', recovery,
+    });
+    if (!first.ok) throw new Error(JSON.stringify(first));
+    const second = await store.begin({
+      ghostId, taskId: 'reserve-b', sourceRevision: 'r',
+      totalBytes: 3 * gib, sha256: hashB, mime: 'image/png', recovery,
+    });
+    expect(second).toMatchObject({ ok: false, errorCode: 'DISK_FULL' });
+    const abortFirst = await store.abort({ ghostId, stagingId: first.stagingId });
+    expect(abortFirst).toMatchObject({ ok: true, aborted: true });
   });
 });

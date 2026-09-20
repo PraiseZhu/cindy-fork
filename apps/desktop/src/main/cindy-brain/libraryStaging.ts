@@ -36,6 +36,8 @@ export interface LibraryStagingLimits {
   maxConcurrentWrites: number;
   maxChunkBytes: number;
   reserveBytes: number;
+  /** Incomplete upload idle timeout; durables/commitPending are never swept. */
+  streamIdleTimeoutMs: number;
   maxRecoveryMetadataBytes: number;
   defaultListLimit: number;
   maxListLimit: number;
@@ -47,6 +49,7 @@ export const DEFAULT_LIBRARY_STAGING_LIMITS: LibraryStagingLimits = {
   maxConcurrentWrites: 4,
   maxChunkBytes: 16 * 1024 * 1024,
   reserveBytes: 1024 * 1024 * 1024,
+  streamIdleTimeoutMs: DEFAULT_LIBRARY_LIMITS.streamIdleTimeoutMs,
   maxRecoveryMetadataBytes: 64 * 1024,
   defaultListLimit: 100,
   maxListLimit: 500,
@@ -97,6 +100,7 @@ export interface LibraryStagingDeps {
   getDiskFreeBytes?(root: string): Promise<number | null>;
   log?: LibraryVaultDeps['log'];
   limits?: Partial<LibraryStagingLimits>;
+  now?(): number;
 }
 
 const HEX64 = /^[0-9a-f]{64}$/;
@@ -200,6 +204,7 @@ interface UploadRecord {
   recovery: Record<string, unknown>;
   nextSeq: number;
   lastChunk: Buffer | null;
+  lastAt: number;
   /** writeCommit succeeded; keep mapping until manifest+dirsync durable. */
   commitPending: boolean;
 }
@@ -343,6 +348,7 @@ export class LibraryStagingStore {
   private readonly limits: LibraryStagingLimits;
   private readonly ownerScopeKey: string;
   private readonly ghostId: string;
+  private readonly now: () => number;
   private readonly vault: LibraryVault;
   private readonly uploads = new Map<string, UploadRecord>();
   private readonly byTask = new Map<string, string>();
@@ -359,6 +365,7 @@ export class LibraryStagingStore {
     this.limits = { ...DEFAULT_LIBRARY_STAGING_LIMITS, ...(deps.limits ?? {}) };
     this.ownerScopeKey = deps.ownerScopeKey;
     this.ghostId = deps.ghostId;
+    this.now = deps.now ?? Date.now;
     const capturedRoot = deps.rootDir;
     const createVault = deps.createVault ?? ((vaultDeps: LibraryVaultDeps) => new LibraryVault(vaultDeps));
     this.vault = createVault({
@@ -504,6 +511,33 @@ export class LibraryStagingStore {
       + this.orphanBlobBytes
       + this.closedTmpBytes
       + this.trackedUploadBytes();
+  }
+
+  /** Idle incomplete uploads only. Durables and commitPending originals are never TTL-deleted. */
+  private async sweepIdleUploadsUnlocked(): Promise<void> {
+    const cutoff = this.now() - this.limits.streamIdleTimeoutMs;
+    for (const upload of [...this.uploads.values()]) {
+      if (upload.commitPending || upload.lastAt >= cutoff) continue;
+      await this.vault.writeAbort({ streamId: upload.streamId }).catch(() => {});
+      this.uploads.delete(upload.stagingId);
+      this.byTask.delete(taskKey(upload.taskId, upload.sourceRevision));
+      await this.vault.delete({ path: intentPath(upload.stagingId) }).catch(() => {});
+      this.closedTmpStale = true;
+    }
+  }
+
+  private async checkDiskReserveUnlocked(extraBytes: number): Promise<LibraryStagingFailure | null> {
+    if (!this.deps.getDiskFreeBytes) return null;
+    let free: number | null = null;
+    try {
+      free = await this.deps.getDiskFreeBytes(this.deps.rootDir);
+    } catch {
+      return null;
+    }
+    if (free !== null && free - this.trackedUploadBytes() - extraBytes < this.limits.reserveBytes) {
+      return fail('DISK_FULL', `磁盘剩余空间低于保留水位(${this.limits.reserveBytes} 字节);请清理磁盘或确认归档后释放`);
+    }
+    return null;
   }
 
   private async requireReady(): Promise<LibraryStagingFailure | null> {
@@ -759,12 +793,15 @@ export class LibraryStagingStore {
         }
         return fail('ALREADY_EXISTS', '同一 task/revision 已有不同元数据的原件');
       }
+      await this.sweepIdleUploadsUnlocked();
       if (this.uploads.size >= this.limits.maxConcurrentWrites) {
         return fail('STAGING_BUSY', '并发上传已达上限,请稍后重试');
       }
       if (this.quotaBytes() + req.totalBytes > this.limits.maxTotalBytes) {
         return fail('STAGING_QUOTA', 'staging 总容量不足,请在确认归档后释放再试');
       }
+      const disk = await this.checkDiskReserveUnlocked(req.totalBytes);
+      if (disk) return disk;
       const stagingId = randomUUID();
       const identity: TaskIdentity = {
         stagingId,
@@ -807,6 +844,7 @@ export class LibraryStagingStore {
         recovery: parsedRecovery.recovery,
         nextSeq: 1,
         lastChunk: null,
+        lastAt: this.now(),
         commitPending: false,
       });
       this.byTask.set(taskKey(taskId, sourceRevision), stagingId);
@@ -854,6 +892,7 @@ export class LibraryStagingStore {
       if (!chunk.ok) return vaultFail(chunk);
       upload.nextSeq = req.seq + 1;
       upload.lastChunk = decoded;
+      upload.lastAt = this.now();
       return { ok: true as const, accepted: chunk.accepted };
     });
   }
