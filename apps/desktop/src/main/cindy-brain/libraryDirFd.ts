@@ -303,16 +303,57 @@ print STDOUT "OK\n$meta_raw\n";
 print STDOUT $usage_raw;
 `;
 
-function parseExistingStdout(text: string): CustomExistingResult {
-  if (text === 'MISSING') return { ok: false, code: 'MISSING' };
-  if (!text.startsWith('OK\n')) return { ok: false, code: 'IO' };
-  const rest = text.slice(3);
-  const nl = rest.indexOf('\n');
-  const metaRaw = nl === -1 ? rest : rest.slice(0, nl);
-  const usageRaw = nl === -1 ? '' : rest.slice(nl + 1);
+function extractJsonValue(source: string, from: number): { json: string; end: number } | null {
+  let i = from;
+  while (i < source.length && (source[i] === ' ' || source[i] === '\n' || source[i] === '\r' || source[i] === '\t')) i += 1;
+  if (i >= source.length || (source[i] !== '{' && source[i] !== '[')) return null;
+  const start = i;
+  let depth = 0;
+  let inStr = false;
+  let esc = false;
+  for (; i < source.length; i += 1) {
+    const c = source[i];
+    if (inStr) {
+      if (esc) {
+        esc = false;
+        continue;
+      }
+      if (c === '\\') {
+        esc = true;
+        continue;
+      }
+      if (c === '"') inStr = false;
+      continue;
+    }
+    if (c === '"') {
+      inStr = true;
+      continue;
+    }
+    if (c === '{' || c === '[') depth += 1;
+    if (c === '}' || c === ']') {
+      depth -= 1;
+      if (depth === 0) return { json: source.slice(start, i + 1), end: i + 1 };
+    }
+  }
+  return null;
+}
+
+/** Existing-open helper payload: `OK` + complete JSON value(s), or `MISSING`. Pretty or compact. */
+export function parseExistingStdout(text: string): CustomExistingResult {
+  const body = text.replace(/^\uFEFF/, '');
+  const trimmed = body.replace(/^\s+/, '');
+  if (trimmed === 'MISSING' || trimmed.startsWith('MISSING\n') || trimmed.startsWith('MISSING\r\n')) {
+    return { ok: false, code: 'MISSING' };
+  }
+  if (!trimmed.startsWith('OK')) return { ok: false, code: 'IO' };
+  let rest = trimmed.slice(2);
+  if (rest.startsWith('\r\n')) rest = rest.slice(2);
+  else if (rest.startsWith('\n')) rest = rest.slice(1);
+  const metaTok = extractJsonValue(rest, 0);
+  if (!metaTok) return { ok: false, code: 'CORRUPT' };
   let meta: CustomExistingMeta;
   try {
-    const parsed = JSON.parse(metaRaw) as CustomExistingMeta;
+    const parsed = JSON.parse(metaTok.json) as CustomExistingMeta;
     if (
       typeof parsed !== 'object' || parsed === null || parsed.version !== 1 ||
       typeof parsed.ghostId !== 'string' || typeof parsed.createdAt !== 'number'
@@ -323,24 +364,30 @@ function parseExistingStdout(text: string): CustomExistingResult {
   } catch {
     return { ok: false, code: 'CORRUPT' };
   }
+  const afterMeta = rest.slice(metaTok.end);
+  const usageTok = extractJsonValue(afterMeta, 0);
   let usage: CustomExistingUsage | null = null;
-  if (usageRaw.trim()) {
+  if (usageTok) {
     try {
-      const parsed = JSON.parse(usageRaw) as CustomExistingUsage;
+      const parsed = JSON.parse(usageTok.json) as CustomExistingUsage;
       if (
-        typeof parsed === 'object' && parsed !== null &&
-        typeof parsed.files === 'number' && typeof parsed.bytes === 'number'
+        typeof parsed !== 'object' || parsed === null ||
+        typeof parsed.files !== 'number' || typeof parsed.bytes !== 'number'
       ) {
-        usage = {
-          files: parsed.files,
-          bytes: parsed.bytes,
-          updatedAt: parsed.updatedAt ?? 0,
-          mutations: parsed.mutations ?? 0,
-        };
+        return { ok: false, code: 'CORRUPT' };
       }
+      usage = {
+        files: parsed.files,
+        bytes: parsed.bytes,
+        updatedAt: parsed.updatedAt ?? 0,
+        mutations: parsed.mutations ?? 0,
+      };
     } catch {
-      usage = null;
+      return { ok: false, code: 'CORRUPT' };
     }
+    if (afterMeta.slice(usageTok.end).trim() !== '') return { ok: false, code: 'CORRUPT' };
+  } else if (afterMeta.trim() !== '') {
+    return { ok: false, code: 'CORRUPT' };
   }
   return { ok: true, meta, usage };
 }

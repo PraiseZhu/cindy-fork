@@ -490,7 +490,7 @@ export class LibraryVault {
               }
             } else {
               this.state = 'unavailable';
-              this.unavailableReason = 'permission';
+              this.unavailableReason = existing.code === 'CORRUPT' ? 'corrupt' : 'permission';
               this.opened = true;
               return { ok: true as const, state: this.state, reason: this.unavailableReason, usedBytes: 0, fileCount: 0 };
             }

@@ -19,7 +19,7 @@ import {
   type LibraryFileIdentity,
   type LibraryReadHandle,
 } from '../libraryVault.js';
-import { initCustomLibraryTree, openExistingCustomLibrary, PROVABLE_STAGING_NAME } from '../libraryDirFd.js';
+import { initCustomLibraryTree, openExistingCustomLibrary, parseExistingStdout, PROVABLE_STAGING_NAME } from '../libraryDirFd.js';
 
 const sha256Of = (s: string): string => createHash('sha256').update(s).digest('hex');
 
@@ -330,6 +330,53 @@ describe('LibraryVault', () => {
       });
       const opened = await second.open();
       expect(opened).toMatchObject({ ok: true, state: 'ready', usedBytes: Buffer.byteLength('abcdef') });
+    });
+
+    it('existing-open payload: pretty 与 compact 合法 meta 都读, malformed 仍 CORRUPT', () => {
+      const compact = 'OK\n{"version":1,"ghostId":"mivo-canvas","createdAt":1}\n{"files":2,"bytes":10,"updatedAt":1,"mutations":0}';
+      const prettyMeta = JSON.stringify({ version: 1, ghostId: 'mivo-canvas', createdAt: 1 }, null, 2);
+      const prettyUsage = JSON.stringify({ files: 2, bytes: 10, updatedAt: 1, mutations: 0 }, null, 2);
+      const pretty = `OK\n${prettyMeta}\n${prettyUsage}`;
+      expect(parseExistingStdout(compact)).toMatchObject({
+        ok: true, meta: { version: 1, ghostId: 'mivo-canvas', createdAt: 1 }, usage: { files: 2, bytes: 10 },
+      });
+      expect(parseExistingStdout(pretty)).toMatchObject({
+        ok: true, meta: { version: 1, ghostId: 'mivo-canvas', createdAt: 1 }, usage: { files: 2, bytes: 10 },
+      });
+      expect(parseExistingStdout('OK\n{"version":1,"ghostId":"mivo-canvas","createdAt":1}')).toMatchObject({
+        ok: true, usage: null,
+      });
+      expect(parseExistingStdout('OK\n{not json')).toMatchObject({ ok: false, code: 'CORRUPT' });
+      expect(parseExistingStdout('OK\n{"version":2,"ghostId":"mivo-canvas","createdAt":1}')).toMatchObject({ ok: false, code: 'CORRUPT' });
+      expect(parseExistingStdout('OK\n{"version":1,"ghostId":"mivo-canvas","createdAt":1}\n{nope')).toMatchObject({ ok: false, code: 'CORRUPT' });
+      expect(parseExistingStdout('MISSING')).toMatchObject({ ok: false, code: 'MISSING' });
+    });
+
+    it('pretty-printed 落盘 meta 再 open 仍 ready,不降校验', async () => {
+      const parent = path.join(tmpRoot, 'picked-pretty');
+      const custom = path.join(parent, 'mivo-canvas');
+      await fs.promises.mkdir(custom, { recursive: true });
+      const parentStat = await fs.promises.lstat(parent);
+      const grant = {
+        realPathAtGrant: await fs.promises.realpath(parent),
+        identity: { dev: parentStat.dev, ino: parentStat.ino },
+      };
+      const first = makeVault({
+        rootDir: () => custom, locationKind: 'custom', customParentGrant: grant, ghostId: 'mivo-canvas',
+      });
+      expect(await first.open()).toMatchObject({ ok: true, state: 'ready' });
+      const metaPath = path.join(custom, '.cindy-library', 'meta.json');
+      const compact = JSON.parse(await fs.promises.readFile(metaPath, 'utf8'));
+      await fs.promises.writeFile(metaPath, JSON.stringify(compact, null, 2));
+      const second = makeVault({
+        rootDir: () => custom, locationKind: 'custom', customParentGrant: grant, ghostId: 'mivo-canvas',
+      });
+      expect(await second.open()).toMatchObject({ ok: true, state: 'ready' });
+      await fs.promises.writeFile(metaPath, '{not json');
+      const third = makeVault({
+        rootDir: () => custom, locationKind: 'custom', customParentGrant: grant, ghostId: 'mivo-canvas',
+      });
+      expect(await third.open()).toMatchObject({ ok: true, state: 'unavailable', reason: 'corrupt' });
     });
 
     it('可证 staging 名只匹配 uuid.tmp/stream,不匹配 old.tmp 或原件', () => {
