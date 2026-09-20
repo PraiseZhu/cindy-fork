@@ -19,7 +19,7 @@ import {
   type LibraryFileIdentity,
   type LibraryReadHandle,
 } from '../libraryVault.js';
-import { initCustomLibraryTree, openExistingCustomLibrary } from '../libraryDirFd.js';
+import { initCustomLibraryTree, openExistingCustomLibrary, PROVABLE_STAGING_NAME } from '../libraryDirFd.js';
 
 const sha256Of = (s: string): string => createHash('sha256').update(s).digest('hex');
 
@@ -330,6 +330,32 @@ describe('LibraryVault', () => {
       });
       const opened = await second.open();
       expect(opened).toMatchObject({ ok: true, state: 'ready', usedBytes: Buffer.byteLength('abcdef') });
+    });
+
+    it('可证 staging 名只匹配 uuid.tmp/stream,不匹配 old.tmp 或原件', () => {
+      expect(PROVABLE_STAGING_NAME.test('25ae5922-06f7-46dd-99f1-6d914d53af33.tmp')).toBe(true);
+      expect(PROVABLE_STAGING_NAME.test('25ae5922-06f7-46dd-99f1-6d914d53af33.stream')).toBe(true);
+      expect(PROVABLE_STAGING_NAME.test('old.tmp')).toBe(false);
+      expect(PROVABLE_STAGING_NAME.test('keep.txt')).toBe(false);
+      expect(PROVABLE_STAGING_NAME.test('meta.json')).toBe(false);
+    });
+
+    it('Windows 新建 custom 仍 unsupported,不 mkdir', async () => {
+      if (process.platform !== 'win32') return;
+      const parent = path.join(tmpRoot, 'picked-win-new');
+      await fs.promises.mkdir(parent);
+      const custom = path.join(parent, 'mivo-canvas');
+      const parentStat = await fs.promises.lstat(parent);
+      const grant = {
+        realPathAtGrant: await fs.promises.realpath(parent),
+        identity: { dev: parentStat.dev, ino: parentStat.ino },
+      };
+      const vault = makeVault({
+        rootDir: () => custom, locationKind: 'custom', customParentGrant: grant, ghostId: 'mivo-canvas',
+      });
+      const opened = await vault.open();
+      expect(opened).toMatchObject({ ok: true, state: 'unavailable', reason: 'permission' });
+      expect(fs.existsSync(custom)).toBe(false);
     });
 
     it('default 缺失根仍可首次创建', async () => {

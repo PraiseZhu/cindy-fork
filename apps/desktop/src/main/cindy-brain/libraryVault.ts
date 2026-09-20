@@ -30,7 +30,7 @@ import { isSafeGhostRelativePath } from '../../shared/ghost.js';
 import {
   initCustomLibraryTree,
   openExistingCustomLibrary,
-  type CustomExistingUsage,
+  sweepProvableStagingOnLinux,
   type CustomTreeInitResult,
 } from './libraryDirFd.js';
 
@@ -496,6 +496,13 @@ export class LibraryVault {
             }
             const afterTree = await this.assertHeldCustomParent(heldId);
             if (afterTree) return afterTree;
+            sweepProvableStagingOnLinux(
+              parentHandle.fd,
+              dirSeg,
+              new Set(this.streams.keys()),
+              this.now(),
+              this.limits.tmpMaxAgeMs,
+            );
           } finally {
             if (parentHandle) {
               try {

@@ -7,6 +7,7 @@
  */
 import { spawn } from 'node:child_process';
 import * as fs from 'node:fs';
+import * as path from 'node:path';
 
 export type CustomTreeInitResult =
   | { ok: true; createdMeta: boolean }
@@ -436,5 +437,316 @@ export async function openExistingCustomLibrary(req: {
   }
   if (process.platform === 'darwin') return runDarwinOpenExisting(req.parentFd, req.ghostId);
   if (process.platform === 'linux') return linuxOpenExisting(req.parentFd, req.ghostId);
+  if (process.platform === 'win32') return runWindowsOpenExisting(req.parentFd, req.ghostId);
   return { ok: false, code: 'UNSUPPORTED' };
+}
+
+function windowsPowerShellPath(): string | null {
+  const systemRoot = process.env.SystemRoot ?? process.env.WINDIR;
+  if (!systemRoot || !path.win32.isAbsolute(systemRoot)) return null;
+  const executable = path.win32.join(
+    systemRoot,
+    'System32',
+    'WindowsPowerShell',
+    'v1.0',
+    'powershell.exe',
+  );
+  try {
+    return fs.statSync(executable).isFile() ? executable : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Staging leftovers from atomicWrite (`uuid.tmp`) and streams (`uuid.stream`). Not unique originals. */
+export const PROVABLE_STAGING_NAME =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.(tmp|stream)$/i;
+
+/** Linux only: unlinkat-equivalent via /proc/self/fd. Unknown names kept. */
+export function sweepProvableStagingOnLinux(
+  parentFd: number,
+  ghostId: string,
+  activeStreamIds: ReadonlySet<string>,
+  nowMs: number,
+  maxAgeMs: number,
+): { ok: true; unlinked: number } | { ok: false; code: 'UNSUPPORTED' | 'IO' | 'MISSING' } {
+  if (process.platform !== 'linux') return { ok: false, code: 'UNSUPPORTED' };
+  if (!validSegment(ghostId) || !Number.isInteger(parentFd) || parentFd < 0) {
+    return { ok: false, code: 'IO' };
+  }
+  const opened: number[] = [];
+  let unlinked = 0;
+  try {
+    const openDirAt = (dirFd: number, name: string): number => {
+      let flags = fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW;
+      if (fs.constants.O_DIRECTORY) flags |= fs.constants.O_DIRECTORY;
+      const fd = fs.openSync(`/proc/self/fd/${dirFd}/${name}`, flags);
+      opened.push(fd);
+      return fd;
+    };
+    const rootFd = openDirAt(parentFd, ghostId);
+    const metaDirFd = openDirAt(rootFd, '.cindy-library');
+    const tmpFd = openDirAt(metaDirFd, 'tmp');
+    const names = fs.readdirSync(`/proc/self/fd/${tmpFd}`);
+    const cutoff = nowMs - maxAgeMs;
+    for (const name of names) {
+      if (!PROVABLE_STAGING_NAME.test(name)) continue;
+      if (name.endsWith('.stream') && activeStreamIds.has(name.slice(0, -'.stream'.length))) continue;
+      const target = `/proc/self/fd/${tmpFd}/${name}`;
+      try {
+        const st = fs.statSync(target);
+        if (!st.isFile() || st.mtimeMs >= cutoff) continue;
+        fs.unlinkSync(target);
+        unlinked += 1;
+      } catch {
+        /* keep on error */
+      }
+    }
+    return { ok: true, unlinked };
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT' || code === 'ENOTDIR') return { ok: false, code: 'MISSING' };
+    return { ok: false, code: 'IO' };
+  } finally {
+    for (const fd of opened.reverse()) {
+      try {
+        fs.closeSync(fd);
+      } catch {
+        /* always close */
+      }
+    }
+  }
+}
+
+const WINDOWS_EXISTING_OPEN_SCRIPT = String.raw`
+$utf8 = [System.Text.UTF8Encoding]::new($false)
+[Console]::OutputEncoding = $utf8
+Add-Type -TypeDefinition @'
+using System;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+using System.Text;
+using Microsoft.Win32.SafeHandles;
+
+public static class CindyLibraryExistingOpen {
+  private const uint FILE_READ_DATA = 0x00000001;
+  private const uint FILE_READ_ATTRIBUTES = 0x00000080;
+  private const uint SYNCHRONIZE = 0x00100000;
+  private const uint FILE_SHARE_ALL = 0x00000007;
+  private const uint FILE_SHARE_READ_WRITE = 0x00000003;
+  private const uint FILE_OPEN = 0x00000001;
+  private const uint FILE_DIRECTORY_FILE = 0x00000001;
+  private const uint FILE_NON_DIRECTORY_FILE = 0x00000040;
+  private const uint FILE_SYNCHRONOUS_IO_NONALERT = 0x00000020;
+  private const uint FILE_OPEN_REPARSE_POINT = 0x00200000;
+  private const uint FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400;
+
+  [StructLayout(LayoutKind.Sequential)]
+  private struct UNICODE_STRING {
+    public ushort Length;
+    public ushort MaximumLength;
+    public IntPtr Buffer;
+  }
+  [StructLayout(LayoutKind.Sequential)]
+  private struct OBJECT_ATTRIBUTES {
+    public int Length;
+    public IntPtr RootDirectory;
+    public IntPtr ObjectName;
+    public uint Attributes;
+    public IntPtr SecurityDescriptor;
+    public IntPtr SecurityQualityOfService;
+  }
+  [StructLayout(LayoutKind.Sequential)]
+  private struct IO_STATUS_BLOCK {
+    public IntPtr Status;
+    public IntPtr Information;
+  }
+  [StructLayout(LayoutKind.Sequential)]
+  private struct FILE_ATTRIBUTE_TAG_INFO {
+    public uint FileAttributes;
+    public uint ReparseTag;
+  }
+  [StructLayout(LayoutKind.Sequential)]
+  private struct BY_HANDLE_FILE_INFORMATION {
+    public uint FileAttributes;
+    public System.Runtime.InteropServices.ComTypes.FILETIME CreationTime;
+    public System.Runtime.InteropServices.ComTypes.FILETIME LastAccessTime;
+    public System.Runtime.InteropServices.ComTypes.FILETIME LastWriteTime;
+    public uint VolumeSerialNumber;
+    public uint FileSizeHigh;
+    public uint FileSizeLow;
+    public uint NumberOfLinks;
+    public uint FileIndexHigh;
+    public uint FileIndexLow;
+  }
+
+  [DllImport("kernel32.dll")] static extern IntPtr GetStdHandle(int kind);
+  [DllImport("kernel32.dll", SetLastError=true)] static extern bool GetFileInformationByHandle(IntPtr handle, out BY_HANDLE_FILE_INFORMATION info);
+  [DllImport("kernel32.dll", SetLastError=true)] static extern bool GetFileInformationByHandleEx(IntPtr handle, int infoClass, out FILE_ATTRIBUTE_TAG_INFO info, uint size);
+  [DllImport("kernel32.dll", SetLastError=true)] static extern bool ReadFile(IntPtr hFile, byte[] buffer, uint toRead, out uint read, IntPtr overlapped);
+  [DllImport("ntdll.dll")] static extern int NtCreateFile(out SafeFileHandle fileHandle, uint desiredAccess, ref OBJECT_ATTRIBUTES objectAttributes, out IO_STATUS_BLOCK ioStatusBlock, IntPtr allocationSize, uint fileAttributes, uint shareAccess, uint createDisposition, uint createOptions, IntPtr eaBuffer, uint eaLength);
+
+  private static bool ValidSegment(string segment) {
+    if (String.IsNullOrEmpty(segment) || segment.Length > 255) return false;
+    if (segment == "." || segment == "..") return false;
+    return segment.IndexOf('/') < 0 && segment.IndexOf((char)92) < 0 && segment.IndexOf((char)0) < 0 && segment.IndexOf(':') < 0;
+  }
+
+  private static SafeFileHandle OpenRelative(IntPtr root, string name, bool directory, bool readData) {
+    if (!ValidSegment(name)) return null;
+    IntPtr nameBuffer = IntPtr.Zero;
+    IntPtr unicodePointer = IntPtr.Zero;
+    try {
+      nameBuffer = Marshal.StringToHGlobalUni(name);
+      var unicode = new UNICODE_STRING {
+        Length = checked((ushort)(name.Length * 2)),
+        MaximumLength = checked((ushort)((name.Length + 1) * 2)),
+        Buffer = nameBuffer
+      };
+      unicodePointer = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(UNICODE_STRING)));
+      Marshal.StructureToPtr(unicode, unicodePointer, false);
+      var attributes = new OBJECT_ATTRIBUTES {
+        Length = Marshal.SizeOf(typeof(OBJECT_ATTRIBUTES)),
+        RootDirectory = root,
+        ObjectName = unicodePointer,
+        Attributes = 0,
+        SecurityDescriptor = IntPtr.Zero,
+        SecurityQualityOfService = IntPtr.Zero
+      };
+      IO_STATUS_BLOCK statusBlock;
+      SafeFileHandle opened;
+      uint access = (readData ? FILE_READ_DATA : 0) | FILE_READ_ATTRIBUTES | SYNCHRONIZE;
+      uint options = FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_REPARSE_POINT |
+        (directory ? FILE_DIRECTORY_FILE : FILE_NON_DIRECTORY_FILE);
+      int status = NtCreateFile(out opened, access, ref attributes, out statusBlock, IntPtr.Zero, 0,
+        directory ? FILE_SHARE_READ_WRITE : FILE_SHARE_ALL, FILE_OPEN, options, IntPtr.Zero, 0);
+      if (status < 0 || opened == null || opened.IsInvalid) {
+        if (opened != null) opened.Dispose();
+        return null;
+      }
+      FILE_ATTRIBUTE_TAG_INFO tag;
+      if (!GetFileInformationByHandleEx(opened.DangerousGetHandle(), 9, out tag, (uint)Marshal.SizeOf(typeof(FILE_ATTRIBUTE_TAG_INFO))) ||
+          (tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+        opened.Dispose();
+        return null;
+      }
+      return opened;
+    } catch {
+      return null;
+    } finally {
+      if (unicodePointer != IntPtr.Zero) Marshal.FreeHGlobal(unicodePointer);
+      if (nameBuffer != IntPtr.Zero) Marshal.FreeHGlobal(nameBuffer);
+    }
+  }
+
+  private static string ReadUtf8(IntPtr handle) {
+    var chunks = new List<byte>();
+    byte[] buffer = new byte[4096];
+    uint read;
+    while (ReadFile(handle, buffer, (uint)buffer.Length, out read, IntPtr.Zero) && read > 0) {
+      for (int i = 0; i < read; i++) chunks.Add(buffer[i]);
+      if (chunks.Count > 1048576) return null;
+    }
+    return Encoding.UTF8.GetString(chunks.ToArray());
+  }
+
+  public static int Run(string ghostId) {
+    if (!ValidSegment(ghostId)) return 2;
+    IntPtr parent = GetStdHandle(-10);
+    if (parent == IntPtr.Zero || parent == new IntPtr(-1)) return 2;
+    BY_HANDLE_FILE_INFORMATION parentInfo;
+    if (!GetFileInformationByHandle(parent, out parentInfo) ||
+        (parentInfo.FileIndexHigh == 0 && parentInfo.FileIndexLow == 0)) return 2;
+    var opened = new List<SafeFileHandle>();
+    try {
+      SafeFileHandle ghost = OpenRelative(parent, ghostId, true, false);
+      if (ghost == null) { Console.Out.Write("MISSING"); return 0; }
+      opened.Add(ghost);
+      SafeFileHandle metaDir = OpenRelative(ghost.DangerousGetHandle(), ".cindy-library", true, false);
+      if (metaDir == null) { Console.Out.Write("MISSING"); return 0; }
+      opened.Add(metaDir);
+      SafeFileHandle tmp = OpenRelative(metaDir.DangerousGetHandle(), "tmp", true, false);
+      if (tmp == null) { Console.Out.Write("MISSING"); return 0; }
+      opened.Add(tmp);
+      SafeFileHandle backups = OpenRelative(metaDir.DangerousGetHandle(), "backups", true, false);
+      if (backups == null) { Console.Out.Write("MISSING"); return 0; }
+      opened.Add(backups);
+      SafeFileHandle meta = OpenRelative(metaDir.DangerousGetHandle(), "meta.json", false, true);
+      if (meta == null) { Console.Out.Write("MISSING"); return 0; }
+      opened.Add(meta);
+      string metaRaw = ReadUtf8(meta.DangerousGetHandle());
+      if (metaRaw == null) return 1;
+      string usageRaw = "";
+      SafeFileHandle usage = OpenRelative(metaDir.DangerousGetHandle(), "usage.json", false, true);
+      if (usage != null) {
+        opened.Add(usage);
+        usageRaw = ReadUtf8(usage.DangerousGetHandle()) ?? "";
+      }
+      Console.Out.Write("OK\n" + metaRaw + "\n" + usageRaw);
+      return 0;
+    } finally {
+      for (int i = opened.Count - 1; i >= 0; i--) opened[i].Dispose();
+    }
+  }
+}
+'@
+try {
+  $ghost = $env:CINDY_LIBRARY_GHOST_ID
+  $code = [CindyLibraryExistingOpen]::Run([string]$ghost)
+  exit $code
+} catch {
+  exit 1
+}
+`;
+
+const WINDOWS_EXISTING_OPEN_COMMAND = Buffer.from(WINDOWS_EXISTING_OPEN_SCRIPT, 'utf16le').toString('base64');
+
+function runWindowsOpenExisting(parentFd: number, ghostId: string): Promise<CustomExistingResult> {
+  return new Promise((resolve) => {
+    const powershell = windowsPowerShellPath();
+    if (!powershell) {
+      resolve({ ok: false, code: 'UNSUPPORTED' });
+      return;
+    }
+    let child: ReturnType<typeof spawn>;
+    try {
+      child = spawn(powershell, ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', WINDOWS_EXISTING_OPEN_COMMAND], {
+        stdio: [parentFd, 'pipe', 'pipe'],
+        windowsHide: true,
+        env: { ...process.env, CINDY_LIBRARY_GHOST_ID: ghostId },
+      });
+    } catch {
+      resolve({ ok: false, code: 'UNSUPPORTED' });
+      return;
+    }
+    let settled = false;
+    const finish = (value: CustomExistingResult): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(value);
+    };
+    const chunks: Buffer[] = [];
+    child.stdout?.on('data', (chunk: Buffer | string) => {
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    });
+    child.once('error', () => finish({ ok: false, code: 'UNSUPPORTED' }));
+    child.once('close', (code) => {
+      const text = Buffer.concat(chunks).toString('utf8');
+      if (code === 2) {
+        finish({ ok: false, code: 'UNSUPPORTED' });
+        return;
+      }
+      if (code !== 0) {
+        finish({ ok: false, code: text === 'MISSING' ? 'MISSING' : 'IO' });
+        return;
+      }
+      finish(parseExistingStdout(text));
+    });
+    const timer = setTimeout(() => {
+      child.kill();
+      finish({ ok: false, code: 'IO' });
+    }, HELPER_TIMEOUT_MS);
+    timer.unref?.();
+  });
 }
