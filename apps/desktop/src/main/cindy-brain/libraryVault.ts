@@ -148,6 +148,8 @@ export interface LibraryVaultDeps {
     realPathAtGrant: string;
     identity: { dev: number; ino: number } | null;
   };
+  /** false = binding already created this ghost tree; MISSING must not init an empty replacement. */
+  allowCustomInit?: boolean;
   log?: {
     info: (msg: string, meta?: Record<string, unknown>) => void;
     warn: (msg: string, meta?: Record<string, unknown>) => void;
@@ -543,9 +545,9 @@ export class LibraryVault {
               this.meta = existing.meta;
               if (existing.usage) customUsage = existing.usage;
             } else if (existing.code === 'MISSING') {
-              // Same vault already had a live custom tree: ghost dir vanished.
-              // Do not mkdir a new empty library over that loss.
-              if (this.meta) {
+              // Same vault already had a live custom tree, or binding says this
+              // ghost dir was created before: do not mkdir an empty replacement.
+              if (this.meta || this.deps.allowCustomInit === false) {
                 return this.customRootUnavailable('disk-missing');
               }
               const tree = await (this.deps.initCustomTree ?? initCustomLibraryTree)({

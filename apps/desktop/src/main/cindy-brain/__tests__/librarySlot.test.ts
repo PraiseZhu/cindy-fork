@@ -442,6 +442,28 @@ describe('GhostLibrarySlot', () => {
     expect(fs.existsSync(path.join(candidate, GHOST_ID, 'keep.txt'))).toBe(false);
   });
 
+  it('custom 已 ready 后只丢 ghost 子目录: dispose 后再 open 不得重建空库', async () => {
+    const bound = await bindingStore.setBinding(GHOST_ID, candidate);
+    expect(bound.ok).toBe(true);
+    const open = await slot.handleLibraryRequest(GHOST_ID, { op: 'open' });
+    if (!open.ok || open.op !== 'open') throw new Error(JSON.stringify(open));
+    expect(open.state).toBe('ready');
+    expect((await bindingStore.getBinding(GHOST_ID))?.libraryReady).toBe(true);
+    const keep = await slot.handleLibraryRequest(GHOST_ID, { op: 'write', path: 'keep.txt', content: 'keep-me' });
+    expect(keep.ok).toBe(true);
+    const customRoot = path.join(candidate, GHOST_ID);
+    await fs.promises.rename(customRoot, `${customRoot}.parked`);
+    await slot.disposeAll();
+    const after = await slot.handleLibraryRequest(GHOST_ID, { op: 'open' });
+    if (!after.ok || after.op !== 'open') throw new Error(JSON.stringify(after));
+    expect(after.state).toBe('unavailable');
+    expect(after.reason).toBe('disk-missing');
+    expect(fs.existsSync(path.join(customRoot, '.cindy-library', 'meta.json'))).toBe(false);
+    expect(fs.existsSync(path.join(`${customRoot}.parked`, 'keep.txt'))).toBe(true);
+    const blocked = await slot.handleLibraryRequest(GHOST_ID, { op: 'write', path: 'empty.txt', content: 'nope' });
+    expect(blocked).toMatchObject({ ok: false, errorCode: 'LIBRARY_UNAVAILABLE' });
+  });
+
   it('delayed resolveLibraryRoot: stale custom after parent rename is disk-missing without recreating empty library', async () => {
     const bound = await bindingStore.setBinding(GHOST_ID, candidate);
     expect(bound.ok).toBe(true);

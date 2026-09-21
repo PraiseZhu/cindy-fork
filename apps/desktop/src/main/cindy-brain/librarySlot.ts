@@ -440,10 +440,15 @@ export class GhostLibrarySlot {
           && (opened.reason === 'disk-missing' || opened.reason === 'binding-moved')
         ) {
           await this.latchCustomUnavailable(session, ghostId, opened.reason);
-        } else if (session.vault.getMeta()?.orphaned) {
-          // 重装自愈:能走到这里 = 插件已装入且启用,清掉卸载时留的 orphaned
-          // 标记(best-effort,失败不影响使用)。
-          await session.vault.clearOrphaned().catch(() => {});
+        } else {
+          if (opened.ok && opened.state === 'ready' && resolution.kind === 'custom' && resolution.root !== null) {
+            await this.deps.bindingStore.markLibraryReady(ghostId).catch(() => {});
+          }
+          if (session.vault.getMeta()?.orphaned) {
+            // 重装自愈:能走到这里 = 插件已装入且启用,清掉卸载时留的 orphaned
+            // 标记(best-effort,失败不影响使用)。
+            await session.vault.clearOrphaned().catch(() => {});
+          }
         }
       } else if (this.extraDirGrant?.ghostId === ghostId) {
         await this.syncAgentReadonlyExtraDir(ghostId, null);
@@ -554,6 +559,9 @@ export class GhostLibrarySlot {
       locationKind: resolution.kind,
       customParentGrant: resolution.kind === 'custom' && resolution.root !== null
         ? { realPathAtGrant: resolution.record.realPathAtGrant, identity: resolution.record.identity }
+        : undefined,
+      allowCustomInit: resolution.kind === 'custom' && resolution.root !== null
+        ? resolution.record.libraryReady === false
         : undefined,
       log: this.deps.log,
     });

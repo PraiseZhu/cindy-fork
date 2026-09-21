@@ -124,6 +124,20 @@ describe('LibraryVault', () => {
       expect(stat.isDirectory()).toBe(true);
     });
 
+    it('custom 已建过(allowCustomInit=false)且新 vault: ghost 子目录 MISSING 不得空库重建', async () => {
+      const parent = path.join(tmpRoot, 'picked-no-init');
+      const custom = path.join(parent, 'mivo-canvas');
+      await fs.promises.mkdir(parent, { recursive: true });
+      const vault = makeVault({
+        rootDir: () => custom,
+        locationKind: 'custom',
+        allowCustomInit: false,
+      });
+      const missing = await vault.open();
+      expect(missing).toMatchObject({ ok: true, state: 'unavailable', reason: 'disk-missing' });
+      expect(fs.existsSync(path.join(custom, '.cindy-library', 'meta.json'))).toBe(false);
+    });
+
     it('custom 已 open 后 ghost 子目录消失: 再 open 报 disk-missing 且不重建空库', async () => {
       const parent = path.join(tmpRoot, 'picked-ghost-gone');
       const custom = path.join(parent, 'mivo-canvas');
