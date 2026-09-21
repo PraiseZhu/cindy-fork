@@ -1914,4 +1914,119 @@ describe('GhostLibrarySlot', () => {
       spy.mockRestore();
     }
   });
+
+  it('staging.release 首次 hash 后正本被删: ACK_MISMATCH 且保留 staging 原件', async () => {
+    const body = 'pixel-bytes';
+    const sha = createHash('sha256').update(body).digest('hex');
+    const rel = `assets/${sha.slice(0, 2)}/${sha}/blob.png`;
+    const begin = await slot.handleLibraryRequest(GHOST_ID, {
+      op: 'staging.begin', taskId: 'task-hash-delete', sourceRevision: 'rev-1',
+      totalBytes: Buffer.byteLength(body), sha256: sha, mime: 'image/png', recovery: { n: 1 },
+    });
+    if (!begin.ok || begin.op !== 'staging.begin') throw new Error(JSON.stringify(begin));
+    await slot.handleLibraryRequest(GHOST_ID, {
+      op: 'staging.chunk', stagingId: begin.stagingId, seq: 1,
+      content: Buffer.from(body).toString('base64'), encoding: 'base64',
+    });
+    await slot.handleLibraryRequest(GHOST_ID, { op: 'staging.commit', stagingId: begin.stagingId });
+    const archived = await slot.handleLibraryRequest(GHOST_ID, {
+      op: 'write', path: rel, content: Buffer.from(body).toString('base64'), encoding: 'base64',
+    });
+    if (!archived.ok || archived.op !== 'write') throw new Error(JSON.stringify(archived));
+    const orig = LibraryVault.prototype.hashFile;
+    let seen = 0;
+    const spy = vi.spyOn(LibraryVault.prototype, 'hashFile').mockImplementation(async function (this: LibraryVault, relPath: string) {
+      const hashed = await orig.call(this, relPath);
+      seen += 1;
+      if (seen === 1 && relPath === rel) {
+        await fs.promises.rm(path.join(defaultRootBase, GHOST_ID, rel), { force: true });
+      }
+      return hashed;
+    });
+    try {
+      const released = await slot.handleLibraryRequest(GHOST_ID, {
+        op: 'staging.release',
+        stagingId: begin.stagingId,
+        path: rel,
+        sha256: sha,
+        bytes: Buffer.byteLength(body),
+        libraryIdentity: archived.libraryIdentity,
+        libraryGeneration: archived.libraryGeneration,
+      });
+      expect(released).toMatchObject({ ok: false, errorCode: 'ACK_MISMATCH' });
+    } finally {
+      spy.mockRestore();
+    }
+    const still = await slot.handleLibraryRequest(GHOST_ID, { op: 'staging.list' });
+    if (!still.ok || still.op !== 'staging.list') throw new Error(JSON.stringify(still));
+    expect(still.items.map((item) => item.stagingId)).toContain(begin.stagingId);
+    expect(fs.existsSync(path.join(tmp, 'library-staging', GHOST_ID, 'tasks', begin.stagingId, 'blob.bin'))).toBe(true);
+  });
+
+  it('staging.release 窗口内并发 delete 被 LIBRARY_READONLY 挡住', async () => {
+    const body = 'pixel-bytes';
+    const sha = createHash('sha256').update(body).digest('hex');
+    const rel = `assets/${sha.slice(0, 2)}/${sha}/blob.png`;
+    const begin = await slot.handleLibraryRequest(GHOST_ID, {
+      op: 'staging.begin', taskId: 'task-release-mutex', sourceRevision: 'rev-1',
+      totalBytes: Buffer.byteLength(body), sha256: sha, mime: 'image/png', recovery: { n: 1 },
+    });
+    if (!begin.ok || begin.op !== 'staging.begin') throw new Error(JSON.stringify(begin));
+    await slot.handleLibraryRequest(GHOST_ID, {
+      op: 'staging.chunk', stagingId: begin.stagingId, seq: 1,
+      content: Buffer.from(body).toString('base64'), encoding: 'base64',
+    });
+    await slot.handleLibraryRequest(GHOST_ID, { op: 'staging.commit', stagingId: begin.stagingId });
+    const archived = await slot.handleLibraryRequest(GHOST_ID, {
+      op: 'write', path: rel, content: Buffer.from(body).toString('base64'), encoding: 'base64',
+    });
+    if (!archived.ok || archived.op !== 'write') throw new Error(JSON.stringify(archived));
+    let resume!: () => void;
+    const held = new Promise<void>((resolve) => { resume = resolve; });
+    let entered!: () => void;
+    const started = new Promise<void>((resolve) => { entered = resolve; });
+    const orig = LibraryVault.prototype.hashFile;
+    const spy = vi.spyOn(LibraryVault.prototype, 'hashFile').mockImplementation(async function (this: LibraryVault, relPath: string) {
+      if (relPath === rel) {
+        entered();
+        await held;
+      }
+      return orig.call(this, relPath);
+    });
+    try {
+      const releaseP = slot.handleLibraryRequest(GHOST_ID, {
+        op: 'staging.release',
+        stagingId: begin.stagingId,
+        path: rel,
+        sha256: sha,
+        bytes: Buffer.byteLength(body),
+        libraryIdentity: archived.libraryIdentity,
+        libraryGeneration: archived.libraryGeneration,
+      });
+      await started;
+      const deleted = await slot.handleLibraryRequest(GHOST_ID, { op: 'delete', path: rel });
+      expect(deleted).toMatchObject({ ok: false, errorCode: 'LIBRARY_READONLY' });
+      resume();
+      const released = await releaseP;
+      expect(released).toEqual({
+        ok: true, op: 'staging.release', stagingId: begin.stagingId, released: true,
+      });
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('disposeAll 释放 stagingStores', async () => {
+    const body = 'pixel-bytes';
+    const sha = createHash('sha256').update(body).digest('hex');
+    const begin = await slot.handleLibraryRequest(GHOST_ID, {
+      op: 'staging.begin', taskId: 'task-dispose-stores', sourceRevision: 'rev-1',
+      totalBytes: Buffer.byteLength(body), sha256: sha, mime: 'image/png', recovery: { n: 1 },
+    });
+    if (!begin.ok || begin.op !== 'staging.begin') throw new Error(JSON.stringify(begin));
+    const stores = (slot as unknown as { stagingStores: Map<string, unknown> }).stagingStores;
+    expect(stores.size).toBeGreaterThan(0);
+    await slot.disposeAll();
+    expect(stores.size).toBe(0);
+  });
 });

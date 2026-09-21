@@ -308,11 +308,11 @@ export class GhostLibrarySlot {
     }
   }
 
-  private confirmReleaseLibrary(
+  private async confirmReleaseLibrary(
     ghostId: string,
     session: GhostLibrarySession,
     ack: Extract<LibraryStagingAck, { ok: true }>,
-  ): LibraryStagingFailure | null {
+  ): Promise<LibraryStagingFailure | null> {
     const live = this.sessions.get(ghostId);
     if (
       this.deps.captureOwnerScope() !== session.ownerScopeKey
@@ -322,6 +322,10 @@ export class GhostLibrarySlot {
       || live.generation !== ack.libraryGeneration
     ) {
       return { ok: false, errorCode: 'ACK_MISMATCH', message: 'Library epoch 已变化,原件已保留' };
+    }
+    const hashed = await session.vault.hashFile(ack.path);
+    if (!hashed.ok || hashed.sha256 !== ack.sha256 || hashed.bytes !== ack.bytes) {
+      return { ok: false, errorCode: 'ACK_MISMATCH', message: 'Library 正本已变化,原件已保留' };
     }
     return null;
   }
@@ -375,15 +379,21 @@ export class GhostLibrarySlot {
       return this.dispatchStaging(ghostId, op, req);
     }
     // 迁移期只读:写类操作在 copying 全程拒绝(读与状态查询照常)。
+    const writeOps: ReadonlySet<string> = new Set([
+      'write', 'writeBegin', 'writeChunk', 'writeCommit', 'writeAbort',
+      'mkdir', 'delete', 'rename',
+      'db.open', 'db.exec', 'db.batch', 'db.migrate', 'db.backup',
+    ]);
     if (this.relocating.has(ghostId)) {
-      const writeOps: ReadonlySet<string> = new Set([
-        'write', 'writeBegin', 'writeChunk', 'writeCommit', 'writeAbort',
-        'mkdir', 'delete', 'rename',
-        'db.open', 'db.exec', 'db.batch', 'db.migrate', 'db.backup',
-      ]);
       if (writeOps.has(op)) {
         return fail('LIBRARY_READONLY', 'Library 正在迁移到新位置,写入已暂停;请稍后重试');
       }
+    }
+    // staging.release 核验窗口:并发删/改/写会把已 hash 的正本换掉,
+    // 不能在此窗口放行 mutating ops。
+    const releasing = this.stagingReleaseInflight.get(ghostId);
+    if (releasing && releasing.count > 0 && writeOps.has(op)) {
+      return fail('LIBRARY_READONLY', 'Library 正本正在核验归档,写入已暂停;请稍后重试');
     }
 
     // 会话获取/作废:owner scope 变了(切换在途或已切),旧会话的根与连接
@@ -881,15 +891,32 @@ export class GhostLibrarySlot {
   async disposeGhost(ghostId: string): Promise<void> {
     await this.waitForStagingReleases(ghostId);
     await this.teardownSession(ghostId);
+    await this.disposeStagingStores(ghostId);
   }
 
   async disposeAll(): Promise<void> {
     const ids = new Set([...this.sessions.keys(), ...this.stagingReleaseInflight.keys()]);
+    for (const key of this.stagingStores.keys()) {
+      const ghostId = key.split('\0')[1];
+      if (ghostId) ids.add(ghostId);
+    }
     for (const id of ids) this.setRelocating(id, true);
     try {
       for (const id of ids) await this.disposeGhost(id);
+      await this.disposeStagingStores();
     } finally {
       for (const id of ids) this.setRelocating(id, false);
+    }
+  }
+
+  private async disposeStagingStores(ghostId?: string): Promise<void> {
+    const entries = [...this.stagingStores.entries()].filter(([key]) => {
+      if (!ghostId) return true;
+      return key.split('\0')[1] === ghostId;
+    });
+    for (const [key, store] of entries) {
+      this.stagingStores.delete(key);
+      await store.dispose().catch(() => {});
     }
   }
 

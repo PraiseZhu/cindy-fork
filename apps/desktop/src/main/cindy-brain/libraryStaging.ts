@@ -1079,12 +1079,23 @@ export class LibraryStagingStore {
     });
   }
 
+  async dispose(): Promise<void> {
+    await this.runSerialized(async () => {
+      for (const upload of [...this.uploads.values()]) {
+        await this.vault.writeAbort({ streamId: upload.streamId }).catch(() => {});
+      }
+      this.uploads.clear();
+      this.byTask.clear();
+      await this.vault.invalidate().catch(() => {});
+    });
+  }
+
   async release(req: {
     ghostId: string;
     stagingId: unknown;
     ack: LibraryStagingAck;
-    /** Sync recheck of the current Library session/epoch/migrating gate. */
-    confirmLibrary?: () => LibraryStagingFailure | null;
+    /** Recheck Library session/epoch and re-hash the unique original before irreversible staging delete. */
+    confirmLibrary?: () => LibraryStagingFailure | null | Promise<LibraryStagingFailure | null>;
   }): Promise<LibraryStagingResult<{ stagingId: string; released: boolean }>> {
     return this.runSerialized(async () => {
       const ready = await this.requireReady();
@@ -1093,10 +1104,10 @@ export class LibraryStagingStore {
       const stagingId = parseStagingId(req.stagingId);
       if (typeof stagingId !== 'string') return stagingId;
       if (req.ack.ok !== true) return req.ack;
-      const confirm = (): LibraryStagingFailure | null => {
+      const confirm = async (): Promise<LibraryStagingFailure | null> => {
         const owner = this.requireOwner();
         if (owner) return owner;
-        return req.confirmLibrary?.() ?? null;
+        return (await req.confirmLibrary?.()) ?? null;
       };
       const rollbackTombstone = async (): Promise<LibraryStagingFailure | null> => {
         const deleted = await this.vault.delete({ path: tombstonePath(stagingId) });
@@ -1105,10 +1116,10 @@ export class LibraryStagingStore {
       };
       const record = this.durables.get(stagingId);
       if (!record) {
-        const blocked = confirm();
+        const blocked = await confirm();
         if (blocked) return blocked;
         const tomb = await this.readTombstone(stagingId);
-        const blockedAfter = confirm();
+        const blockedAfter = await confirm();
         if (blockedAfter) return blockedAfter;
         if (!tomb.ok) {
           return tomb.errorCode === 'NOT_FOUND'
@@ -1122,14 +1133,14 @@ export class LibraryStagingStore {
       if (req.ack.sha256 !== record.sha256 || req.ack.bytes !== record.bytes) {
         return fail('ACK_MISMATCH', 'Library ACK 与 staging 原件不一致,原件已保留');
       }
-      const blocked = confirm();
+      const blocked = await confirm();
       if (blocked) return blocked;
       const stone = await this.vault.write({
         path: tombstonePath(stagingId),
         content: JSON.stringify({ version: 1, stagingId, released: true }),
         ifNotExists: true,
       });
-      const blockedAfterWrite = confirm();
+      const blockedAfterWrite = await confirm();
       if (blockedAfterWrite) {
         return await rollbackTombstone() ?? blockedAfterWrite;
       }
@@ -1138,7 +1149,7 @@ export class LibraryStagingStore {
       if (markerSync) {
         return await rollbackTombstone() ?? markerSync;
       }
-      const blockedAfterSync = confirm();
+      const blockedAfterSync = await confirm();
       if (blockedAfterSync) {
         return await rollbackTombstone() ?? blockedAfterSync;
       }

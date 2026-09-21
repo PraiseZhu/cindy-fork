@@ -543,6 +543,11 @@ export class LibraryVault {
               this.meta = existing.meta;
               if (existing.usage) customUsage = existing.usage;
             } else if (existing.code === 'MISSING') {
+              // Same vault already had a live custom tree: ghost dir vanished.
+              // Do not mkdir a new empty library over that loss.
+              if (this.meta) {
+                return this.customRootUnavailable('disk-missing');
+              }
               const tree = await (this.deps.initCustomTree ?? initCustomLibraryTree)({
                 parentFd: parentHandle.fd,
                 ghostId: dirSeg,

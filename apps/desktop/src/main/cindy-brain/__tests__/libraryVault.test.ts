@@ -124,6 +124,21 @@ describe('LibraryVault', () => {
       expect(stat.isDirectory()).toBe(true);
     });
 
+    it('custom 已 open 后 ghost 子目录消失: 再 open 报 disk-missing 且不重建空库', async () => {
+      const parent = path.join(tmpRoot, 'picked-ghost-gone');
+      const custom = path.join(parent, 'mivo-canvas');
+      await fs.promises.mkdir(custom, { recursive: true });
+      await fs.promises.writeFile(path.join(custom, 'keep.txt'), 'keep-me');
+      const vault = makeVault({ rootDir: () => custom, locationKind: 'custom' });
+      expect(await vault.open()).toMatchObject({ ok: true, state: 'ready' });
+      await fs.promises.rename(custom, `${custom}.parked`);
+      const missing = await vault.open();
+      expect(missing).toMatchObject({ ok: true, state: 'unavailable', reason: 'disk-missing' });
+      expect(fs.existsSync(custom)).toBe(false);
+      expect(fs.existsSync(path.join(parent, 'mivo-canvas', '.cindy-library', 'meta.json'))).toBe(false);
+      expect(fs.existsSync(path.join(`${custom}.parked`, 'keep.txt'))).toBe(true);
+    });
+
     it('custom 用户父目录消失: open 报 disk-missing 且不重建空库; keep 仍在 rename 走的目录', async () => {
       const parent = path.join(tmpRoot, 'picked');
       const custom = path.join(parent, 'mivo-canvas');
