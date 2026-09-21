@@ -515,7 +515,7 @@ export const PROVABLE_STAGING_NAME =
 /**
  * Age + empty streams Map cannot prove uuid.tmp/.stream are garbage:
  * atomicWrite/stream may have fsynced a complete unique payload before rename.
- * List is diagnostic. Unlink only via unlinkProvableExtraLinksOnLinux when nlink>=2.
+ * Diagnostic list only. No unlink. P2_tmp UNRESOLVED.
  */
 export function listProvableStagingOnLinux(
   parentFd: number,
@@ -539,70 +539,6 @@ export function listProvableStagingOnLinux(
     const tmpFd = openDirAt(metaDirFd, 'tmp');
     const names = fs.readdirSync(`/proc/self/fd/${tmpFd}`).filter((name) => PROVABLE_STAGING_NAME.test(name));
     return { ok: true, names };
-  } catch (err) {
-    const code = (err as NodeJS.ErrnoException).code;
-    if (code === 'ENOENT' || code === 'ENOTDIR') return { ok: false, code: 'MISSING' };
-    return { ok: false, code: 'IO' };
-  } finally {
-    for (const fd of opened.reverse()) {
-      try {
-        fs.closeSync(fd);
-      } catch {
-        /* always close */
-      }
-    }
-  }
-}
-
-/**
- * Unlink uuid.tmp/.stream that are extra hard links (nlink>=2, ino!=0).
- * Those cannot be the unique original. nlink=1 (fsync-before-rename) is kept.
- * Linux held-parent fd only. No path fallback.
- */
-export function unlinkProvableExtraLinksOnLinux(
-  parentFd: number,
-  ghostId: string,
-  skipNames: ReadonlySet<string> = new Set(),
-): { ok: true; unlinked: number } | { ok: false; code: 'UNSUPPORTED' | 'IO' | 'MISSING' } {
-  if (process.platform !== 'linux') return { ok: false, code: 'UNSUPPORTED' };
-  if (!validSegment(ghostId) || !Number.isInteger(parentFd) || parentFd < 0) {
-    return { ok: false, code: 'IO' };
-  }
-  const opened: number[] = [];
-  try {
-    const openDirAt = (dirFd: number, name: string): number => {
-      let flags = fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW;
-      if (fs.constants.O_DIRECTORY) flags |= fs.constants.O_DIRECTORY;
-      const fd = fs.openSync(`/proc/self/fd/${dirFd}/${name}`, flags);
-      opened.push(fd);
-      return fd;
-    };
-    const rootFd = openDirAt(parentFd, ghostId);
-    const metaDirFd = openDirAt(rootFd, '.cindy-library');
-    const tmpFd = openDirAt(metaDirFd, 'tmp');
-    const names = fs.readdirSync(`/proc/self/fd/${tmpFd}`).filter((name) => PROVABLE_STAGING_NAME.test(name));
-    let unlinked = 0;
-    for (const name of names) {
-      if (skipNames.has(name)) continue;
-      let fileFd = -1;
-      try {
-        fileFd = fs.openSync(
-          `/proc/self/fd/${tmpFd}/${name}`,
-          fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW,
-        );
-        const st = fs.fstatSync(fileFd);
-        if (!st.isFile() || st.ino === 0 || st.nlink < 2) continue;
-        fs.unlinkSync(`/proc/self/fd/${tmpFd}/${name}`);
-        unlinked += 1;
-      } catch {
-        /* skip unprovable / raced names */
-      } finally {
-        if (fileFd >= 0) {
-          try { fs.closeSync(fileFd); } catch { /* always close */ }
-        }
-      }
-    }
-    return { ok: true, unlinked };
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code;
     if (code === 'ENOENT' || code === 'ENOTDIR') return { ok: false, code: 'MISSING' };
