@@ -30,6 +30,8 @@ import { isSafeGhostRelativePath } from '../../shared/ghost.js';
 import {
   initCustomLibraryTree,
   openExistingCustomLibrary,
+  unlinkProvableExtraLinksOnLinux,
+  PROVABLE_STAGING_NAME,
   type CustomTreeInitResult,
 } from './libraryDirFd.js';
 
@@ -495,6 +497,7 @@ export class LibraryVault {
             }
             const afterTree = await this.assertHeldCustomParent(heldId);
             if (afterTree) return afterTree;
+            unlinkProvableExtraLinksOnLinux(parentHandle.fd, dirSeg, this.liveStagingNames());
           } finally {
             if (parentHandle) {
               try {
@@ -785,21 +788,29 @@ export class LibraryVault {
     });
   }
 
-  /** 清理超龄 staging 残渣(崩溃遗留;龄 > tmpMaxAgeMs)。 */
+  private liveStagingNames(): Set<string> {
+    const names = new Set<string>();
+    for (const stream of this.streams.values()) names.add(path.basename(stream.tmpAbs));
+    return names;
+  }
+
+  /** Recycle extra hard links of uuid.tmp/.stream. nlink=1 may be the unique original — keep. */
   private async sweepStaleTmp(): Promise<void> {
-    const cutoff = this.now() - this.limits.tmpMaxAgeMs;
     let entries: fs.Dirent[];
     try {
       entries = await fs.promises.readdir(this.tmpDir, { withFileTypes: true });
     } catch {
       return;
     }
+    const live = this.liveStagingNames();
     for (const entry of entries) {
-      if (!entry.isFile()) continue; // 非普通条目不动(对齐受管根纪律)
+      if (!PROVABLE_STAGING_NAME.test(entry.name) || live.has(entry.name)) continue;
       const full = path.join(this.tmpDir, entry.name);
       try {
-        const st = await fs.promises.stat(full);
-        if (st.mtimeMs < cutoff) await fs.promises.unlink(full);
+        const st = await fs.promises.lstat(full);
+        if (st.isSymbolicLink() || !st.isFile()) continue;
+        if (st.ino === 0 || st.nlink < 2) continue;
+        await fs.promises.unlink(full);
       } catch {
         /* 竞态,跳过 */
       }

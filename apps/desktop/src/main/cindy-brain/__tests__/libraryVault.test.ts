@@ -387,6 +387,71 @@ describe('LibraryVault', () => {
       expect(PROVABLE_STAGING_NAME.test('meta.json')).toBe(false);
     });
 
+    it('default: nlink>=2 uuid.tmp 在 open 时回收且正本不变; nlink=1 超龄仍保留', async () => {
+      const vault = makeVault();
+      expect(await vault.open()).toMatchObject({ ok: true, state: 'ready' });
+      const written = await vault.write({
+        path: 'keep.bin',
+        content: Buffer.from('unique-original').toString('base64'),
+        encoding: 'base64',
+      });
+      expect(written.ok).toBe(true);
+      const target = path.join(libraryRoot, 'keep.bin');
+      const extra = path.join(libraryRoot, '.cindy-library', 'tmp', 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee.tmp');
+      const unique = path.join(libraryRoot, '.cindy-library', 'tmp', '11111111-2222-4333-8444-555555555555.tmp');
+      await fs.promises.link(target, extra);
+      await fs.promises.writeFile(unique, 'crash-unique');
+      await fs.promises.utimes(unique, new Date(0), new Date(0));
+      const extraStat = await fs.promises.lstat(extra);
+      const again = makeVault();
+      expect(await again.open()).toMatchObject({ ok: true, state: 'ready' });
+      expect(fs.existsSync(unique)).toBe(true);
+      expect(await fs.promises.readFile(target, 'utf8')).toBe('unique-original');
+      expect(await fs.promises.readFile(unique, 'utf8')).toBe('crash-unique');
+      if (extraStat.ino === 0 || extraStat.nlink < 2) {
+        expect(fs.existsSync(extra)).toBe(true);
+      } else {
+        expect(fs.existsSync(extra)).toBe(false);
+      }
+    });
+
+    it('custom: Darwin/Windows 不 path 扫 nlink>=2 tmp; Linux held-fd 才回收', async () => {
+      const parent = path.join(tmpRoot, 'picked-nlink');
+      const custom = path.join(parent, 'mivo-canvas');
+      await fs.promises.mkdir(custom, { recursive: true });
+      const parentStat = await fs.promises.lstat(parent);
+      const grant = {
+        realPathAtGrant: await fs.promises.realpath(parent),
+        identity: { dev: parentStat.dev, ino: parentStat.ino },
+      };
+      const first = makeVault({
+        rootDir: () => custom, locationKind: 'custom', customParentGrant: grant, ghostId: 'mivo-canvas',
+      });
+      expect(await first.open()).toMatchObject({ ok: true, state: 'ready' });
+      const keep = await first.write({
+        path: 'keep.bin',
+        content: Buffer.from('custom-original').toString('base64'),
+        encoding: 'base64',
+      });
+      expect(keep.ok).toBe(true);
+      const target = path.join(custom, 'keep.bin');
+      const extra = path.join(custom, '.cindy-library', 'tmp', 'aaaaaaaa-bbbb-4ccc-8ddd-ffffffffffff.tmp');
+      const unique = path.join(custom, '.cindy-library', 'tmp', '11111111-2222-4333-8444-666666666666.tmp');
+      await fs.promises.link(target, extra);
+      await fs.promises.writeFile(unique, 'custom-crash-unique');
+      const again = makeVault({
+        rootDir: () => custom, locationKind: 'custom', customParentGrant: grant, ghostId: 'mivo-canvas',
+      });
+      expect(await again.open()).toMatchObject({ ok: true, state: 'ready' });
+      expect(await fs.promises.readFile(target, 'utf8')).toBe('custom-original');
+      expect(fs.existsSync(unique)).toBe(true);
+      if (process.platform === 'linux') {
+        expect(fs.existsSync(extra)).toBe(false);
+      } else {
+        expect(fs.existsSync(extra)).toBe(true);
+      }
+    });
+
     it('Windows 新建 custom 走稳定 parent handle 首建 ready', async () => {
       if (process.platform !== 'win32') return;
       const parent = path.join(tmpRoot, 'picked-win-new');
