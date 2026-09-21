@@ -263,6 +263,8 @@ export class GhostLibrarySlot {
   private readonly stagingStores = new Map<string, LibraryStagingStore>();
   /** In-flight staging.release per ghost. disposeGhost drains these so bind/relocate cannot cut the Library mid-transaction. */
   private readonly stagingReleaseInflight = new Map<string, { count: number; drain: Promise<void> | null; resolveDrain: (() => void) | null }>();
+  /** Mutating Library ops and staging.release share one chain per ghost so hash-then-delete cannot race a concurrent write/delete/rename. */
+  private readonly ghostExclusive = new Map<string, Promise<unknown>>();
 
   constructor(private readonly deps: GhostLibrarySlotDeps) {}
 
@@ -306,6 +308,13 @@ export class GhostLibrarySlot {
       if (!state || state.count === 0 || !state.drain) return;
       await state.drain;
     }
+  }
+
+  private runGhostExclusive<T>(ghostId: string, fn: () => Promise<T>): Promise<T> {
+    const prev = this.ghostExclusive.get(ghostId) ?? Promise.resolve();
+    const next = prev.then(fn, fn);
+    this.ghostExclusive.set(ghostId, next.then(() => undefined, () => undefined));
+    return next;
   }
 
   private async confirmReleaseLibrary(
@@ -376,6 +385,12 @@ export class GhostLibrarySlot {
       };
     }
     if (isGhostLibraryStagingOp(op)) {
+      if (op === 'staging.release') {
+        if (this.relocating.has(ghostId)) {
+          return fail('ACK_MISMATCH', 'Library 正在迁移到新位置,原件已保留');
+        }
+        return this.runGhostExclusive(ghostId, () => this.dispatchStaging(ghostId, op, req));
+      }
       return this.dispatchStaging(ghostId, op, req);
     }
     // 迁移期只读:写类操作在 copying 全程拒绝(读与状态查询照常)。
@@ -389,18 +404,14 @@ export class GhostLibrarySlot {
         return fail('LIBRARY_READONLY', 'Library 正在迁移到新位置,写入已暂停;请稍后重试');
       }
     }
-    // staging.release 核验窗口:并发删/改/写会把已 hash 的正本换掉,
-    // 不能在此窗口放行 mutating ops。
-    const releasing = this.stagingReleaseInflight.get(ghostId);
-    if (releasing && releasing.count > 0 && writeOps.has(op)) {
-      return fail('LIBRARY_READONLY', 'Library 正本正在核验归档,写入已暂停;请稍后重试');
-    }
 
-    // 会话获取/作废:owner scope 变了(切换在途或已切),旧会话的根与连接
-    // 一并作废——绝不把上个 owner 的库当成本 owner 的库继续用。
-    const scopeKey = this.deps.captureOwnerScope();
-    const session = await this.getOrCreateSession(ghostId, scopeKey);
-    return this.runOp(ghostId, session, op, req);
+    const runSessionOp = async (): Promise<GhostPipeLibraryResult> => {
+      const scopeKey = this.deps.captureOwnerScope();
+      const session = await this.getOrCreateSession(ghostId, scopeKey);
+      return this.runOp(ghostId, session, op, req);
+    };
+    if (writeOps.has(op)) return this.runGhostExclusive(ghostId, runSessionOp);
+    return runSessionOp();
   }
 
   private async getOrCreateSession(ghostId: string, scopeKey: string | null): Promise<GhostLibrarySession> {

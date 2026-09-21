@@ -1985,7 +1985,7 @@ describe('GhostLibrarySlot', () => {
     expect(fs.existsSync(path.join(tmp, 'library-staging', GHOST_ID, 'tasks', begin.stagingId, 'blob.bin'))).toBe(true);
   });
 
-  it('staging.release 窗口内并发 delete 被 LIBRARY_READONLY 挡住', async () => {
+  it('staging.release 与并发 delete 互斥:核验结束前正本仍在,release 成功后再删', async () => {
     const body = 'pixel-bytes';
     const sha = createHash('sha256').update(body).digest('hex');
     const rel = `assets/${sha.slice(0, 2)}/${sha}/blob.png`;
@@ -2003,13 +2003,16 @@ describe('GhostLibrarySlot', () => {
       op: 'write', path: rel, content: Buffer.from(body).toString('base64'), encoding: 'base64',
     });
     if (!archived.ok || archived.op !== 'write') throw new Error(JSON.stringify(archived));
+    const canonical = path.join(defaultRootBase, GHOST_ID, rel);
     let resume!: () => void;
     const held = new Promise<void>((resolve) => { resume = resolve; });
     let entered!: () => void;
     const started = new Promise<void>((resolve) => { entered = resolve; });
     const orig = LibraryVault.prototype.hashFile;
+    let heldOnce = false;
     const spy = vi.spyOn(LibraryVault.prototype, 'hashFile').mockImplementation(async function (this: LibraryVault, relPath: string) {
-      if (relPath === rel) {
+      if (relPath === rel && !heldOnce) {
+        heldOnce = true;
         entered();
         await held;
       }
@@ -2026,13 +2029,18 @@ describe('GhostLibrarySlot', () => {
         libraryGeneration: archived.libraryGeneration,
       });
       await started;
-      const deleted = await slot.handleLibraryRequest(GHOST_ID, { op: 'delete', path: rel });
-      expect(deleted).toMatchObject({ ok: false, errorCode: 'LIBRARY_READONLY' });
+      const deleteP = slot.handleLibraryRequest(GHOST_ID, { op: 'delete', path: rel });
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      expect(fs.existsSync(canonical)).toBe(true);
       resume();
       const released = await releaseP;
       expect(released).toEqual({
         ok: true, op: 'staging.release', stagingId: begin.stagingId, released: true,
       });
+      const deleted = await deleteP;
+      expect(deleted).toMatchObject({ ok: true, op: 'delete' });
+      expect(fs.existsSync(canonical)).toBe(false);
+      expect(fs.existsSync(path.join(tmp, 'library-staging', GHOST_ID, 'tasks', begin.stagingId, 'blob.bin'))).toBe(false);
     } finally {
       spy.mockRestore();
     }
