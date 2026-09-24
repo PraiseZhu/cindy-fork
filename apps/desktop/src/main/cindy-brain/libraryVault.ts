@@ -149,8 +149,7 @@ export interface LibraryVaultDeps {
     identity: { dev: number; ino: number } | null;
   };
   /** false = binding already created this ghost tree; MISSING must not init an empty replacement. */
-  allowCustomInit?: boolean;
-  log?: {
+  allowCustomInit?: boolean;  log?: {
     info: (msg: string, meta?: Record<string, unknown>) => void;
     warn: (msg: string, meta?: Record<string, unknown>) => void;
   };
@@ -438,7 +437,6 @@ export class LibraryVault {
     if (process.platform !== 'win32' && !anyUnsynced) this.createdAncestorDirs = [];
     return { ok: true as const, fsynced: !anyUnsynced };
   }
-
   /** Custom roots must not recreate a vanished or replaced user-selected parent. keep files stay in the renamed-away directory. */
   private customRootUnavailable(
     reason: 'disk-missing' | 'binding-moved' = 'disk-missing',
@@ -549,8 +547,7 @@ export class LibraryVault {
               // ghost dir was created before: do not mkdir an empty replacement.
               if (this.meta || this.deps.allowCustomInit === false) {
                 return this.customRootUnavailable('disk-missing');
-              }
-              const tree = await (this.deps.initCustomTree ?? initCustomLibraryTree)({
+              }              const tree = await (this.deps.initCustomTree ?? initCustomLibraryTree)({
                 parentFd: parentHandle.fd,
                 ghostId: dirSeg,
                 metaJson,

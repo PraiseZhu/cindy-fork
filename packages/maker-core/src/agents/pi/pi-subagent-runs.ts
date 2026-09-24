@@ -262,6 +262,51 @@ export type PiSubagentControlAction = 'stop' | 'steer' | 'follow_up' | 'approval
 export const PI_SUBAGENT_LAUNCH_FENCE_FILENAME = '.launch-fence.json';
 const PI_SUBAGENT_LAUNCH_FENCE_PREFIX = '.launch-fence-';
 const PI_SUBAGENT_LAUNCH_FENCE_SUFFIX = '.json';
+/**
+ * The staging name `writeAtomicJson` publishes through: `<file>.tmp-<pid>-<uuid>`,
+ * where `<pid>` is the writer. A host killed between that write and the rename
+ * leaves the staging file behind in the runs root, next to the session dirs.
+ */
+const ATOMIC_STAGING_NAME_RE = /^(.+)\.tmp-(\d{1,10})-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** A file in the runs root that belongs to the launch fence, not to a session. */
+export type PiSubagentLaunchFenceArtifact =
+  | { readonly kind: 'published' }
+  | { readonly kind: 'staging'; readonly writerPid: number };
+
+/**
+ * Exactly the names `piSubagentLaunchFencePath` produces (a numeric pid between
+ * the prefix and the suffix) plus the legacy shared name. Anything looser —
+ * `.launch-fence-backup.json`, `.launch-fence-.json` — is not something the
+ * fence writer ever emits, so it must neither be swept as a fence nor skipped by
+ * the reference scan as one.
+ */
+const PUBLISHED_LAUNCH_FENCE_NAME_RE = new RegExp(
+  `^${PI_SUBAGENT_LAUNCH_FENCE_PREFIX.replace(/[.]/g, '\\.')}\\d{1,10}${PI_SUBAGENT_LAUNCH_FENCE_SUFFIX.replace(/[.]/g, '\\.')}$`,
+);
+
+function isPublishedLaunchFenceName(entry: string): boolean {
+  return entry === PI_SUBAGENT_LAUNCH_FENCE_FILENAME || PUBLISHED_LAUNCH_FENCE_NAME_RE.test(entry);
+}
+
+/**
+ * The one naming contract for what the fence machinery leaves in the runs root.
+ *
+ * Two readers walk that directory and must agree on it: the stale sweep, which
+ * decides what it may delete, and the Host's worktree-reference scan, which has
+ * to know which names are *not* parent-session directories. They drifted once —
+ * the sweep only knew the published names, the scan knew none — and a staging
+ * file a crash left behind (`.launch-fence-<pid>.json.tmp-<pid>-<uuid>`) was
+ * then neither swept nor skipped, so every worktree recycle on that machine
+ * read as "still referenced" for good. Returns null for anything else, which
+ * the callers treat as a session directory (or as something suspicious).
+ */
+export function piSubagentLaunchFenceArtifact(entry: string): PiSubagentLaunchFenceArtifact | null {
+  if (isPublishedLaunchFenceName(entry)) return { kind: 'published' };
+  const staging = ATOMIC_STAGING_NAME_RE.exec(entry);
+  if (!staging || !isPublishedLaunchFenceName(staging[1]!)) return null;
+  return { kind: 'staging', writerPid: Number(staging[2]) };
+}
 
 interface PiSubagentLaunchFence {
   version: 1;
@@ -664,14 +709,13 @@ export async function clearStalePiSubagentLaunchFence(agentHome: string): Promis
   } catch {
     return;
   }
-  const fences = entries.filter((entry) => (
-    entry === PI_SUBAGENT_LAUNCH_FENCE_FILENAME
-    || (entry.startsWith(PI_SUBAGENT_LAUNCH_FENCE_PREFIX)
-      && entry.endsWith(PI_SUBAGENT_LAUNCH_FENCE_SUFFIX))
-  ));
+  const fences = entries.flatMap((entry) => {
+    const artifact = piSubagentLaunchFenceArtifact(entry);
+    return artifact ? [{ entry, artifact }] : [];
+  });
   // One chain per path, so the scan still runs the files concurrently: two
   // different fences never share a chain and cannot block each other.
-  await Promise.all(fences.map(async (entry) => {
+  await Promise.all(fences.map(async ({ entry, artifact }) => {
     const file = path.join(runsRoot, entry);
     await queueLaunchFenceDiskWork(file, async () => {
       let content: string;
@@ -685,10 +729,31 @@ export async function clearStalePiSubagentLaunchFence(agentHome: string): Promis
         // The next sweep tries again.
         return;
       }
-      let fence: PiSubagentLaunchFence | null;
+      let fence: PiSubagentLaunchFence | null = null;
+      let malformed = false;
       try {
         fence = parseLaunchFence(JSON.parse(content));
       } catch {
+        malformed = true;
+      }
+      if (artifact.kind === 'staging') {
+        // Only ever meaningful to the host that is about to rename it into place.
+        // Between its write and that rename the file can legitimately be
+        // incomplete, so an unparseable payload proves nothing on its own — the
+        // writer named in the file name has to be gone before it counts as
+        // debris. Once it is, the sweep is the only thing that will ever remove
+        // it: no release path knows the name, and the Host's reference scan
+        // treats it as an unrelated plain file rather than a session.
+        //
+        // A recycled writer pid keeps a half-written file alive for that
+        // process's lifetime; the next sweep after it exits gets it. A payload
+        // that does parse is judged like a published fence, so a recycled pid
+        // with a different start time is not mistaken for the writer.
+        if (fence ? launchFenceOwnerAlive(fence) : isProcessAlive(artifact.writerPid) !== false) return;
+        await removeLaunchFenceFile(file);
+        return;
+      }
+      if (malformed) {
         // Readable and malformed. No atomic writer publishes that, so it names no
         // owner — and it is the one case that must still be removed: the launch
         // check now treats an unparseable file as a fence, so leaving it would
@@ -700,17 +765,28 @@ export async function clearStalePiSubagentLaunchFence(agentHome: string): Promis
       // unless the live process at that pid started at a different time than the
       // fence records, which means the pid was recycled and this file is a
       // previous life's leftover. An unreadable start time stays conservative.
-      if (fence && isProcessAlive(fence.hostPid) !== false) {
-        if (fence.hostStartTimeSec === undefined) return;
-        const startTimeSec = fence.hostPid === process.pid
-          ? ownProcessStartTimeSec()
-          : probeProcessStartTimeSec(fence.hostPid, Date.now());
-        if (startTimeSec === null) return;
-        if (Math.abs(startTimeSec - fence.hostStartTimeSec) <= OWNER_START_TIME_TOLERANCE_SEC) return;
-      }
+      if (fence && launchFenceOwnerAlive(fence)) return;
       await removeLaunchFenceFile(file);
     });
   }));
+}
+
+/**
+ * Is the incarnation that raised `fence` still running?
+ *
+ * Conservative in one direction only: a pid that is alive but whose start time
+ * cannot be read, or a fence written before start times were recorded, counts
+ * as held. A live pid with a *different* start time is a recycled pid, and the
+ * fence is a previous life's leftover.
+ */
+function launchFenceOwnerAlive(fence: PiSubagentLaunchFence): boolean {
+  if (isProcessAlive(fence.hostPid) === false) return false;
+  if (fence.hostStartTimeSec === undefined) return true;
+  const startTimeSec = fence.hostPid === process.pid
+    ? ownProcessStartTimeSec()
+    : probeProcessStartTimeSec(fence.hostPid, Date.now());
+  if (startTimeSec === null) return true;
+  return Math.abs(startTimeSec - fence.hostStartTimeSec) <= OWNER_START_TIME_TOLERANCE_SEC;
 }
 
 interface TranscriptCursor {

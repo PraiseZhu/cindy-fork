@@ -463,7 +463,6 @@ describe('GhostLibrarySlot', () => {
     const blocked = await slot.handleLibraryRequest(GHOST_ID, { op: 'write', path: 'empty.txt', content: 'nope' });
     expect(blocked).toMatchObject({ ok: false, errorCode: 'LIBRARY_UNAVAILABLE' });
   });
-
   it('delayed resolveLibraryRoot: stale custom after parent rename is disk-missing without recreating empty library', async () => {
     const bound = await bindingStore.setBinding(GHOST_ID, candidate);
     expect(bound.ok).toBe(true);

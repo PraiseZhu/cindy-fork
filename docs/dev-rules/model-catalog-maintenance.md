@@ -17,7 +17,10 @@ Mobile / device-link 使用执行端目录；本地安装状态来自执行机�
 
 ### 配置包含什么
 
-Server 正本是 `model-access-server/catalog/providers.json`。客户端离线文件分别是
+Server 正本现为 `model-access-server/catalog/source/` 分片，由
+`model-access-server/scripts/generateCatalog.mjs` 组装成 `catalog/generated/providers.json`。
+本地域编辑 `source/registry/local-models.json`，revision 编辑 `source/catalog.json`；
+不要直接编辑生成文件。客户端离线文件分别是
 [`catalog/providers.json`](../../packages/model-providers/catalog/providers.json)（providers / presets）和
 [`catalog/model-registry.json`](../../packages/model-providers/catalog/model-registry.json)（Registry）。
 逻辑结构如下；具体字段及修改位置见下表：
@@ -41,7 +44,7 @@ Catalog (version)
 | 接入条目状态、排序、默认开启标记 | Registry `models[]` 顶层 | 显示开关不等于成员资格；见下文默认可见性 |
 | 某供应商的上游 ID、支持路由、普通默认 | `models[].routes[]` / `routes[].defaults` | 普通默认不能压过实报 |
 | Claude Code / Codex 的工作默认 | `models[].perAgent`，引擎必须被该条目 route 声明 | 不把工作预算当供应商承诺容量 |
-| Pi 公共成员和 Pi 默认资料 | `providers[].models.pi`；公共资料仍按 Registry 合并 | 不从其他引擎名单复制出 Pi 路由 |
+| Pi 公共成员和 Pi 默认资料 | `providers[].models.pi`；订阅账号发现另补新型号，公共资料仍按 Registry 合并 | 复用已实现的订阅传输，不复制其他引擎的专属能力 |
 | 经核实的错误实报 | 匹配 route 的 `forceOverrides` + `overrideReason` | 不影响其他供应商，也不压过用户配置 |
 | 厂商官方参考价及历史价区间 | `baseModels[].referencePriceGroups[].prices[]`（Registry V5） | 按市场分组，保留币种、标准/Fast、输入区间及生效日期 |
 | 接入供应商参考报价 | `routes[].referencePrices[]`；`referencePriceGroup` 指向公共型号的官方价组 | Gateway 实价/折扣仍归其计费控制面，不混填缺失字段 |
@@ -65,7 +68,8 @@ Pi 走 `providers[].models.pi`（用户补丁 perAgent.pi 另属合法 schema）
 ```
 
 缺字段继承，false 明确关闭，数组整体替换，null 按字段合同处理，不使用真假判断吞掉空值。
-用户公共型号补丁先于用户具体连接/引擎补丁；默认思考档只适配实际支持能力。
+用户公共型号补丁先于用户具体连接/引擎补丁。思考档位默认在公共型号维护，按需增加引擎例外；
+`defaultEffort` 的已配置默认优先于供应商实报的推荐档，再适配实际支持能力，force / 用户覆盖仍优先。
 详细字段及成员空值规则以 [模型资料优先级](../product-rules/model-metadata-precedence.md) 为唯一正本。
 
 <a id="visibility"></a>
@@ -86,7 +90,7 @@ localModels 整域缺失才用随包本地域，显式空不兜底。
 2. **修改责任侧**：在授权范围内先维护 Server 正本，再协调客户端离线 Registry。遇到尚未上线的协议配套，分别记录工作分支、已合并和已部署状态，不混成“已支持”。
 3. **整表同步**：将审阅后的 Server `modelRegistry` 整体同步到客户端 `catalog/model-registry.json`，保持同 updatedAt、同内容。不要复制 Server 整份 providers.json，也不能只复制 localModels 造成悬空引用。新 revision 必须递增且不可变；价格 effectiveFrom / verifiedAt 保留其真实日期。
 4. **先验证兼容再发布**：完整结构过 parseModelRegistry / parseCatalog；确认旧客户端投影。尤其先读 [媒体扩展发布前置条件](../model-registry-v4-media.md#发布前置条件)：同为 V4 并不证明认识新增媒体字段。LKG/内置回退不能代替兼容方案。
-5. **核对真实下发**：检查可选 MODEL_CATALOG_URL 是否覆盖随包基线；部署后读取 `/api/model-catalog/catalog`，核对目标与旧版响应、ETag 和有效 revision。仅改文件、合并 PR、通过 CI 不算下发完成。
+5. **核对真实下发**：当前 Server 源码仅加载制品内生成目录，已不读取 MODEL_CATALOG_URL；须核对目标环境版本。部署后读取 `/api/model-catalog/catalog`，核对目标与旧版响应、ETag 和有效 revision。仅改文件、合并 PR、通过 CI 不算下发完成。
    同步回归须核对原有直连 route 与历史参考价区间未丢失；覆盖标准/Fast、缓存读写、长输入分档。
    离线默认档与已发布 Server 有差异时逐项披露。原生协议校验须遍历全部 route 和活动目录中的
    订阅 wire 别名，不能仅统计字段填写率；不能从供应商兼容 API 反推未知型号的原生协议。
@@ -102,6 +106,30 @@ Pi 上游生成资料统一转换为客户端 `catalog/provider-models.json`，�
 不另存 Pi 原始表。目录的 Pi API 是该渠道的执行协议，不冒充 Registry 的厂商原生协议。
 维护命令、覆盖顺序和验收见 [通用供应商目录](provider-catalog-generation.md)。
 渠道多协议与逐模型接口证据见 [供应商接口核查](provider-interface-audit.md)。
+
+## SSH Codex 模型目录
+
+SSH Codex 的创建入口（含 Orca Worker）、任务内选择器与 main 的新建／切换准入读取所选主机
+app-server 的完整 `model/list`，不使用控制端 OpenAI 登录或网关目录作为远端可用性的依据。
+沿用已有远端安装与 daemon 连接流程；分页有界，读取失败或空清单显示重试，不回退到本机。
+结果只用于该主机，断连、换主机或换账号后的迟到结果丢弃，不发布到本机公共目录。
+
+新任务从远端清单解析默认模型及推理强度／Fast；已有任务保留原模型和历史，由用户改选。
+设置页及普通 SSH 创建入口不继承控制端草稿的模型、推理强度或 Fast 记忆，即使型号同名；
+采用远端默认模型及推荐推理强度，Fast 初始关闭，创建后可在任务内手动改选。
+原样恢复只有在持久化的主机、原生线程、引擎、模型及来源均匹配时才豁免新建目录校验，
+允许恢复后来被隐藏的原模型；模型是否仍可推理由远端 Codex 决定。SSH 模型及档位选择不写入控制端本地模型偏好。
+首次连接成功会补偿挂载时因尚未就绪而失败的目录读取；重复 ready 快照不清空已成功读取的目录。
+升级远端 Codex 包前先停止旧 daemon；有正在执行的回合或无法确认停机时，升级失败并提示稍后重试。
+`model/list` 不提供的真实窗口保持未知；普通 SSH Codex 切换沿用 main 的窗口策略：
+未知窗口允许切换且不主动重建，已核实的高风险缩窗在远端拒绝，回合中延期。
+不能因前端尚无用量报告而静默丢弃点击。未知窗口不代表已证明切换安全，后续上下文处理仍由原生 Codex 决定。
+目录成员资格不等于认证、网络和实际推理已验证。
+
+实现：`maker-host/ssh-codex-models.ts`、`remote-ssh/codex-model-list.ts`、
+`useSshCodexProviders.ts`；回归：`codex-model-list.test.ts`、`sshCodexModels.test.tsx`、
+`chatInputModelLoading.test.tsx`。新增读取 IPC 属于本机 SSH 管理面，与既有 SSH 管理 channel
+一样不开放 device-link；手机及设备互联的供应商清单协议保持原样，完整远端能力发现仍由 #65 跟进。
 
 ## 按问题继续阅读
 
@@ -129,7 +157,9 @@ Pi 上游生成资料统一转换为客户端 `catalog/provider-models.json`，�
 优先于该组，整组替换，不逐字段补齐。订阅价值估算指定 `officialOnly`，仅取厂商参考价，
 用户显式价格覆盖仍优先，账号归属不变。XD 计费继续只读 Gateway 实报。
 
-新客户端请求 `registrySchemaVersion=5`。服务端向 V1–V4 展开官方参考价到原路由字段，
+新客户端请求 `registrySchemaVersion=5&registryMedia=1`。无媒体能力标识的请求保持服务端
+冻结兼容快照，不跟随完整正本更新；正本与客户端离线 Registry 仍保持完整一致。
+服务端向 V1–V4 展开官方参考价到原路由字段，
 剥离新增组与引用字段；V4 保留公共资料、本地域及原覆盖语义。各版本响应有独立 ETag。
 旧服务端仍可返回旧目录，新客户端保留旧格式读取；应先部署服务端再发布客户端。
 本次只迁移已有、已核实的价格，不补猜测价格，不改变 XD 的缺价处理。

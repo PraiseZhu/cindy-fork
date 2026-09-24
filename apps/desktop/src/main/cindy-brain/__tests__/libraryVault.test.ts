@@ -152,7 +152,6 @@ describe('LibraryVault', () => {
       expect(fs.existsSync(path.join(parent, 'mivo-canvas', '.cindy-library', 'meta.json'))).toBe(false);
       expect(fs.existsSync(path.join(`${custom}.parked`, 'keep.txt'))).toBe(true);
     });
-
     it('custom 用户父目录消失: open 报 disk-missing 且不重建空库; keep 仍在 rename 走的目录', async () => {
       const parent = path.join(tmpRoot, 'picked');
       const custom = path.join(parent, 'mivo-canvas');

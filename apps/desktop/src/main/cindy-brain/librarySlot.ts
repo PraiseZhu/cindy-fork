@@ -573,8 +573,7 @@ export class GhostLibrarySlot {
         : undefined,
       allowCustomInit: resolution.kind === 'custom' && resolution.root !== null
         ? resolution.record.libraryReady === false
-        : undefined,
-      log: this.deps.log,
+        : undefined,      log: this.deps.log,
     });
     const sql = this.deps.createSqlService({
       workerScriptPath: this.deps.workerScriptPath,

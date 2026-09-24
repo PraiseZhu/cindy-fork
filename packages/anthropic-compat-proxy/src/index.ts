@@ -45,6 +45,7 @@ export {
   createEncryptedContentRecoveryRule,
   createImageGenerationIdRecoveryRule,
   createResponsesItemIdPrefixRecoveryRule,
+  createResponsesItemIdLengthRecoveryRule,
   createToolExchangeAdjacencyRecoveryRule,
   compactOversizedImageHistory,
   createToolUseProviderSpecificFieldsRecoveryRule,
@@ -61,6 +62,8 @@ export {
   stripImageGenerationItemsWithoutIdFromBody,
   stripNonAnthropicFields,
   stripNonCanonicalResponsesItemIdsFromBody,
+  shortenOversizedResponsesItemIdsFromBody,
+  shortenResponsesItemId,
   stripToolUseProviderSpecificFields,
   stripToolUseProviderSpecificFieldsFromBody,
 } from './transform.js';
