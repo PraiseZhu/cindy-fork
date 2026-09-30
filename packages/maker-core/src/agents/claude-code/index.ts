@@ -24,6 +24,7 @@
 
 import { LIBRARY_READ_ROOT, withLibraryNativeReadContext } from '../shared/library-native-read.js';
 import { promises as fs } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -2869,6 +2870,8 @@ export class ClaudeCodeAgent extends BaseAgent {
     // ── 跨 turn 共享状态 ───────────────────────────────────────────────────
     let configuredResumeSessionId: string | undefined = opts.resumeSessionId;
     let sdkSessionId: string | undefined = configuredResumeSessionId;
+    let publishedSdkSessionId: string | undefined = configuredResumeSessionId;
+    let localQueryStarted = false;
     // 只在首次 resume 尚未被真实内容证明成功前允许自愈；成功一轮后即关闭分类窗口，
     // 避免后续普通 turn 中碰巧出现同文案时误清上下文。
     let resumeValidationPending = !!configuredResumeSessionId;
@@ -3966,6 +3969,10 @@ export class ClaudeCodeAgent extends BaseAgent {
         ? []
         : [...new Set(opts.botRuntimeProfile?.skillPolicy.ownSkillPluginRoots ?? [])];
       companionEnvironment?.assertCurrent?.();
+      // Bind the native request id before the first HTTP request, not after SDK init.
+      // A fork keeps its resume source but must publish a new destination id.
+      const newSdkSessionId = !resumeSdkSid || finalFork ? randomUUID() : undefined;
+      if (newSdkSessionId) sdkSessionId = newSdkSessionId;
       const query = sdkQuery({
         prompt: inputQueue as unknown as Parameters<typeof sdkQuery>[0]['prompt'],
         options: {
@@ -4023,6 +4030,7 @@ export class ClaudeCodeAgent extends BaseAgent {
             };
           })(),
           ...(resumeSdkSid ? { resume: resumeSdkSid } : {}),
+          ...(newSdkSessionId ? { sessionId: newSdkSessionId } : {}),
           enableFileCheckpointing,
           ...(finalResumeAt ? { resumeSessionAt: finalResumeAt } : {}),
           ...(finalFork ? { forkSession: true } : {}),
@@ -4119,6 +4127,11 @@ export class ClaudeCodeAgent extends BaseAgent {
           return applyFlagSettings(settings);
         };
       }
+      if (newSdkSessionId && localQueryStarted) {
+        publishedSdkSessionId = newSdkSessionId;
+        eventQueue.push({ type: 'session_id', data: newSdkSessionId, source: 'claude-code' });
+      }
+      localQueryStarted = true;
       return query;
     };
 
@@ -5198,8 +5211,9 @@ export class ClaudeCodeAgent extends BaseAgent {
               getLogTitle: () => lastSendTitle,
               tracker: usageTracker,
               onSessionId: (sid) => {
-                if (sid && sid !== sdkSessionId) {
+                if (sid && sid !== publishedSdkSessionId) {
                   sdkSessionId = sid;
+                  publishedSdkSessionId = sid;
                   eventQueue.push({ type: 'session_id', data: sid, source: 'claude-code' });
                 }
               },

@@ -147,6 +147,7 @@ async function startHarness(args: {
   resumeSessionId?: string;
   transcriptExists: boolean;
   onInvalidResumeSession: StartSessionOptions['onInvalidResumeSession'];
+  forkSession?: boolean;
 }) {
   const configDir = await makeTempDir();
   const workingDir = await makeTempDir();
@@ -185,6 +186,7 @@ async function startHarness(args: {
     permissionMode: 'acceptEdits',
     resumeSessionId: args.resumeSessionId,
     onInvalidResumeSession: args.onInvalidResumeSession,
+    vendorOptions: args.forkSession ? { forkSession: true } : undefined,
   });
   const events: AgentEvent[] = [];
   const collected = (async () => {
@@ -215,6 +217,44 @@ afterEach(async () => {
 });
 
 describe('Claude invalid-resume recovery', () => {
+  it('binds a new native session before SDK init so its first request can resolve the provider', async () => {
+    const h = await startHarness({ transcriptExists: false, onInvalidResumeSession: undefined });
+    const sessionId = h.queryOptions[0].sessionId;
+    expect(sessionId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+    expect(h.handle.id).toBe(sessionId);
+    expect(h.queryOptions[0]).not.toHaveProperty('resume');
+    h.streams[0].emit({ type: 'system', subtype: 'init', session_id: sessionId });
+    await vi.waitFor(() => expect(h.events).toContainEqual({
+      type: 'session_id', data: sessionId, source: 'claude-code',
+    }));
+    await h.handle.close();
+    h.streams[0].end();
+    await h.collected;
+    expect(h.events.filter((event) => event.type === 'session_id')).toHaveLength(1);
+  });
+
+  it('preserves ordinary resume and publishes the destination id before a fork starts', async () => {
+    for (const forkSession of [false, true]) {
+      const h = await startHarness({
+        resumeSessionId: 'sdk-source', transcriptExists: true,
+        onInvalidResumeSession: undefined, forkSession,
+      });
+      expect(h.queryOptions[0].resume).toBe('sdk-source');
+      if (forkSession) {
+        expect(h.queryOptions[0].forkSession).toBe(true);
+        expect(h.queryOptions[0].sessionId).toEqual(expect.any(String));
+        expect(h.handle.id).toBe(h.queryOptions[0].sessionId);
+        expect(h.handle.id).not.toBe('sdk-source');
+      } else {
+        expect(h.queryOptions[0]).not.toHaveProperty('sessionId');
+        expect(h.handle.id).toBe('sdk-source');
+      }
+      await h.handle.close();
+      h.streams[0].end();
+      await h.collected;
+    }
+  });
+
   it('preflight missing clears the old id and starts fresh before any turn is sent', async () => {
     const clear = vi.fn(async () => true);
     const h = await startHarness({
@@ -226,6 +266,8 @@ describe('Claude invalid-resume recovery', () => {
     expect(clear).toHaveBeenCalledWith('sdk-missing');
     expect(h.queryOptions).toHaveLength(1);
     expect(h.queryOptions[0]).not.toHaveProperty('resume');
+    expect(h.handle.id).toBe(h.queryOptions[0].sessionId);
+    expect(h.handle.id).not.toBe('sdk-missing');
     await h.handle.close();
     h.streams[0].end();
     await h.collected;
@@ -256,6 +298,8 @@ describe('Claude invalid-resume recovery', () => {
     // 失效 id 被清;重建的 query 不带 resume;没有 surface 任何终态错误。
     expect(clear).toHaveBeenCalledWith('sdk-orphan');
     expect(h.queryOptions[1]).not.toHaveProperty('resume');
+    expect(h.handle.id).toBe(h.queryOptions[1].sessionId);
+    expect(h.handle.id).not.toBe('sdk-orphan');
     expect(h.events.filter((event) => event.type === 'error')).toHaveLength(0);
     expect(h.events.some((event) => event.type === 'done')).toBe(false);
     // idle 重建:首个 query 在失败前没消费任何输入,新 query 也还没有输入在跑。

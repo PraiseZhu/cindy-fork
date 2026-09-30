@@ -2105,7 +2105,7 @@ describe('ClaudeCodeAgent runtime settings during rewind window', () => {
       type: 'user',
       content: [{ type: 'image', path: path.join(os.tmpdir(), 'slow-missing.png') }],
     });
-
+    await vi.waitFor(() => expect(sdkMock.query).toHaveBeenCalledTimes(2));
     const rebuildArgs = sdkMock.query.mock.calls[1]?.[0] as {
       prompt: AsyncIterable<{ message?: { content?: unknown } }> & { pending: number };
     };
@@ -2183,7 +2183,7 @@ describe('ClaudeCodeAgent runtime settings during rewind window', () => {
       type: 'user',
       content: [{ type: 'image', path: path.join(os.tmpdir(), 'compact-boundary-then-fail.png') }],
     });
-
+    await vi.waitFor(() => expect(sdkMock.query).toHaveBeenCalledTimes(2));
     const rebuildArgs = sdkMock.query.mock.calls[1]?.[0] as {
       prompt: AsyncIterable<{ message?: { content?: unknown } }> & { pending: number };
     };
@@ -2263,7 +2263,7 @@ describe('ClaudeCodeAgent runtime settings during rewind window', () => {
       { type: 'user', content: [{ type: 'image', path: path.join(os.tmpdir(), 'slow-stop.png') }] },
       { signal: controller.signal },
     );
-
+    await vi.waitFor(() => expect(sdkMock.query).toHaveBeenCalledTimes(2));
     const rebuildArgs = sdkMock.query.mock.calls[1]?.[0] as {
       prompt: AsyncIterable<{ message?: { content?: unknown } }> & { pending: number };
     };
