@@ -178,7 +178,9 @@ async function startHarness(args: {
     return queries[index];
   });
 
-  const agent = new ClaudeCodeAgent(createDeps());
+  const deps = createDeps();
+  const debug = vi.spyOn(deps.logger!, 'debug');
+  const agent = new ClaudeCodeAgent(deps);
   const handle = await agent.startSession({
     sessionId: 'local-session',
     model: 'claude-opus-4-6',
@@ -200,6 +202,7 @@ async function startHarness(args: {
     consumedInputs,
     events,
     collected,
+    debug,
   };
 }
 
@@ -253,6 +256,79 @@ describe('Claude invalid-resume recovery', () => {
       h.streams[0].end();
       await h.collected;
     }
+  });
+
+  it.each(['constructor', 'cancel-after-build', 'conversion', 'cancel-during-conversion', 'cancel-after-init'] as const)(
+    'retries the source after an unaccepted fork fails at %s', async (failure) => {
+      const clear = vi.fn(async () => true);
+      const h = await startHarness({ resumeSessionId: 'sdk-source', transcriptExists: true, onInvalidResumeSession: clear });
+      await h.handle.commitRewindFiles?.('user-anchor', 'assistant-anchor');
+      const controller = new AbortController();
+      if (failure === 'constructor') {
+        sdkMock.query.mockImplementationOnce(() => { throw new Error('fixture query construction failed'); });
+      } else if (failure === 'cancel-after-build') {
+        const createQuery = sdkMock.query.getMockImplementation()!;
+        sdkMock.query.mockImplementationOnce((...args) => {
+          const result = createQuery(...args);
+          controller.abort();
+          return result;
+        });
+      } else if (failure === 'conversion') {
+        imageResizerMock.process.mockRejectedValueOnce(new Error('fixture conversion failed'));
+      } else {
+        imageResizerMock.process.mockImplementationOnce(async p => {
+          if (failure === 'cancel-after-init') {
+            const destination = sdkMock.query.mock.calls.at(-1)?.[0]?.options?.sessionId;
+            h.streams[1].emit({ type: 'system', subtype: 'init', session_id: destination });
+            await vi.waitFor(() => expect(h.debug).toHaveBeenCalledWith(
+              'SDK ▶ turn start (system init)', expect.objectContaining({ sdkSessionId: destination }),
+            ));
+          }
+          controller.abort();
+          return p;
+        });
+      }
+      await expect(h.handle.send({
+        type: 'user', content: failure === 'conversion' || failure.startsWith('cancel-during') || failure === 'cancel-after-init'
+          ? [{ type: 'image', path: path.join(os.tmpdir(), 'fixture-fork-image.png') }]
+          : 'cancelled input',
+      }, { signal: controller.signal })).rejects.toThrow(/fixture|cancelled/);
+      expect(h.handle.id).toBe('sdk-source');
+      if (failure !== 'constructor') {
+        await vi.waitFor(() => expect(h.events.filter(e => e.type === 'session_id').at(-1)?.data).toBe('sdk-source'));
+      }
+      await h.handle.send({ type: 'user', content: 'retry with original context' });
+      const retry = sdkMock.query.mock.calls.at(-1)?.[0]?.options;
+      expect(retry).toMatchObject({ resume: 'sdk-source', resumeSessionAt: 'assistant-anchor', forkSession: true });
+      expect(retry.sessionId).not.toBe('sdk-source');
+      expect(clear).not.toHaveBeenCalled();
+      await h.handle.close();
+      for (const stream of h.streams) stream.end();
+      await h.collected;
+    },
+  );
+
+  it('keeps a directory grant retry as a full-source fork after cancellation', async () => {
+    const clear = vi.fn(async () => true);
+    const h = await startHarness({ resumeSessionId: 'sdk-source', transcriptExists: true, onInvalidResumeSession: clear });
+    await h.handle.setExtraDirs?.([await makeTempDir()]);
+    const controller = new AbortController();
+    const createQuery = sdkMock.query.getMockImplementation()!;
+    sdkMock.query.mockImplementationOnce((...args) => {
+      const result = createQuery(...args);
+      controller.abort();
+      return result;
+    });
+    await expect(h.handle.send({ type: 'user', content: 'cancelled grant' }, { signal: controller.signal })).rejects.toThrow('cancelled');
+    expect(h.handle.id).toBe('sdk-source');
+    await h.handle.send({ type: 'user', content: 'retry grant with context' });
+    const retry = sdkMock.query.mock.calls.at(-1)?.[0]?.options;
+    expect(retry).toMatchObject({ resume: 'sdk-source', forkSession: true });
+    expect(retry).not.toHaveProperty('resumeSessionAt');
+    expect(clear).not.toHaveBeenCalled();
+    await h.handle.close();
+    for (const stream of h.streams) stream.end();
+    await h.collected;
   });
 
   it('preflight missing clears the old id and starts fresh before any turn is sent', async () => {
