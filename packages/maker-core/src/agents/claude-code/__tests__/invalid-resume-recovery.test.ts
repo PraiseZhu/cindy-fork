@@ -236,7 +236,7 @@ describe('Claude invalid-resume recovery', () => {
     expect(h.events.filter((event) => event.type === 'session_id')).toHaveLength(1);
   });
 
-  it('preserves ordinary resume and publishes the destination id before a fork starts', async () => {
+  it('keeps the durable source while prebinding an initial fork request', async () => {
     for (const forkSession of [false, true]) {
       const h = await startHarness({
         resumeSessionId: 'sdk-source', transcriptExists: true,
@@ -246,8 +246,9 @@ describe('Claude invalid-resume recovery', () => {
       if (forkSession) {
         expect(h.queryOptions[0].forkSession).toBe(true);
         expect(h.queryOptions[0].sessionId).toEqual(expect.any(String));
-        expect(h.handle.id).toBe(h.queryOptions[0].sessionId);
-        expect(h.handle.id).not.toBe('sdk-source');
+        expect(h.handle.id).toBe('sdk-source');
+        expect(h.handle.requestSessionId).toBe(h.queryOptions[0].sessionId);
+        expect(h.handle.requestSessionId).not.toBe('sdk-source');
       } else {
         expect(h.queryOptions[0]).not.toHaveProperty('sessionId');
         expect(h.handle.id).toBe('sdk-source');
@@ -294,9 +295,7 @@ describe('Claude invalid-resume recovery', () => {
           : 'cancelled input',
       }, { signal: controller.signal })).rejects.toThrow(/fixture|cancelled/);
       expect(h.handle.id).toBe('sdk-source');
-      if (failure !== 'constructor') {
-        await vi.waitFor(() => expect(h.events.filter(e => e.type === 'session_id').at(-1)?.data).toBe('sdk-source'));
-      }
+      expect(h.events.filter(e => e.type === 'session_id' && e.data !== 'sdk-source')).toEqual([]);
       await h.handle.send({ type: 'user', content: 'retry with original context' });
       const retry = sdkMock.query.mock.calls.at(-1)?.[0]?.options;
       expect(retry).toMatchObject({ resume: 'sdk-source', resumeSessionAt: 'assistant-anchor', forkSession: true });
@@ -325,6 +324,72 @@ describe('Claude invalid-resume recovery', () => {
     const retry = sdkMock.query.mock.calls.at(-1)?.[0]?.options;
     expect(retry).toMatchObject({ resume: 'sdk-source', forkSession: true });
     expect(retry).not.toHaveProperty('resumeSessionAt');
+    expect(clear).not.toHaveBeenCalled();
+    await h.handle.close();
+    for (const stream of h.streams) stream.end();
+    await h.collected;
+  });
+
+  it.each([false, true])('does not publish an unaccepted fork before close (initial fork %s)', async (initialFork) => {
+    const h = await startHarness({
+      resumeSessionId: 'sdk-source', transcriptExists: true,
+      onInvalidResumeSession: undefined, forkSession: initialFork,
+    });
+    if (!initialFork) await h.handle.commitRewindFiles?.('user-anchor', 'assistant-anchor');
+    let releaseConversion!: (value: string) => void;
+    imageResizerMock.process.mockImplementationOnce(p => new Promise<string>(resolve => { releaseConversion = resolve; void p; }));
+    const sending = h.handle.send({ type: 'user', content: [{ type: 'image', path: path.join(os.tmpdir(), 'fixture-pending-fork.png') }] });
+    const rejected = expect(sending).rejects.toThrow(/closed|cancelled/);
+    await vi.waitFor(() => expect(releaseConversion).toEqual(expect.any(Function)));
+    const destination = h.handle.requestSessionId;
+    expect(destination).not.toBe('sdk-source');
+    const currentStream = h.streams[initialFork ? 0 : 1];
+    currentStream.emit({ type: 'system', subtype: 'init', session_id: destination });
+    await vi.waitFor(() => expect(h.debug).toHaveBeenCalledWith(
+      'SDK ▶ turn start (system init)', expect.objectContaining({ sdkSessionId: destination }),
+    ));
+    expect(h.handle.id).toBe('sdk-source');
+    expect(h.events.filter(e => e.type === 'session_id')).toEqual([]);
+    await h.handle.close();
+    releaseConversion(path.join(os.tmpdir(), 'fixture-pending-fork.png'));
+    await rejected;
+    for (const stream of h.streams) stream.end();
+    await h.collected;
+    expect(h.handle.id).toBe('sdk-source');
+    expect(h.events.filter(e => e.type === 'session_id')).toEqual([]);
+  });
+
+  it('commits an initial fork exactly once after accepting input, even if init arrived first', async () => {
+    const h = await startHarness({ resumeSessionId: 'sdk-source', transcriptExists: true, onInvalidResumeSession: undefined, forkSession: true });
+    const destination = h.handle.requestSessionId;
+    h.streams[0].emit({ type: 'system', subtype: 'init', session_id: destination });
+    await vi.waitFor(() => expect(h.debug).toHaveBeenCalledWith(
+      'SDK ▶ turn start (system init)', expect.objectContaining({ sdkSessionId: destination }),
+    ));
+    expect(h.handle.id).toBe('sdk-source');
+    expect(h.events.filter(e => e.type === 'session_id')).toEqual([]);
+    await h.handle.send({ type: 'user', content: 'accepted fork input' });
+    await vi.waitFor(() => expect(h.events.filter(e => e.type === 'session_id')).toEqual([
+      { type: 'session_id', data: destination, source: 'claude-code' },
+    ]));
+    expect(h.handle.id).toBe(destination);
+    h.streams[0].emit({ type: 'system', subtype: 'init', session_id: destination });
+    await h.handle.close();
+    for (const stream of h.streams) stream.end();
+    await h.collected;
+    expect(h.events.filter(e => e.type === 'session_id')).toHaveLength(1);
+  });
+
+  it('rebuilds an unaccepted initial fork from the durable source after a directory change', async () => {
+    const clear = vi.fn(async () => true);
+    const h = await startHarness({ resumeSessionId: 'sdk-source', transcriptExists: true, onInvalidResumeSession: clear, forkSession: true });
+    const initialDestination = h.handle.requestSessionId;
+    await h.handle.setExtraDirs?.([await makeTempDir()]);
+    await h.handle.send({ type: 'user', content: 'accept after changing directories' });
+    expect(h.queryOptions[1]).toMatchObject({ resume: 'sdk-source', forkSession: true });
+    expect(h.queryOptions[1]).not.toHaveProperty('resumeSessionAt');
+    expect(h.queryOptions[1].sessionId).not.toBe(initialDestination);
+    expect(h.handle.id).toBe(h.queryOptions[1].sessionId);
     expect(clear).not.toHaveBeenCalled();
     await h.handle.close();
     for (const stream of h.streams) stream.end();

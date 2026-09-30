@@ -50,6 +50,7 @@ describe.skipIf(!binary)('native Claude custom Grok session affinity', () => {
     const received: Array<{ model: string; sid: string; key: string | undefined }> = [];
     const routed: Array<{ sid: string; sessionId: string | null }> = [];
     const sessions: Session[] = [];
+    const agents: ClaudeCodeAgent[] = [];
     const events: AgentEvent[][] = [[], []];
     const upstream = createServer(async (req, res) => {
       const chunks: Buffer[] = [];
@@ -77,7 +78,7 @@ describe.skipIf(!binary)('native Claude custom Grok session affinity', () => {
       routingTransform: (body, ctx) => {
         if (ctx.url.startsWith('/v1/messages') && !ctx.url.includes('count_tokens')) {
           const sid = ctx.headers['x-claude-code-session-id'] ?? '';
-          routed.push({ sid, sessionId: sessions.find(s => s.sdkSessionId === sid)?.id ?? null });
+          routed.push({ sid, sessionId: sessions.find(s => s.requestSessionId === sid)?.id ?? null });
         }
         return transform(body, ctx);
       },
@@ -87,7 +88,7 @@ describe.skipIf(!binary)('native Claude custom Grok session affinity', () => {
         'claude-code': { baseUrl: upstreamUrl, wireProtocol: 'anthropic-messages', models: [{ id: 'grok-4.6', name: 'Grok' }] },
       } })]);
       setCustomProviderKeyReader(() => 'fixture-art-key');
-      setClaudeProxySessionIdResolver(sid => sessions.find(s => s.sdkSessionId === sid)?.id ?? null);
+      setClaudeProxySessionIdResolver(sid => sessions.find(s => s.requestSessionId === sid)?.id ?? null);
       for (let i = 0; i < 2; i++) {
         const workingDir = path.join(scratch, `work-${i}`);
         const configDir = path.join(scratch, `config-${i}`);
@@ -106,6 +107,7 @@ describe.skipIf(!binary)('native Claude custom Grok session affinity', () => {
           },
         });
         const id = `fixture-business-${i}`;
+        agents.push(agent);
         setSessionProvider(id, 'art-cindy');
         const handle = await agent.startSession({ sessionId: id, providerId: 'art-cindy', model: 'grok-4.6', workingDir, permissionMode: 'bypassPermissions' });
         expect(handle.id).not.toBe('<pending>');
@@ -123,6 +125,42 @@ describe.skipIf(!binary)('native Claude custom Grok session affinity', () => {
       expect([...new Set(received.map(r => r.sid))].sort()).toEqual(sessions.map(s => s.sdkSessionId).sort());
       expect(routed.every(r => r.sessionId !== null)).toBe(true);
       expect([...new Set(routed.map(r => r.sessionId))].sort()).toEqual(['fixture-business-0', 'fixture-business-1']);
+      expect(bridge.get).not.toHaveBeenCalled();
+
+      const sourceId = sessions[0].sdkSessionId;
+      const forkHandle = await agents[0].startSession({
+        sessionId: 'fixture-business-fork', providerId: 'art-cindy', model: 'grok-4.6',
+        workingDir: path.join(scratch, 'work-0'), permissionMode: 'bypassPermissions',
+        resumeSessionId: sourceId, vendorOptions: { forkSession: true },
+      });
+      const fork = new Session({ id: 'fixture-business-fork', agentKind: 'claude-code',
+        workDir: path.join(scratch, 'work-0'), handle: forkHandle,
+        capabilities: agents[0].capabilities, logger, turnStallMs: 0 });
+      sessions.push(fork);
+      const forkEvents: AgentEvent[] = [];
+      fork.onEvent(event => forkEvents.push(event));
+      setSessionProvider(fork.id, 'art-cindy');
+      expect(fork.sdkSessionId).toBe(sourceId);
+      expect(fork.requestSessionId).not.toBe(sourceId);
+      const requestId = fork.requestSessionId;
+      // Route a pre-acceptance bridge request without making that id durable.
+      const preAcceptance = await fetch(`${proxy.url}/v1/messages`, {
+        method: 'POST', headers: { 'content-type': 'application/json',
+          'x-api-key': 'xdt-provider-auth-placeholder-key', 'x-claude-code-session-id': requestId },
+        body: JSON.stringify({ model: 'grok-4.6', max_tokens: 1, stream: true,
+          messages: [{ role: 'user', content: 'pre-acceptance routing fixture' }] }),
+      });
+      await preAcceptance.text();
+      expect(preAcceptance.status).toBe(200);
+      expect(fork.sdkSessionId).toBe(sourceId);
+      expect(forkEvents.filter(e => e.type === 'session_id')).toEqual([]);
+      expect(routed.at(-1)?.sessionId).toBe(fork.id);
+      await fork.send({ type: 'user', content: 'Continue with one short line. Do not use tools.' });
+      await vi.waitFor(() => expect(forkEvents.some(e => e.type === 'done')).toBe(true), { timeout: 45_000 });
+      expect(forkEvents.filter(e => e.type === 'error')).toEqual([]);
+      expect(fork.sdkSessionId).toBe(requestId);
+      expect(forkEvents.filter(e => e.type === 'session_id')).toHaveLength(1);
+      expect(received.filter(r => r.sid === requestId).every(r => r.model === 'grok-4.6' && r.key === 'fixture-art-key')).toBe(true);
       expect(bridge.get).not.toHaveBeenCalled();
     } finally {
       await Promise.all(sessions.map(s => s.close()));

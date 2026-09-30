@@ -2870,8 +2870,10 @@ export class ClaudeCodeAgent extends BaseAgent {
     // ── 跨 turn 共享状态 ───────────────────────────────────────────────────
     let configuredResumeSessionId: string | undefined = opts.resumeSessionId;
     let sdkSessionId: string | undefined = configuredResumeSessionId;
+    let durableSdkSessionId: string | undefined = configuredResumeSessionId;
     let publishedSdkSessionId: string | undefined = configuredResumeSessionId;
     let localQueryStarted = false;
+    const unacceptedForks = new WeakSet<Query>();
     // 只在首次 resume 尚未被真实内容证明成功前允许自愈；成功一轮后即关闭分类窗口，
     // 避免后续普通 turn 中碰巧出现同文案时误清上下文。
     let resumeValidationPending = !!configuredResumeSessionId;
@@ -3319,9 +3321,8 @@ export class ClaudeCodeAgent extends BaseAgent {
         if (state !== 'enabled') return '';
         return registeredMcpServerNames.has('cindy_contacts') ? CONTACTS_RULES_ENABLED : '';
       })();
-      // resume 优先用当前的 sdkSessionId (rewind 重启时它指向上一轮 SDK 给的 id);
-      // 缺省回到 startSession 入参的 resumeSessionId (新会话首次起 query 时用)。
-      let resumeSdkSid = sdkSessionId ?? configuredResumeSessionId;
+      // A prebound request id is not a resume source until its input is accepted.
+      let resumeSdkSid = durableSdkSessionId ?? configuredResumeSessionId;
       let modelUsageCumulativeStartsAtZero = !resumeSdkSid;
 
       // ── 远端 cc 分支 (Phase 4.3) ──
@@ -4119,6 +4120,11 @@ export class ClaudeCodeAgent extends BaseAgent {
         if (sdkSessionId === newSdkSessionId) sdkSessionId = previousSdkSessionId;
         throw error;
       }
+      if (newSdkSessionId && finalFork && resumeSdkSid) {
+        unacceptedForks.add(query);
+      } else if (newSdkSessionId) {
+        durableSdkSessionId = newSdkSessionId;
+      }
       if (sdkStartPermissionMode === 'auto') nativeAutoQueries.add(query);
       if (modelUsageCumulativeStartsAtZero) modelUsageStartsAtZeroQueries.add(query);
       if (nativeCliAuth && typeof query.applyFlagSettings === 'function') {
@@ -4135,7 +4141,7 @@ export class ClaudeCodeAgent extends BaseAgent {
           return applyFlagSettings(settings);
         };
       }
-      if (newSdkSessionId && localQueryStarted) {
+      if (newSdkSessionId && localQueryStarted && !unacceptedForks.has(query)) {
         publishedSdkSessionId = newSdkSessionId;
         eventQueue.push({ type: 'session_id', data: newSdkSessionId, source: 'claude-code' });
       }
@@ -5219,8 +5225,13 @@ export class ClaudeCodeAgent extends BaseAgent {
               getLogTitle: () => lastSendTitle,
               tracker: usageTracker,
               onSessionId: (sid) => {
+                if (sid && unacceptedForks.has(currentQ)) {
+                  sdkSessionId = sid;
+                  return;
+                }
                 if (sid && sid !== publishedSdkSessionId) {
                   sdkSessionId = sid;
+                  durableSdkSessionId = sid;
                   publishedSdkSessionId = sid;
                   eventQueue.push({ type: 'session_id', data: sid, source: 'claude-code' });
                 }
@@ -5543,6 +5554,7 @@ export class ClaudeCodeAgent extends BaseAgent {
         freshSessionValidationPending = false;
         configuredResumeSessionId = undefined;
         sdkSessionId = undefined;
+        durableSdkSessionId = undefined;
         log.warn('invalid resume id cleared; switching to a fresh Claude conversation', {
           expectedResumeSessionId, source,
         });
@@ -5928,7 +5940,8 @@ export class ClaudeCodeAgent extends BaseAgent {
         if (decision.unavailable) autoReviewUnavailableNotice.notify();
         return decision;
       },
-      get id() { return sdkSessionId ?? '<pending>'; },
+      get id() { return durableSdkSessionId ?? '<pending>'; },
+      get requestSessionId() { return sdkSessionId ?? '<pending>'; },
       agentKind: 'claude-code',
       get model() { return mutableModel; },
 
@@ -5959,17 +5972,17 @@ export class ClaudeCodeAgent extends BaseAgent {
           activeQueryDirectoryGeneration !== autoReviewDirectoryGeneration
           && !pendingRewindTo
           && !activeBridgeRewindResumeAt
-          && sdkSessionId
+          && durableSdkSessionId
         ) {
-          pendingRewindTo = sdkSessionId;
+          pendingRewindTo = durableSdkSessionId;
           extraDirsRebuildAttempted = true;
         } else if (
           activeQueryExploreInheritCapGeneration !== exploreInheritCapEnvGeneration
           && !pendingRewindTo
           && !activeBridgeRewindResumeAt
-          && sdkSessionId
+          && durableSdkSessionId
         ) {
-          pendingRewindTo = sdkSessionId;
+          pendingRewindTo = durableSdkSessionId;
         } else if (
           extraDirsCopyFallbackEnabled
           && extraDirsRebuildAttempted
@@ -6129,10 +6142,10 @@ export class ClaudeCodeAgent extends BaseAgent {
           if (!resumeAt) {
             throw new Error('Claude rewind rebuild missing resume target');
           }
-          const directoryGrantRebuild = pendingRewindTo === sdkSessionId;
+          const directoryGrantRebuild = pendingRewindTo === durableSdkSessionId;
           log.debug('send ▶ pendingRewindTo detected — rebuilding sdkQuery with 三件套', {
             resumeSessionAt: directoryGrantRebuild ? undefined : resumeAt,
-            resumeSdkSid: sdkSessionId,
+            resumeSdkSid: durableSdkSessionId,
             directoryGrantRebuild,
           });
           // 关键: 重建 abortController + inputQueue。老的两个在 q.close() 时已经污染
@@ -6172,7 +6185,7 @@ export class ClaudeCodeAgent extends BaseAgent {
               log.warn('rewind rebuild: q.close threw', { error: String(e) });
             }
           }
-          const forkSourceId = sdkSessionId;
+          const forkSourceId = durableSdkSessionId;
           q = await buildQuery({
             ...(directoryGrantRebuild ? {} : { resumeSessionAt: resumeAt }),
             forkSession: true,
@@ -6188,8 +6201,7 @@ export class ClaudeCodeAgent extends BaseAgent {
             recordCanceledQueryClose(rebuiltQuery, 'unaccepted fork');
             inputQueue.end();
             sdkSessionId = forkSourceId;
-            publishedSdkSessionId = forkSourceId;
-            eventQueue.push({ type: 'session_id', data: forkSourceId, source: 'claude-code' });
+            unacceptedForks.delete(rebuiltQuery);
             pendingRewindTo = directoryGrantRebuild ? forkSourceId : resumeAt;
             acceptingRebuiltSend = false;
             clearBridgeState();
@@ -6329,6 +6341,13 @@ export class ClaudeCodeAgent extends BaseAgent {
           }
           userInputAccepted = true;
           rollbackUnacceptedFork = undefined;
+          if (unacceptedForks.delete(q) && sdkSessionId) {
+            durableSdkSessionId = sdkSessionId;
+            if (publishedSdkSessionId !== sdkSessionId) {
+              publishedSdkSessionId = sdkSessionId;
+              eventQueue.push({ type: 'session_id', data: sdkSessionId, source: 'claude-code' });
+            }
+          }
           activeCapabilitySelectionText = userMessageTextForCapabilityRouting(message.content);
           setAutoReviewIntent(appendAutoReviewUserIntent(priorAutoReviewIntent(), message.content, sendOpts), { authority: autoReviewContext() });
           replayableUserInput = sdkInput;
