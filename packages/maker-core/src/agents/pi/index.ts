@@ -1,6 +1,6 @@
 import { getPiExtensionUiCapability } from './extension-ui-capabilities.js';
 import { parsePiManagementArgs, parsePiManagementText } from './managed-command.js';
-import { snapshotDisabledSkillLaunch, currentDisabledSkillLaunchPaths, extendDisabledSkillLaunchPaths, type DisabledSkillLaunchSnapshot } from '../shared/skill-activation.js';
+import { canonicalSkillPath, snapshotDisabledSkillLaunch, currentDisabledSkillLaunchPaths, extendDisabledSkillLaunchPaths, type DisabledSkillLaunchSnapshot } from '../shared/skill-activation.js';
 /**
  * PiAgent —— pi coding agent(earendil-works/pi)接入。
  *
@@ -149,6 +149,7 @@ import {
   isSystemPermissionDenialReason,
   formatPermissionDenial,
   resolveAutoReviewDecision,
+  withAutoReviewContext,
   toolAutoReviewAction,
   type AutoReviewDecision,
 } from '../shared/auto-review-decision.js';
@@ -210,6 +211,7 @@ import {
   unavailablePiProjectResourceAssembly,
 } from './project-resource-assembly.js';
 import { applyPiBotSkillPolicy } from './bot-skill-policy.js';
+import { resolveAllowedManagedSkills, snapshotManagedSkillGrants } from '../shared/managed-skill-policy.js';
 import {
   assertPiSpawnArgvFitsPlatform,
   collectPiProjectResourceCliPaths,
@@ -3751,44 +3753,83 @@ export class PiAgent extends BaseAgent {
         }
       : collectedProjectResources;
 
-    const args = [
-      '--mode',
-      'rpc',
-      // --no-approve remains the hard project-settings gate. Explicit --skill /
-      // --prompt-template / --extension pass original in-repo paths without
-      // trusting `.pi/settings.json` or auto-installing project packages.
-      '--no-approve',
-      ...(nativePackagePaths.length === 0 ? ['--no-extensions'] : []),
-      '--session-dir',
-      sessionDir,
-      '--provider',
-      initialProvider,
-      '--model',
-      initialWireModel,
-      ...(reviewMode ? ['--tools', 'read,grep,find,ls'] : []),
-      // Bot sessions must not absorb project/global AGENTS.md or CLAUDE.md from
-      // the cwd chain — their context is the Bot profile, not the workspace.
-      ...(opts.botRuntimeProfile ? ['--no-context-files'] : []),
-      ...(botSkillSelection.disableImplicitSkills ? ['--no-skills'] : []),
-      ...(appendSystemPrompt.length > 0 ? ['--append-system-prompt', appendSystemPrompt] : []),
-      '--extension',
-      bridgeExtensionPath,
-      ...(localSubagentSupported ? ['--extension', subagentExtensionPath] : []),
-      ...(!reviewMode && planModeExtAvailable ? ['--extension', planModeExtPath] : []),
-      ...(loadProjectResourcesInPlace
-        ? piProjectResourceCliArgs(projectResourceCli)
-        : botSkillSelection.explicitSkillPaths.flatMap((skillPath) => ['--skill', skillPath])),
-    ];
+    // Own the entire managed-skill setup in the existing startup rollback:
+    // discovery and path checks can fail before any projection is created.
+    let managedSkillPaths: string[];
+    let managedSkillRoot: string | undefined;
+    let args: string[];
     try {
+      const managedSkillGrants = snapshotManagedSkillGrants(opts.botRuntimeProfile?.skillPolicy);
+      const managedSkills = opts.remoteHostId || reviewMode ? [] : await this.deps.getManagedSkills?.() ?? [];
+      const managedDisabledPaths = snapshotDisabledSkillLaunch(opts.remoteHostId || reviewMode ? [] : this.deps.getDisabledSkillPaths?.() ?? []);
+      const managedSourceIdentities = new Set(managedSkills.flatMap((skill) =>
+        skill.path ? [canonicalSkillPath(skill.path)] : []));
+      const managedSourcePaths = new Set(managedSkills.flatMap((skill) => skill.path ? [path.resolve(skill.path)] : []));
+      managedSkillPaths = resolveAllowedManagedSkills(managedSkills, managedSkillGrants,
+        currentDisabledSkillLaunchPaths(managedDisabledPaths)).map((skill) => skill.path);
+      // The catalog path may alias a managed source. Apply the managed grant and
+      // activation checks once, including paths already selected by the Bot.
+      const additionalSkillPaths = [...new Map([
+        ...(loadProjectResourcesInPlace ? [] : botSkillSelection.explicitSkillPaths.filter((skillPath) =>
+          !managedSourcePaths.has(path.resolve(skillPath)) && !managedSourceIdentities.has(canonicalSkillPath(skillPath)))),
+      ].map((skillPath) => [canonicalSkillPath(skillPath), skillPath])).values()];
+
+      // One explicit directory also works with --no-skills. Keep its lifetime in
+      // the existing per-session configHome and link only already-authorized
+      // physical sources; argv size must not grow with installed plugin count.
+      const managedLaunchSkills = managedSkillPaths.filter((skillPath) => !projectResourceCli.skills
+        .some((existing) => canonicalSkillPath(existing) === canonicalSkillPath(skillPath)));
+      managedSkillRoot = managedLaunchSkills.length ? path.join(configHome, 'cindy-managed-skills') : undefined;
+
+      args = [
+        '--mode',
+        'rpc',
+        // --no-approve remains the hard project-settings gate. Explicit --skill /
+        // --prompt-template / --extension pass original in-repo paths without
+        // trusting `.pi/settings.json` or auto-installing project packages.
+        '--no-approve',
+        ...(nativePackagePaths.length === 0 ? ['--no-extensions'] : []),
+        '--session-dir',
+        sessionDir,
+        '--provider',
+        initialProvider,
+        '--model',
+        initialWireModel,
+        ...(reviewMode ? ['--tools', 'read,grep,find,ls'] : []),
+        // Bot sessions must not absorb project/global AGENTS.md or CLAUDE.md from
+        // the cwd chain — their context is the Bot profile, not the workspace.
+        ...(opts.botRuntimeProfile ? ['--no-context-files'] : []),
+        ...(botSkillSelection.disableImplicitSkills ? ['--no-skills'] : []),
+        ...additionalSkillPaths.filter((skillPath) => !projectResourceCli.skills
+          .some((existing) => canonicalSkillPath(existing) === canonicalSkillPath(skillPath)))
+          .flatMap((skillPath) => ['--skill', skillPath]),
+        ...(managedSkillRoot ? ['--skill', managedSkillRoot] : []),
+        ...(appendSystemPrompt.length > 0 ? ['--append-system-prompt', appendSystemPrompt] : []),
+        '--extension',
+        bridgeExtensionPath,
+        ...(localSubagentSupported ? ['--extension', subagentExtensionPath] : []),
+        ...(!reviewMode && planModeExtAvailable ? ['--extension', planModeExtPath] : []),
+        ...(loadProjectResourcesInPlace
+          ? piProjectResourceCliArgs(projectResourceCli)
+          : []),
+      ];
+      if (managedSkillRoot) {
+        await fs.mkdir(managedSkillRoot);
+        for (const [index, skillPath] of managedLaunchSkills.entries()) {
+          // Preserve discovery order for same-name skills without long filenames.
+          await fs.symlink(path.dirname(skillPath), path.join(managedSkillRoot, String(index).padStart(12, '0')),
+            process.platform === 'win32' ? 'junction' : 'dir');
+        }
+      }
       assertPiSpawnArgvFitsPlatform(args);
     } catch (error) {
       try {
         disposeSessionCtx?.();
       } catch {
-        /* best-effort: cleanup failure must not mask argv budget failure */
+        /* best-effort: cleanup failure must not mask Skill setup / argv failure */
       }
       disposeSessionCtx = undefined;
-      cleanupConfigHome();
+      await cleanupConfigHome();
       cleanupRuntimeFiles();
       throw error;
     }
@@ -3833,6 +3874,7 @@ export class PiAgent extends BaseAgent {
     let activeEffortSnapshot = initialEffortSnapshot;
     let mutableEffort: Effort | null = startupEffort ?? null;
     let currentAutoReviewIntent: AutoReviewUserIntent = '';
+    let autoReviewIntentInitialized = false;
     const autoReviewActionContext = createAutoReviewActionContext();
     const autoReviewContext = () => activeTurnPermissionPolicy?.autoReviewContext
       ?? (activeTurnPermissionPolicy?.origin.kind === 'im'
@@ -3840,11 +3882,12 @@ export class PiAgent extends BaseAgent {
         : undefined);
     // Authorization belongs to the accepted input, not the foreground policy's lifetime.
     let currentAutoReviewAuthority: ReturnType<typeof autoReviewContext> | null;
-    const priorAutoReviewIntent = () => JSON.stringify(currentAutoReviewAuthority ?? null) === JSON.stringify(autoReviewContext() ?? null) ? currentAutoReviewIntent : '';
+    const priorAutoReviewIntent = () => !autoReviewIntentInitialized ? undefined : JSON.stringify(currentAutoReviewAuthority ?? null) === JSON.stringify(autoReviewContext() ?? null) ? currentAutoReviewIntent : '';
     const autoReviewDecisionCache = new Map<string, Promise<AutoReviewDecision>>();
     const setAutoReviewIntent = (content: AutoReviewUserIntent, source = { authority: currentAutoReviewAuthority }): void => {
       autoReviewActionContext.advance(typeof content !== 'string' && JSON.stringify(currentAutoReviewAuthority ?? null) === JSON.stringify(source.authority ?? null));
       currentAutoReviewIntent = normalizeAutoReviewUserIntent(content);
+      autoReviewIntentInitialized = true;
       currentAutoReviewAuthority = source.authority && { ...source.authority };
       autoReviewDecisionCache.clear();
       // 每条新用户消息 = 新一轮,提示重新武装。ErrorBanner 那份只活到下一条非 error 事件
@@ -3941,7 +3984,7 @@ export class PiAgent extends BaseAgent {
     };
     const autoReviewUnavailableNotice = createAutoReviewUnavailableNotice(emitAutoReviewRuntimeNotice);
     const autoReviewConfirmUndeliveredNotice = createAutoReviewConfirmUndeliveredNotice(emitAutoReviewRuntimeNotice);
-    const reviewAutoAction = (action: ReviewableAction): Promise<AutoReviewDecision> => {
+    const reviewAutoAction = (action: ReviewableAction, hostAutoApprove = false, hostShortcutOnly = false): Promise<AutoReviewDecision> => {
       // Directory grants become active only after their permission snapshot is
       // durable. While persistence is pending, neither the requested roots nor
       // the old runtime roots are a complete authorization view, so fail closed
@@ -3969,26 +4012,29 @@ export class PiAgent extends BaseAgent {
         writableRoots: [opts.workingDir, ...mutableWritableDirs],
         platform: opts.remoteHostId ? ('linux' as const) : process.platform,
       };
-      const cacheKey = JSON.stringify(request);
-      let pending = autoReviewDecisionCache.get(cacheKey);
-      if (!pending) {
-        pending = resolveAutoReviewDecision(request, this.deps.reviewAutoPermissionAction);
-        autoReviewDecisionCache.set(cacheKey, pending);
-      }
-      return pending.then<AutoReviewDecision>((decision) => (
-        autoReviewDecisionCache.get(cacheKey) !== pending
-          ? { verdict: 'block', reason: 'User instructions changed; retry against the latest authorization.' }
-          : directoryGeneration === autoReviewDirectoryGeneration
-          && !directoryPermissionsPendingPersistence()
-          ? decision
-          : {
-              verdict: 'block',
-              reason: 'Directory permissions changed; retry with the current scope.',
-            }
-      )).then((decision) => {
-        if (autoReviewDecisionCache.get(cacheKey) === pending && directoryGeneration === autoReviewDirectoryGeneration) {
-          autoReviewActionContext.record(action, decision);
+      let cacheKey: string | undefined;
+      let pending: Promise<AutoReviewDecision> | undefined;
+      return withAutoReviewContext(request, this.deps.reviewAutoPermissionAction, (prepared) => {
+        if (request.userIntent !== currentAutoReviewIntent || request.authorizationContext !== (currentAutoReviewAuthority ?? undefined)) {
+          return Promise.resolve({ verdict: 'block', reason: 'User instructions changed; retry against the current request.' });
         }
+        cacheKey = JSON.stringify([prepared, hostAutoApprove, hostShortcutOnly]);
+        pending = autoReviewDecisionCache.get(cacheKey);
+        if (!pending) {
+          pending = resolveAutoReviewDecision(prepared, this.deps.reviewAutoPermissionAction, hostAutoApprove, hostShortcutOnly);
+          autoReviewDecisionCache.set(cacheKey, pending);
+        }
+        return pending;
+      }, (decision) => {
+        if (!pending || !cacheKey) return decision;
+        if (request.userIntent !== currentAutoReviewIntent || request.authorizationContext !== (currentAutoReviewAuthority ?? undefined)
+            || autoReviewDecisionCache.get(cacheKey) !== pending) {
+          return { verdict: 'block', reason: 'User instructions changed; retry against the latest authorization.' };
+        }
+        if (directoryGeneration !== autoReviewDirectoryGeneration || directoryPermissionsPendingPersistence()) {
+          return { verdict: 'block', reason: 'Directory permissions changed; retry with the current scope.' };
+        }
+        autoReviewActionContext.record(action, decision);
         return decision;
       });
     };
@@ -4265,13 +4311,13 @@ export class PiAgent extends BaseAgent {
       // otherwise the entry is filed under the new generation and the retry gate
       // below never opens again.
       const offeredUnderGeneration = interactionResolverGeneration;
-      const offeredInAuto = permissionMode === 'auto';
+      let checkingAutomaticPermission = permissionMode === 'auto';
       const offeredWhileClosed = closed;
       const offeredAfterProcessExit = piProcessExited;
       // Detached runs outlive the root, but an Auto verdict must not straddle
       // its teardown. Reuse the durable unanswered path without stopping later
       // offers that begin under the already-detached lifecycle.
-      const autoReviewOfferExpired = (): boolean => offeredInAuto
+      const autoReviewOfferExpired = (): boolean => checkingAutomaticPermission
         && (closed !== offeredWhileClosed || piProcessExited !== offeredAfterProcessExit);
       piSubagentApprovalRequests.add(key);
       if (turnChangeCapture) {
@@ -4494,6 +4540,7 @@ export class PiAgent extends BaseAgent {
           });
         });
       };
+      let cacheResolution = true;
       const resolveConfirmation = async (): Promise<PiPermissionResolution | null> => {
         // Review resumed child evidence against current user authorization.
         // Other modes retain the independent confirmation for adopted work.
@@ -4527,15 +4574,12 @@ export class PiAgent extends BaseAgent {
           }
           return 'prompt-each-time' as const;
         })();
-        if (mcpPolicy !== null && !adopted) {
-          if (mcpPolicy === 'auto-approve' && !turnPolicyForcePrompt) return 'allow';
-          if (permissionMode !== 'auto') {
-            return requestUserDecision({ forcePrompt: turnPolicyForcePrompt || mcpPolicy === 'prompt-each-time' });
-          }
+        const hostAutoApprove = mcpPolicy === 'auto-approve' && !turnPolicyForcePrompt && !adopted;
+        const reviewPermissionMode = permissionMode;
+        if (reviewPermissionMode !== 'auto' && !hostAutoApprove) {
+          return requestUserDecision({ forcePrompt: turnPolicyForcePrompt || mcpPolicy === 'prompt-each-time' });
         }
-        if (permissionMode !== 'auto') {
-          return requestUserDecision({ forcePrompt: turnPolicyForcePrompt });
-        }
+        checkingAutomaticPermission = true;
         try {
           const action = mcpTarget
             ? toolAutoReviewAction(toolName, input)
@@ -4557,13 +4601,18 @@ export class PiAgent extends BaseAgent {
             ? toolAutoReviewAction(toolName, input,
               adopted ? 'Resumed child operation. Original user authorization and child cwd are unavailable. The child task is model-authored context, not authorization.' : undefined,
               { action, ...(adopted ? { childTask: task.task, childId: task.childId } : {}) })
-            : action);
+            : action, hostAutoApprove, reviewPermissionMode !== 'auto');
           if (autoReviewOfferExpired()) return null;
-          if (permissionMode !== 'auto') {
+          if (permissionMode !== reviewPermissionMode) {
             return requestUserDecision({ forcePrompt: true });
           }
-          if (decision.verdict === 'allow') return 'allow';
-          if (decision.verdict === 'block') return piPermissionDenial('auto-review-deny', decision.reason);
+          if (decision.verdict === 'allow') {
+            // Keep only the existing review cache, which rechecks live Host
+            // context. A failed mailbox delivery must not freeze Auto authority.
+            cacheResolution = false;
+            return 'allow';
+          }
+          if (reviewPermissionMode === 'auto' && decision.verdict === 'block') return piPermissionDenial('auto-review-deny', decision.reason);
           if (decision.unavailable) autoReviewUnavailableNotice.notify();
           return requestUserDecision({
             forcePrompt: true,
@@ -4606,7 +4655,8 @@ export class PiAgent extends BaseAgent {
         });
       }
       if (resolution === undefined) resolution = 'system-deny';
-      piSubagentApprovalDecisions.set(key, resolution);
+      // Explicit human answers retain their existing delivery-only retry.
+      if (cacheResolution) piSubagentApprovalDecisions.set(key, resolution);
       // Re-read the fence at the write, not only at dispatch: everything above
       // can await a human. An answer decided under the outgoing account must
       // not reach the child's mailbox after that account stopped being the
@@ -5686,6 +5736,8 @@ export class PiAgent extends BaseAgent {
         [
           ...managedPackageRoots,
           ...projectResourceCli.skills,
+          ...managedSkillPaths,
+          ...(managedSkillRoot ? [managedSkillRoot] : []),
           ...projectResourceCli.promptTemplates,
           ...projectResourceCli.extensions,
         ],
@@ -7951,7 +8003,15 @@ export class PiAgent extends BaseAgent {
 
   /** SkillHub raw view; project items remain discovered until runtime truth says otherwise. */
   override async listCustomizations(opts: ListCustomizationsOptions): Promise<ListCustomizationsResult> {
-    return scanPiCustomizations(opts);
+    const result = await scanPiCustomizations(opts);
+    if (!opts.kinds || opts.kinds.includes('skill')) {
+      result.items.push(...(await this.deps.getManagedSkills?.() ?? []).filter((skill) => skill.path).map((skill) => ({
+        engine: 'pi' as const, kind: 'skill', scope: 'user', name: skill.name,
+        description: skill.description, absolutePath: path.dirname(skill.path!), mdPath: skill.path,
+        enabled: skill.enabled,
+      })));
+    }
+    return result;
   }
 
   /**
@@ -7974,6 +8034,8 @@ export class PiAgent extends BaseAgent {
     ]);
     const out: ListAgentSkillsResult = {
       skills: [
+        ...(await this.deps.getManagedSkills?.() ?? []).map(({ claudeCommandName: _command, ...skill }) =>
+          ({ ...skill, runtimeCommandName: `skill:${skill.name}` })),
         ...items
           .filter((it) => it.kind === 'skill' && it.enabled !== false)
           .map((it) => ({
@@ -8034,7 +8096,7 @@ export class PiAgent extends BaseAgent {
       workspaceRoots: string[];
       readRoots: string[];
       writableRoots: string[];
-      reviewAutoAction: (action: ReviewableAction) => Promise<AutoReviewDecision>;
+      reviewAutoAction: (action: ReviewableAction, hostAutoApprove?: boolean, hostShortcutOnly?: boolean) => Promise<AutoReviewDecision>;
       recordUserClarification: (question: string, answer: string) => void;
       /** 审阅器不可用时的会话级一次性提示;去重与重置由会话侧持有(issue #1574)。 */
       notifyAutoReviewUnavailable: () => void;
@@ -8752,22 +8814,10 @@ export class PiAgent extends BaseAgent {
           }
           return 'prompt-each-time';
         })();
-        if (mcpPolicy !== null && (mcpPolicy === 'auto-approve' && !turnPolicyForcePrompt || permissionMode !== 'auto')) {
-          // Pi 的权限门只有放行/拒绝两态,没有会话级持久化规则,因此 prompt 与
-          // prompt-each-time 在这里收敛成同一个动作:每次都问用户。本轮策略命中时
-          // auto-approve 也不放行 —— 渠道安全契约压过第一方 MCP 自动批准(§7.4)。
+        const hostAutoApprove = mcpPolicy === 'auto-approve' && !turnPolicyForcePrompt;
+        if (permissionMode !== 'auto' && !hostAutoApprove) {
           sendPermissionResolution(
-            mcpPolicy === 'auto-approve' && !turnPolicyForcePrompt
-              ? 'allow'
-              : await requestUserConfirmation({
-                  forcePrompt: turnPolicyForcePrompt || mcpPolicy === 'prompt-each-time',
-                }),
-          );
-          return;
-        }
-        if (permissionMode !== 'auto') {
-          sendPermissionResolution(
-            await requestUserConfirmation({ forcePrompt: turnPolicyForcePrompt }),
+            await requestUserConfirmation({ forcePrompt: turnPolicyForcePrompt || mcpPolicy === 'prompt-each-time' }),
           );
           return;
         }
@@ -8791,7 +8841,7 @@ export class PiAgent extends BaseAgent {
           }
           const decision = await reviewAutoAction(turnPolicyForcePrompt
             ? toolAutoReviewAction(toolName, input, hostApprovalPresentation?.description, action)
-            : action);
+            : action, hostAutoApprove, permissionMode !== 'auto');
           // 权限热切换:reviewAutoAction 是 async 的,期间用户可能改档。按**最新**档位收口,
           // 不能用进入审查前捕获的旧 auto 档直接放行(Pi 明确支持热切换,codex review P1):
           //   - 已收紧到 ask(或其它非 auto/bypass)→ 破坏性调用即便 verdict=allow 也必须走
@@ -8803,13 +8853,13 @@ export class PiAgent extends BaseAgent {
             sendPermissionResolution(turnPolicyForcePrompt ? 'system-deny' : 'allow');
             return;
           }
-          if (modeAfterReview !== 'auto') {
+          if (modeAfterReview !== permissionMode) {
             // 审查期间用户主动收紧了档位 → 这一次必须拿到明确确认,等卡期间再放宽也不追认
             // (forcePrompt,与 CC 对 AI ask / 确定性红线的处理同口径)。
             sendPermissionResolution(await requestUserConfirmation({ forcePrompt: true }));
             return;
           }
-          if (decision.verdict === 'ask') {
+          if (decision.verdict === 'ask' || (permissionMode !== 'auto' && decision.verdict !== 'allow')) {
             // 审阅器故障降级来的 ask 提示一次:用户需要知道自己为何突然开始被问,
             // 否则 Auto 档看起来像坏了。模型判定的 ask 不提示(那是正常工作)。
             if (decision.unavailable) notifyAutoReviewUnavailable();

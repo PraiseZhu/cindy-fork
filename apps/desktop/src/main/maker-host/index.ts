@@ -1,3 +1,4 @@
+import { listCindyManagedSkills, prepareCindyCodexSkills } from './managed-skills.js';
 import { createCompanionImportProvider } from '../bot-import/importProvider.js';
 import { createCompanionConnectionsProvider } from '../bot-import/connectionProvider.js';
 import { resolveCompanionRuntimeEnvironment } from '../bot-import/runtime.js';
@@ -17,8 +18,8 @@ import { clearCodexAccountUsageSnapshot } from '../usageBroadcaster.js';
  */
 
 import { createMediaDownloadContext } from '../cindy-media/mediaDownloadApproval.js';
-import { isCodexAccountProvider, codexAccountHome, setCodexAccountRetirement } from './codex-account-auth.js';
-import { CodexThreadLocations } from './codex-thread-locations.js';
+import { isCodexAccountProvider, setCodexAccountRetirement } from './codex-account-auth.js';
+import { ownerCodexThreadLocations, readCodexThreadStorageReadOnly } from './codex-thread-storage.js';
 import { createSessionArchiveSync, prepareArchiveSessions } from './session-archive-sync.js';
 import { getCurrentDbClientSnapshot } from '../localDb/client/current.js';
 import { setSessionArchiveSyncRequester } from '../localDb/sessionArchiveSync.js';
@@ -43,6 +44,7 @@ import {
   configureDefaultImageResizer,
   type AgentKind,
   type InteractionRequest,
+  type AutoReviewDelegate,
   type McpProvider,
 } from '@cindy/maker-core';
 import type { ProviderView } from '@cindy/model-providers';
@@ -407,12 +409,22 @@ const requestAutoReviewText = createAutoReviewModelRouter({
   logger: desktopMakerLogger,
 });
 
-export const reviewAutoPermissionAction = createAutoPermissionReviewer({
+let autoReviewContextResolver: AutoReviewDelegate['prepareRequest'];
+/** Main bootstrap supplies a fresh owner-bound lookup; no plugin/renderer can set this. */
+export function setAutoReviewContextResolver(resolver: AutoReviewDelegate['prepareRequest']): void {
+  autoReviewContextResolver = resolver;
+}
+
+export const reviewAutoPermissionAction: AutoReviewDelegate = createAutoPermissionReviewer({
   logger: desktopMakerLogger,
   managesRetries: true,
   resolveRequestTimeoutMs: () => AUTO_REVIEW_ROUTER_GUARD_TIMEOUT_MS,
   requestText: (_request, prompt, { signal }) => requestAutoReviewText(prompt, signal),
 });
+reviewAutoPermissionAction.prepareRequest = async request => {
+  if (!autoReviewContextResolver) throw new Error('Authorization context is not ready');
+  return autoReviewContextResolver(request);
+};
 
 /**
  * Codex 模型补拉 coordinator —— 随 maker 一起创建(需要 maker 实例做 live 拉取)、随
@@ -1172,6 +1184,7 @@ export function getMaker(): Maker {
     const claudeAgent = new ClaudeCodeAgent({
       resolveSessionEnvironment: resolveCompanionRuntimeEnvironment,
       getDisabledSkillPaths: readDisabledSkillPaths,
+      getManagedSkills: listCindyManagedSkills,
       auth: desktopClaudeAuthAdapter,
       runtimeConfig: buildDesktopClaudeRuntimeConfig(getClaudeEndpoint),
       binaryPath: claudePath,
@@ -1500,6 +1513,8 @@ export function getMaker(): Maker {
     const codexAgent = new CodexAgent({
       resolveSessionEnvironment: resolveCompanionRuntimeEnvironment,
       getDisabledSkillPaths: readDisabledSkillPaths,
+      getManagedSkills: listCindyManagedSkills,
+      prepareCodexSkills: prepareCindyCodexSkills,
       auth: desktopCodexAuthAdapter,
       runtimeConfig: desktopCodexRuntimeConfig,
       binaryPath: codexPath,
@@ -1962,16 +1977,14 @@ export function getMaker(): Maker {
       unregisterCodexMcpThreadContext,
       prepareCodexResumeSession: async (threadId) => {
         if (!getActiveAppSession().dataOwnerId) return prepareExternalCodexSessionForResume(threadId);
-        const locations = new CodexThreadLocations(path.join(codexAccountHome('thread-index'), 'locations'));
-        return locations.prepareResume(threadId, prepareExternalCodexSessionForResume);
+        return ownerCodexThreadLocations().prepareResume(threadId, prepareExternalCodexSessionForResume);
       },
       resolveCodexThreadStorage: async (threadId, options) => {
         if (!getActiveAppSession().dataOwnerId) return options?.readOnly ? readCodexThreadStorageForArchive(threadId) : undefined;
         const ownerScope = activeOwnerScopeKey();
-        const locations = new CodexThreadLocations(path.join(codexAccountHome('thread-index'), 'locations'));
         const storage = options?.readOnly
-          ? await locations.readStorage(threadId) ?? readCodexThreadStorageForArchive(threadId)
-          : await locations.readStorage(threadId, {
+          ? await readCodexThreadStorageReadOnly(threadId)
+          : await ownerCodexThreadLocations().readStorage(threadId, {
           home: getCodexHome(),
           prepare: prepareExternalCodexSessionForResume,
         });
@@ -2005,8 +2018,7 @@ export function getMaker(): Maker {
       },
       recordCodexThreadLocation: async (threadId, storageHome, rolloutPath) => {
         if (!rolloutPath || !getActiveAppSession().dataOwnerId) return;
-        const locations = new CodexThreadLocations(path.join(codexAccountHome('thread-index'), 'locations'));
-        await locations.record(threadId, rolloutPath, storageHome);
+        await ownerCodexThreadLocations().record(threadId, rolloutPath, storageHome);
       },
       registerCodexSystemPromptForThread: ({
         sessionId,
