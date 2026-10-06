@@ -449,7 +449,7 @@ describe('orca_worker_bridge MCP helpers', () => {
     expect(readLeadHistory).toHaveBeenCalledTimes(1);
   });
 
-  function makeWorkerBridgeLeadHarness(lead: FakeSession, dispatchInterAgentMessage?: OrcaBridgeMcpDeps['dispatchInterAgentMessage']) {
+  function makeWorkerBridgeLeadHarness(lead: FakeSession, dispatchInterAgentMessage?: OrcaBridgeMcpDeps['dispatchInterAgentMessage'], submitWorkerReport?: OrcaBridgeMcpDeps['submitWorkerReport']) {
     const logger = makeLogger();
     const workerLink: OrcaWorkerLink = {
       workerId: 'worker-1',
@@ -470,6 +470,7 @@ describe('orca_worker_bridge MCP helpers', () => {
     });
     const workerProvider = createOrcaWorkerBridgeMcpProvider({
       dispatchInterAgentMessage,
+      submitWorkerReport,
       getMaker: () => base.maker as unknown as Maker,
       logger: logger as never,
       persistUserMessage: async (sessionId, message) => {
@@ -504,6 +505,29 @@ describe('orca_worker_bridge MCP helpers', () => {
       workerLink,
     };
   }
+
+  it('persists event-only reports before resolving or waking a cold lead', async () => {
+    const lead = makeSession('lead-1');
+    const sink = vi.fn(async () => ({ handled: true, event_id: 'event-1' }));
+    const h = makeWorkerBridgeLeadHarness(lead, undefined, sink);
+    delete h.activeSessions['lead-1'];
+    const report = { event_kind: 'progress', work_revision: 'work-1', evidence_revision: 'evidence-1', payload: {} };
+    const result = await h.server._registeredTools.send_to_lead.handler({ worker_id: 'worker-1', message: 'checkpoint', report });
+    expect(parseToolJson(result)).toMatchObject({ ok: true, handled: true, event_id: 'event-1' });
+    expect(h.createSessionCalls).toEqual([]);
+    expect(lead.sent).toEqual([]);
+    expect(h.statusUpdates).toEqual([]);
+    expect(sink).toHaveBeenCalledWith({ workerSessionId: 'worker-session-1', workerId: 'worker-1', report });
+  });
+
+  it('does not fall back to waking the lead when the event sink rejects a report', async () => {
+    const lead = makeSession('lead-1');
+    const h = makeWorkerBridgeLeadHarness(lead, undefined, async () => { throw Error('invalid report'); });
+    expect(parseToolJson(await h.server._registeredTools.send_to_lead.handler({ worker_id: 'worker-1', message: 'progress' })))
+      .toMatchObject({ error: 'WORKER_REPORT_REJECTED' });
+    expect(lead.sent).toEqual([]);
+    expect(h.statusUpdates).toEqual([]);
+  });
 
   it('send_to_lead accepted false does not expose a running lead entry before accept', async () => {
     const leadSendGate = makeAsyncGate();

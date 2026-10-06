@@ -707,6 +707,9 @@ export const orcaTeams = sqliteTable(
     completedAt: integer('completed_at'),
     createdAt: integer('created_at').notNull(),
     updatedAt: integer('updated_at').notNull(),
+    resultPolicy: text('result_policy', { enum: ['default', 'event-only'] })
+      .notNull()
+      .default('default'),
   },
   (t) => ({
     uniqActiveTeamPerLead: uniqueIndex('uniq_active_team_per_lead')
@@ -2311,3 +2314,80 @@ export const pluginTaskRequests = sqliteTable('plugin_task_requests', {
   uniqueIndex('plugin_task_request_key').on(table.pluginId, table.operation, table.targetId, table.requestKey),
   index('plugin_task_target').on(table.targetId, table.pluginId),
 ]);
+
+export const automationDispatchReceipts = sqliteTable(
+  'automation_dispatch_receipts',
+  {
+    id: text('id').primaryKey(),
+    principalKind: text('principal_kind', { enum: ['schedule', 'orca_team'] }).notNull(),
+    principalId: text('principal_id').notNull(),
+    requestKey: text('request_key').notNull(),
+    operation: text('operation', { enum: ['session_dispatch', 'create_worker'] }).notNull(),
+    payloadHash: text('payload_hash').notNull(),
+    status: text('status', {
+      enum: [
+        'reserved',
+        'accepted',
+        'queued',
+        'running',
+        'completed',
+        'rejected_before_delivery',
+        'unknown',
+      ],
+    }).notNull(),
+    sessionId: text('session_id'),
+    inputId: text('input_id'),
+    workerId: text('worker_id'),
+    teamId: text('team_id'),
+    wakeKind: text('wake_kind'),
+    errorCode: text('error_code'),
+    result: text('result'),
+    createdAt: integer('created_at').notNull(),
+    updatedAt: integer('updated_at').notNull(),
+  },
+  (t) => ({
+    uniqPrincipalKey: uniqueIndex('uniq_automation_dispatch_principal_key').on(
+      t.principalKind,
+      t.principalId,
+      t.requestKey,
+    ),
+    idxSession: index('idx_automation_dispatch_session').on(t.sessionId),
+    idxTeam: index('idx_automation_dispatch_team').on(t.teamId),
+  }),
+);
+
+export const orcaWorkerEvents = sqliteTable(
+  'orca_worker_events',
+  {
+    seq: integer('seq').primaryKey({ autoIncrement: true }),
+    eventId: text('event_id').notNull(),
+    logicalReportId: text('logical_report_id').notNull(),
+    teamId: text('team_id')
+      .notNull()
+      .references(() => orcaTeams.id, { onDelete: 'cascade' }),
+    workerId: text('worker_id').notNull(),
+    sessionId: text('session_id').notNull(),
+    turnGeneration: integer('turn_generation').notNull(),
+    eventKind: text('event_kind', {
+      enum: [
+        'progress',
+        'checkpoint',
+        'waiting',
+        'decision_required',
+        'verification_required',
+        'handed_off',
+        'failed',
+      ],
+    }).notNull(),
+    workRevision: text('work_revision').notNull().default(''),
+    evidenceRevision: text('evidence_revision').notNull().default(''),
+    source: text('source', { enum: ['manual', 'auto'] }).notNull(),
+    report: text('report').notNull(),
+    createdAt: integer('created_at').notNull(),
+  },
+  (t) => ({
+    uniqEventId: uniqueIndex('uniq_orca_worker_events_event_id').on(t.eventId),
+    idxTeamSeq: index('idx_orca_worker_events_team_seq').on(t.teamId, t.seq),
+    idxLogical: index('idx_orca_worker_events_logical').on(t.logicalReportId),
+  }),
+);

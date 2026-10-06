@@ -465,6 +465,15 @@ describe('OrcaTeamService', () => {
     },
   );
 
+  it('stores an event-only completion without delivering a model input to the lead', async () => {
+    const sink = vi.fn(async () => true);
+    const { deps, service } = createDeps({ persistAutoReport: sink });
+    await service.dispatchWorkerTask({ targetSessionId: 'worker-session-1', message: 'task', dispatchMeta: { source: 'test', context: 'work' } });
+    await service.handleWorkerTerminalTurn({ sessionId: 'worker-session-1', status: 'done', finalText: 'done' });
+    expect(sink).toHaveBeenCalledWith('worker-session-1', expect.objectContaining({ status: 'done' }));
+    expect(deps.sendAutoBridgeToLead).not.toHaveBeenCalled();
+  });
+
   it('dispatches worker task through shared primitive after accepted updates running, broadcast, and pending', async () => {
     const leadMessages: string[] = [];
     const { calls, deps, service } = createDeps({

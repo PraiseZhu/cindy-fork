@@ -154,6 +154,8 @@ export function registerCreateWorkersTool(
           label: worker.label,
           ...(worker.working_dir !== undefined ? { workingDir: worker.working_dir } : {}),
           initialTask: worker.initial_task,
+          requestKey: worker.request_key,
+          start: worker.start,
         });
         limit = result.limit ?? limit;
 

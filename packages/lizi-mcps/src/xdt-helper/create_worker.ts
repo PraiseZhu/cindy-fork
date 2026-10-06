@@ -59,11 +59,15 @@ export interface CreateWorkerDeps {
     label: string;
     workingDir?: string;
     initialTask?: string;
+    requestKey?: string;
+    start?: boolean;
   }) => Promise<CreateWorkerControlResult>;
 }
 
 /** 单个 worker 的稳定输入 schema；create_worker/create_workers 共用。 */
 export const createWorkerSpecSchema = z.object({
+  start: z.boolean().optional().describe('false creates a dormant worker without a ready placeholder or model call; default true.'),
+  request_key: z.string().regex(/^[a-zA-Z0-9:._-]{1,180}$/).optional().describe('Stable request identity; reuse after a lost reply, never issue a new key for the same work.'),
   role: z
     .string()
     .min(1)
@@ -157,7 +161,7 @@ export function registerCreateWorkerTool(
     category: 'control',
     description: DESCRIPTION,
     inputShape: createWorkerSpecSchema.shape,
-    handler: async ({ role, agent, model, provider_id, effort, fast, label, initial_task, working_dir }) => {
+    handler: async ({ role, agent, model, provider_id, effort, fast, label, initial_task, working_dir, request_key, start }) => {
       const ctx = deps.getSessionContext?.() ?? deps;
       if (!ctx.sessionId) {
         return errorPayload('LEAD_NOT_SUPPORTED', '当前 session 类型不支持作为 Lead。');
@@ -179,6 +183,8 @@ export function registerCreateWorkerTool(
         label,
         ...(working_dir !== undefined ? { workingDir: working_dir } : {}),
         initialTask: initial_task,
+        requestKey: request_key,
+        start,
       });
       if (!result.ok) {
         if (result.errorCode === 'HOST_NOT_READY') {

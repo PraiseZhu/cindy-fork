@@ -54,6 +54,9 @@ export type OrcaInterAgentMessageSource = 'lead' | 'worker';
 
 /** 一次 lead/worker 间消息派发请求，accepted 回调用于把业务副作用绑定到真正派发边界。 */
 export interface DispatchOrcaInterAgentMessageParams {
+  clientId?: string;
+  admission?: () => void;
+  origin?: AgentInputQueuedMessage['origin'];
   targetSessionId: string;
   rawContent: string;
   source: OrcaInterAgentMessageSource;
@@ -352,7 +355,7 @@ export function createOrcaInterAgentDispatcher<TSessionMeta>(
       };
     }
 
-    const clientId = deps.createId();
+    const clientId = params.clientId ?? deps.createId();
     // worker 回报的前缀要带发件 worker 的 role,需要反查;只查一次,文本与来源标签共用。
     let workerRolePromise: Promise<string | undefined> | undefined;
     const resolveRole = (): Promise<string | undefined> =>
@@ -391,6 +394,7 @@ export function createOrcaInterAgentDispatcher<TSessionMeta>(
     const resolveSenderLabel = async (): Promise<string> =>
       (await resolveRole()) ?? params.senderLabel;
     const resolveOrigin = async (): Promise<NonNullable<AgentInputQueuedMessage['origin']>> => {
+      if (params.origin) return params.origin;
       const [senderLabel, senderSessionId] = await Promise.all([
         resolveSenderLabel(),
         resolveOrcaSenderSessionId(deps, params),
@@ -417,6 +421,7 @@ export function createOrcaInterAgentDispatcher<TSessionMeta>(
         origin: await resolveOrigin(),
         createOpts,
       });
+      params.admission?.();
       if (params.onAccepted) {
         registerQueuedOrcaInterAgentAcceptedCallback(
           clientId,
@@ -442,6 +447,8 @@ export function createOrcaInterAgentDispatcher<TSessionMeta>(
         ...dispatchReceipt,
       };
     };
+
+    if (params.admission) return enqueueQueuedMessage('guarded automation input');
 
     // 插话只由发送方显式选择（delivery=steer），且只对正在运行的目标尝试；空闲目标照常直发。
     const liveTurn = deps.getLiveSession(params.targetSessionId);

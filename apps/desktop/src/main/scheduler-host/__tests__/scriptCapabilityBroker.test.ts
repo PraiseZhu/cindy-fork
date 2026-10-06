@@ -376,7 +376,10 @@ describe('SchedulerScriptCapabilityBroker', () => {
     expect(byMethod.get('feishu.recent_messages')).toBe(false);
     expect(byMethod.get('sessions.dispatch')).toBe(false);
     expect(byMethod.get('jira.search_jql')).toBe(true);
-    expect(result.methods).toHaveLength(7);
+    expect(byMethod.get('sessions.inspect')).toBe(false);
+    expect(byMethod.get('sessions.dispatch_status')).toBe(false);
+    expect(byMethod.get('sessions.events')).toBe(false);
+    expect(result.methods).toHaveLength(10);
   });
 
   it('rejects missing task grants and unknown methods', async () => {

@@ -108,6 +108,9 @@ export type DispatchWorkerMessageResult =
 
 /** service 内部 worker 派活请求，dispatchMeta 用于保留 MCP/IPC 调用来源和诊断上下文。 */
 export interface DispatchWorkerTaskParams {
+  clientId?: string;
+  admission?: () => void;
+  origin?: AgentInputQueuedMessage['origin'];
   targetSessionId: string;
   message: string;
   dispatchMeta: {
@@ -251,6 +254,7 @@ export interface WorkerTerminalTurnCapture {
 
 /** service 的 I/O 边界。register.ts 只负责把 DB、Maker、IPC broadcast 作为依赖组合进来。 */
 export interface OrcaTeamServiceDeps {
+  persistAutoReport?(sessionId: string, turn: { status: 'done' | 'error'; finalText: string }): Promise<boolean>;
   captureControlAuthority?(leadSessionId: string): Promise<() => Promise<void>>;
   getWorkerLinkBySessionId(workerSessionId: string): Promise<OrcaWorkerLinkSnapshot | null>;
   getWorkerLinkByWorkerId(workerId: string): Promise<OrcaWorkerLinkSnapshot | null>;
@@ -282,6 +286,9 @@ export interface OrcaTeamServiceDeps {
   /** The Lead's last outstanding worker report was delivered or discarded. */
   onLeadWorkerReportsSettled?(leadSessionId: string): void;
   dispatchWorkerMessage(params: {
+    clientId?: string;
+    admission?: () => void;
+    origin?: AgentInputQueuedMessage['origin'];
     targetSessionId: string;
     message: string;
     workerId: string;
@@ -622,6 +629,10 @@ export function createOrcaTeamService(deps: OrcaTeamServiceDeps): OrcaTeamServic
     sessionId: string,
     turn: { status: 'done' | 'error'; finalText: string; diagnostic?: string },
   ): Promise<'accepted' | 'deferred' | 'rejected' | 'skipped'> {
+    if (await deps.persistAutoReport?.(sessionId, turn)) {
+      deletePendingReport(sessionId);
+      return 'accepted';
+    }
     const state = autoBridge.get(sessionId);
     if (!state) return 'skipped';
     if (!state.ready) {
@@ -848,6 +859,7 @@ export function createOrcaTeamService(deps: OrcaTeamServiceDeps): OrcaTeamServic
       resolved: { worker: target, link },
       message: params.message,
       mode: 'normal',
+      clientId: params.clientId, admission: params.admission, origin: params.origin,
       dispatchMeta: params.dispatchMeta,
       assertCurrent,
     });
@@ -910,6 +922,9 @@ export function createOrcaTeamService(deps: OrcaTeamServiceDeps): OrcaTeamServic
     delivery?: 'queue' | 'steer';
     dispatchMeta: DispatchWorkerTaskParams['dispatchMeta'];
     assertCurrent?: () => Promise<void>;
+    clientId?: string;
+    admission?: () => void;
+    origin?: AgentInputQueuedMessage['origin'];
   }): Promise<ResolvedWorkerDispatchExecution> {
     const { worker: target, link } = params.resolved;
     await reserveWorkerDispatch(target.id);
@@ -1037,6 +1052,7 @@ export function createOrcaTeamService(deps: OrcaTeamServiceDeps): OrcaTeamServic
           if (!wasLiveBeforeDispatch) await deps.resumeWorkerSession(target, link);
           await params.assertCurrent?.();
           result = await deps.dispatchWorkerMessage({
+            clientId: params.clientId, admission: params.admission, origin: params.origin,
             targetSessionId: target.sessionId,
             message: params.message,
             workerId: link.workerId,

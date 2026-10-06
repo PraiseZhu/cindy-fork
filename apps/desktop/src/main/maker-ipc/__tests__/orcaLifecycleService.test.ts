@@ -129,6 +129,14 @@ function createDeps(overrides: Partial<OrcaLifecycleDeps> = {}) {
 }
 
 describe('OrcaLifecycleService', () => {
+  it('creates a dormant worker without any task or ready-placeholder model call', async () => {
+    const { deps, service } = createDeps({ getActiveTeamByLead: vi.fn(async () => activeTeam()) });
+    const result = await service.createWorker({ leadSessionId: 'lead-1', role: 'developer', agent: 'pi', label: 'repair', start: false });
+    expect(result).toMatchObject({ ok: true, workerId: 'worker-1' });
+    expect(deps.dispatchWorkerTask).not.toHaveBeenCalled();
+    expect(deps.sendWorkerReadyPlaceholder).not.toHaveBeenCalled();
+  });
+
   it.each(['create-task', 'create-placeholder', 'enable-task', 'enable-placeholder', 'enable-deferred'].flatMap(action => [true, false].flatMap(revoked => ['source', 'directory'].map(scope => ({ action, revoked, scope }))))) (
     'guards $action $scope at acceptance, revoked=$revoked, and cleans up outside dispatch', async ({ action, revoked, scope }) => {
       let allowed = true, insideSend = false, nativeCalls = 0;

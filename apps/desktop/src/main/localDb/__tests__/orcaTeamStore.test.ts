@@ -452,6 +452,7 @@ describe('orcaTeamStore', () => {
         expires_at INTEGER NOT NULL
       );
       CREATE TABLE orca_teams (
+        result_policy TEXT NOT NULL DEFAULT 'default',
         id TEXT PRIMARY KEY,
         lead_session_id TEXT NOT NULL,
         status TEXT NOT NULL DEFAULT 'active',

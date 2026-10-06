@@ -1,3 +1,4 @@
+import { submitOrcaWorkerReport } from '../maker-ipc/orcaReportService.js';
 import { readAgentCapabilityCatalog, RUNTIME_MCP_NAMES_KEY, type AgentCapabilityQuery } from './agentCapabilityCatalog.js';
 import { listCindyManagedSkills, prepareCindyCodexSkills } from './managed-skills.js';
 import { createCompanionImportProvider } from '../bot-import/importProvider.js';
@@ -1142,6 +1143,8 @@ export function getMaker(): Maker {
         };
       },
       dispatchInterAgentMessage,
+      submitWorkerReport: (input) => submitOrcaWorkerReport({ ...input,
+        turnGeneration: _maker?.getSession(input.workerSessionId)?.getTurnGeneration() ?? 0, source: 'manual' }),
     } satisfies OrcaBridgeMcpDeps;
     const orcaWorkerBridgeProvider = createOrcaWorkerBridgeMcpProvider(orcaBridgeDeps);
     // Cindy Make 个人版任务专属工具:只有 sessions.source='cindy-make' 的任务在

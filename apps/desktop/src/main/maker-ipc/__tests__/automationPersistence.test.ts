@@ -1,0 +1,110 @@
+import Database from 'better-sqlite3';
+import { drizzle } from 'drizzle-orm/better-sqlite3';
+import { fileURLToPath } from 'node:url';
+import { runMigrationReplay } from '../../localDb/migrationRunner.js';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import type { DbClient } from '../../localDb/client/DbClient.js';
+import { setCurrentDbClient, clearCurrentDbClient } from '../../localDb/client/current.js';
+import { createAutomationDispatchStore, reconcileAutomationReceipt } from '../../localDb/automationDispatchStore.js';
+import { assertScheduleSession, readScheduleEvents } from '../../localDb/automationSessionAccess.js';
+import { AutomationDispatchService } from '../../scheduler-host/automationDispatchService.js';
+import { submitOrcaWorkerReport } from '../orcaReportService.js';
+
+describe('automation persistence boundaries', () => {
+  let sqlite: Database.Database;
+  let client: DbClient;
+  beforeEach(() => {
+    sqlite = new Database(':memory:');
+    sqlite.exec(`CREATE TABLE migration_meta(key TEXT PRIMARY KEY,value TEXT);
+      CREATE TABLE migration_history(seq INTEGER PRIMARY KEY,file_name TEXT,content_hash TEXT,applied_at INTEGER);
+      CREATE TABLE sessions(id TEXT PRIMARY KEY,status TEXT NOT NULL,agent_kind TEXT NOT NULL DEFAULT 'codex');
+      CREATE TABLE messages(id TEXT PRIMARY KEY,session_id TEXT,client_id TEXT,role TEXT);
+      CREATE TABLE orca_teams(id TEXT PRIMARY KEY,lead_session_id TEXT,status TEXT);
+      CREATE TABLE orca_workers(id TEXT PRIMARY KEY,team_id TEXT,session_id TEXT);
+      INSERT INTO sessions(id,status) VALUES ('lead','active'),('worker','active'),('other','active');
+      INSERT INTO orca_teams VALUES ('team','lead','active');
+      INSERT INTO orca_workers VALUES ('worker-id','team','worker');`);
+    runMigrationReplay(sqlite, { drizzleDir: fileURLToPath(new URL('../../../../drizzle/', import.meta.url)), currentVersion: 122 });
+    sqlite.exec("UPDATE orca_teams SET result_policy='event-only'");
+    client = { drizzle: drizzle(sqlite) } as unknown as DbClient;
+    setCurrentDbClient(client, 'test-owner');
+  });
+  afterEach(() => { clearCurrentDbClient(client); sqlite.close(); });
+
+  const report = (kind: 'progress' | 'decision_required' | 'handed_off' | 'failed') => ({ event_kind: kind,
+    work_revision: 'work-1', evidence_revision: 'evidence-1', payload: { workId: 'work-1', generation: 1 } });
+  const input = { workerSessionId: 'worker', workerId: 'worker-id', turnGeneration: 1 };
+
+  it('retains progress then decision then handoff in one turn and folds only final duplicates', async () => {
+    await submitOrcaWorkerReport({ ...input, source: 'manual', report: report('progress') });
+    await submitOrcaWorkerReport({ ...input, source: 'manual', report: report('decision_required') });
+    const final = await submitOrcaWorkerReport({ ...input, source: 'manual', report: report('handed_off') });
+    const duplicate = await submitOrcaWorkerReport({ ...input, source: 'auto', report: report('handed_off') });
+    expect(duplicate.event_id).toBe(final.event_id);
+    expect(sqlite.prepare('SELECT event_kind FROM orca_worker_events ORDER BY seq').all()).toEqual([
+      { event_kind: 'progress' }, { event_kind: 'decision_required' }, { event_kind: 'handed_off' },
+    ]);
+  });
+  it('rejects changed content under a reused report identity instead of silently losing a decision', async () => {
+    await submitOrcaWorkerReport({ ...input, source: 'manual', report: report('decision_required') });
+    await expect(submitOrcaWorkerReport({ ...input, source: 'manual', report: {
+      ...report('decision_required'), payload: { workId: 'work-1', generation: 2 },
+    } })).rejects.toMatchObject({ code: 'REPORT_ID_CONFLICT' });
+    expect(sqlite.prepare('SELECT count(*) AS count FROM orca_worker_events').get()).toEqual({ count: 1 });
+  });
+
+  it('persists a terminal failure after progress, without retaining raw model output', async () => {
+    await submitOrcaWorkerReport({ ...input, source: 'manual', report: report('progress') });
+    await submitOrcaWorkerReport({ ...input, source: 'auto', failed: true, report: 'private provider text' });
+    const rows = sqlite.prepare('SELECT event_kind,report FROM orca_worker_events ORDER BY seq').all();
+    expect(rows).toHaveLength(2);
+    expect(rows[1]).toMatchObject({ event_kind: 'failed' });
+    expect(JSON.stringify(rows)).not.toContain('private provider');
+  });
+  it('does not allow a report to impersonate another worker', async () => {
+    await expect(submitOrcaWorkerReport({ ...input, workerId: 'other-worker', source: 'manual', report: report('handed_off') }))
+      .rejects.toMatchObject({ code: 'NOT_AUTHORIZED' });
+    expect(sqlite.prepare('SELECT count(*) AS count FROM orca_worker_events').get()).toEqual({ count: 0 });
+  });
+  it('grants inspection only from a persisted schedule receipt and the real Orca relationship', async () => {
+    const store = createAutomationDispatchStore(client);
+    const service = new AutomationDispatchService(store, () => {});
+    await service.execute({ scope: { kind: 'schedule', id: 'schedule-a' }, key: 'a', operation: 'session_dispatch',
+      targetSessionId: 'lead', payload: { message: 'work' } }, async () => ({ ok: true }));
+    await expect(assertScheduleSession(client, 'schedule-a', 'worker')).resolves.toBeUndefined();
+    await expect(assertScheduleSession(client, 'schedule-b', 'worker')).rejects.toMatchObject({ code: 'NOT_AUTHORIZED' });
+    await expect(assertScheduleSession(client, 'schedule-a', 'other')).rejects.toMatchObject({ code: 'NOT_AUTHORIZED' });
+    await submitOrcaWorkerReport({ ...input, source: 'manual', report: report('progress') });
+    const page = await readScheduleEvents(client, 'schedule-a', 'team', 0, 1);
+    expect(page.events).toHaveLength(1);
+    expect(page.next_seq).toBe(1);
+    expect((await readScheduleEvents(client, 'schedule-a', 'team', page.next_seq, 1)).events).toEqual([]);
+    await expect(readScheduleEvents(client, 'schedule-b', 'team', 0, 10)).rejects.toMatchObject({ code: 'NOT_AUTHORIZED' });
+  });
+  it('requires the exact persisted input rather than session existence to reconcile a lost receipt', async () => {
+    const store = createAutomationDispatchStore(client);
+    const service = new AutomationDispatchService(store, () => {});
+    const scope = { kind: 'schedule' as const, id: 'schedule-a' };
+    await expect(service.execute({ scope, key: 'lost', operation: 'session_dispatch', targetSessionId: 'lead', payload: { message: 'task' } },
+      async () => { throw Error('response lost'); })).rejects.toMatchObject({ code: 'DISPATCH_UNKNOWN' });
+    const row = (await store.find(scope, 'lost'))!;
+    expect((await reconcileAutomationReceipt(client, row, () => {})).status).toBe('unknown');
+    sqlite.prepare('INSERT INTO messages VALUES (?,?,?,?)').run('wrong', 'other', row.inputId, 'user');
+    expect((await reconcileAutomationReceipt(client, row, () => {})).status).toBe('unknown');
+    sqlite.prepare('INSERT INTO messages VALUES (?,?,?,?)').run('right', 'lead', row.inputId, 'user');
+    const reconciled = await reconcileAutomationReceipt(client, row, () => {});
+    expect(reconciled.status).toBe('accepted');
+    expect(reconciled.wakeKind).toBeNull();
+    expect(reconciled.result).toBeNull();
+  });
+
+  it('replays durable receipt data after constructing a new store instance', async () => {
+    const args = { scope: { kind: 'schedule' as const, id: 'a' }, key: 'key', operation: 'session_dispatch' as const, payload: { message: 'work' } };
+    const original = await new AutomationDispatchService(createAutomationDispatchStore(client), () => {}).execute(args,
+      async row => ({ ok: true, sessionId: row.sessionId, inputId: row.inputId }));
+    const repeated = await new AutomationDispatchService(createAutomationDispatchStore(client), () => {}).execute(args,
+      async () => { throw Error('duplicate model call'); });
+    expect(repeated.result).toEqual(original.result);
+    expect(sqlite.prepare('SELECT count(*) AS count FROM automation_dispatch_receipts').get()).toEqual({ count: 1 });
+  });
+});

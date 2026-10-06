@@ -86,6 +86,7 @@ export interface OrcaMcpDeps {
   /** 启动 multi-worker workflow (只建 team, 不含 worker / initial_task)。 */
   startTeam: (params: {
     leadSessionId: string;
+    resultPolicy?: 'default' | 'event-only';
     workerPermissionMode?: 'auto' | 'bypassPermissions';
   }) => Promise<
     ControlResult<{
@@ -106,6 +107,8 @@ export interface OrcaMcpDeps {
     label: string;
     workingDir?: string;
     initialTask?: string;
+    requestKey?: string;
+    start?: boolean;
   }) => Promise<
     ControlResult<
       { workerId: string; workerSessionId: string; softLimitExceeded?: boolean; dispatched?: boolean; dispatchOutcome?: import('../lizi_xdtHelperMcpServer.js').ControlDispatchOutcome; queuedMessageId?: string },

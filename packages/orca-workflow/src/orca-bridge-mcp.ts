@@ -120,6 +120,7 @@ export interface OrcaWorkerVendorOptions extends Record<string, unknown> {
 }
 
 export interface OrcaBridgeMcpDeps {
+  submitWorkerReport?(input: { workerSessionId: string; workerId: string; report?: unknown }): Promise<{ handled: boolean; event_id?: string }>;
   getMaker: () => Maker;
   logger: Logger;
   persistUserMessage: (
@@ -760,15 +761,27 @@ export function createOrcaWorkerBridgeMcpProvider(deps: OrcaBridgeMcpDeps): McpP
         SEND_TO_LEAD_TOOL_DESCRIPTION,
         {
           message: z.string().min(1),
+          report: z.object({ event_kind: z.enum(['progress', 'checkpoint', 'waiting', 'decision_required', 'verification_required', 'handed_off', 'failed']),
+            work_revision: z.string().min(1).max(180), evidence_revision: z.string().min(1).max(180),
+            payload: z.record(z.string(), z.unknown()), }).optional(),
           worker_id: z.string().min(1).describe('Required. Your assigned worker_id. Find it in the Bridge note at the end of the most recent lead message, or in the system prompt Identity line.'),
           delivery: z
             .enum(['queue', 'steer'])
             .optional()
             .describe('queue (default) = deliver now or queue behind the Lead\'s current turn; steer = try to enter the Lead\'s current turn.'),
         },
-        async ({ message, worker_id, delivery }) => {
+        async ({ message, worker_id, delivery, report }) => {
           const authorization = authorizeSendToLeadCaller(resolveRuntimeMcpContext(ctx));
           if (!authorization.ok) return text(authorization.error, true);
+          if (deps.submitWorkerReport) {
+            const identity = await resolveWorkerLink(deps, ctx, worker_id);
+            if (!identity.ok) return text(identity.error, true);
+            try {
+              const stored = await deps.submitWorkerReport({ workerSessionId: identity.link.workerSessionId,
+                workerId: identity.link.workerId, report });
+              if (stored.handled) return text({ ok: true, ...stored });
+            } catch { return text({ error: 'WORKER_REPORT_REJECTED' }, true); }
+          }
           const resolved = await resolveLead(worker_id);
           if (!resolved.ok) return text(resolved.error, true);
           const { link, entry } = resolved;

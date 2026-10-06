@@ -1,5 +1,17 @@
 # Orca 协同架构与执行单元规划
 
+## 确定性自动化的按事件模式
+
+普通团队维持现有回报行为。自动化可在创建团队时显式选择 `start_team(result_policy="event-only")`：手工 `send_to_lead` 和终态自动补报先持久化结构化事件，不启动 Lead 回合。已有 worker 或创建 reservation 的团队不允许改变策略。
+
+手工事件通过 `send_to_lead.report` 提供 `event_kind/work_revision/evidence_revision/payload`。Host 从当前 Worker 身份绑定 team/session/turn，调用方不能指定另一个 Worker。progress/checkpoint 不结清终态；同一回合的不同种类事件不会相互吞掉，同一最终报告的手工/自动副本去重。普通消息正文不能成为事件模式下的执行指令，结构不完整时保持具体阻塞。
+
+`create_worker` 和批量逐项可指定 `request_key`。Host 在 bootstrap 前持久保留 worker/session/input 身份；同键同内容返回原结果，不重新创建，异内容拒绝。未知结果保留 reservation，不因超时或 TTL 再建一份。`start=false` 只创建休眠 Worker，不发送任务或 ready 占位消息；后续通过原 Orca 派发通道启动，不能用普通 session 发送绕过其 accepted/rollback 语义。
+
+Scheduler 的 `sessions.inspect/dispatch_status/events` 默认拒绝，需逐项授予，仅能访问该 schedule 的持久回执及真实 Orca 后代。inspect 不返回队列正文，且不能把持久化 error 当作实际空闲；运行态与队列均参与发送准入。带 `request_key` 的 dispatch 绑定账号/schedule，真实队列持久化后才返回接收回执。`if_idle/expected_generation/expected_turn_generation` 在入队处复核，目标忙或版本变化时拒绝。
+
+身份记录、运行回合和业务交付是不同状态。负责人回合结束后，Worker 可以继续；在途任务结束前不得用 end_team 休眠负责人，因为 end_team 仍会中止 Worker。幂等回执只能证明 Host 接收，不能证明模型执行完毕、代码通过或 PR 可交付。
+
 > 这是 Orca 的唯一权威文档，覆盖当前实现、设计约束与未来规划。
 >
 > **状态**：权威（authoritative）。

@@ -1,4 +1,8 @@
 import { randomUUID } from 'node:crypto';
+import { getCurrentDbClientSnapshot } from '../localDb/client/current.js';
+import { createAutomationDispatchStore, reconcileAutomationReceipt } from '../localDb/automationDispatchStore.js';
+import { assertScheduleSession, assertScheduleTeam, readScheduleEvents } from '../localDb/automationSessionAccess.js';
+import { AutomationDispatchService } from './automationDispatchService.js';
 import { isAbsolute } from 'node:path';
 
 import type { Schedule, ScriptCapability } from '@cindy/maker-scheduler';
@@ -184,6 +188,9 @@ const SCRIPT_METHOD_CATALOG: ReadonlyArray<{
   { method: 'jira.add_comment', capability: 'jira.comment', params: '{issue_key, body_text | body_adf}', description: '向 Jira issue 添加评论;body_text 纯文本与 body_adf(ADF 文档对象,支持 @mention)恰好二选一' },
   { method: 'feishu.recent_chats', capability: 'feishu.read', params: '{count?≤50}', description: '按活跃时间倒序列最近飞书会话' },
   { method: 'feishu.recent_messages', capability: 'feishu.read', params: '{chat_id, count?≤50, start_time?}', description: '拉指定飞书会话最近消息(新→旧,start_time 增量)' },
+  { method: 'sessions.inspect', capability: 'sessions.inspect', params: '{session_id}', description: '读取本任务所属会话的最小运行状态' },
+  { method: 'sessions.dispatch_status', capability: 'sessions.dispatch_status', params: '{request_key, team_id?}', description: '读取本任务的持久投递回执' },
+  { method: 'sessions.events', capability: 'sessions.events', params: '{team_id, after_seq?, limit?}', description: '读取本任务团队的结构化事件' },
   { method: 'sessions.dispatch', capability: 'sessions.dispatch', params: '{message, title?, target_session_id?}', description: '创建或唤醒 Cindy 会话并投递消息' },
 ];
 
@@ -233,6 +240,9 @@ export class SchedulerScriptCapabilityBroker implements ScriptCapabilityBroker {
         // 元方法,免授权(纯自省、无副作用、不触达外部系统):脚本先 list 再决定怎么 call。
         return {
           protocol: 'cindy-script/1',
+          features: ['lifeline-v2', 'durable-session-dispatch', 'owned-session-inspect', 'orca-event-only', 'dormant-worker-create'],
+          session_create_defaults: { agent_kind: context.schedule.agentKind, model: context.schedule.model ?? null,
+            provider_id: context.schedule.providerId ?? null, effort: context.schedule.effort ?? null },
           granted: [...granted].sort(),
           methods: SCRIPT_METHOD_CATALOG.map((entry) => ({
             ...entry,
@@ -340,8 +350,50 @@ export class SchedulerScriptCapabilityBroker implements ScriptCapabilityBroker {
           ...(startTime === undefined ? {} : { start_time: String(startTime) }),
         }, context.schedule, runId, this.activeScriptCallIds);
       }
+      case 'sessions.inspect':
+      case 'sessions.dispatch_status':
+      case 'sessions.events': {
+        requireCapability(granted, request.method);
+        const snapshot = getCurrentDbClientSnapshot();
+        if (!snapshot) fail('HOST_NOT_READY', 'database unavailable');
+        const scope = { kind: 'schedule' as const, id: context.schedule.id };
+        let result: unknown;
+        if (request.method === 'sessions.dispatch_status') {
+          let receiptScope: { kind: 'schedule' | 'orca_team'; id: string } = scope;
+          if (params.team_id !== undefined) {
+            const id = requireString(params, 'team_id');
+            await assertScheduleTeam(snapshot.client, scope.id, id);
+            receiptScope = { kind: 'orca_team', id };
+          }
+          let row = await createAutomationDispatchStore(snapshot.client).find(receiptScope, requireString(params, 'request_key'));
+          if (row) row = await reconcileAutomationReceipt(snapshot.client, row, () => {
+            if (getCurrentDbClientSnapshot() !== snapshot) fail('HOST_NOT_READY', 'account changed');
+          });
+          result = row ? { request_key: row.requestKey, status: row.status, session_id: row.sessionId,
+            input_id: row.inputId, payload_hash: row.payloadHash, wake_kind: row.wakeKind, error_code: row.errorCode,
+            ...(row.status === 'accepted' && row.result === null && row.wakeKind === null ? { proof_kind: 'persisted-input' } : {}) }
+            : { request_key: params.request_key, status: 'not_found' };
+        } else if (request.method === 'sessions.inspect') {
+          const id = requireString(params, 'session_id');
+          await assertScheduleSession(snapshot.client, scope.id, id);
+          const service = tryGetOrcaCollabService();
+          if (!service) fail('HOST_NOT_READY', 'session service unavailable');
+          result = await service.inspectAutomationSession(id);
+        } else {
+          const after = params.after_seq ?? 0, limit = params.limit ?? 50;
+          if (!Number.isSafeInteger(after) || Number(after) < 0 || !Number.isSafeInteger(limit)
+            || Number(limit) < 1 || Number(limit) > 100) fail('INVALID_ARGS', 'invalid event pagination');
+          result = await readScheduleEvents(snapshot.client, scope.id, requireString(params, 'team_id'), Number(after), Number(limit));
+        }
+        if (getCurrentDbClientSnapshot() !== snapshot) fail('HOST_NOT_READY', 'account changed');
+        return result;
+      }
       case 'sessions.dispatch': {
         requireCapability(granted, 'sessions.dispatch');
+        if (params.if_idle !== undefined && typeof params.if_idle !== 'boolean') fail('INVALID_ARGS', 'if_idle must be boolean');
+        for (const key of ['expected_generation', 'expected_turn_generation']) {
+          if (params[key] !== undefined && (!Number.isSafeInteger(params[key]) || Number(params[key]) < 0)) fail('INVALID_ARGS', 'invalid generation guard');
+        }
         rejectHostOwnedParams(params, [
           'agent_kind',
           'dispatcher_session_id',
@@ -372,7 +424,7 @@ export class SchedulerScriptCapabilityBroker implements ScriptCapabilityBroker {
           || dynamicDefaultRoute?.model
           || defaultModelFor(schedule.agentKind);
         if (!model) fail('PRECONDITION_FAILED', 'Pi has no connected model source');
-        const result = await service.sendToSession({
+        const dispatchParams = {
           targetSessionId: schedule.targetSessionId ?? requestedTarget,
           message: requireString(params, 'message'),
           title: typeof params.title === 'string' ? params.title : undefined,
@@ -384,12 +436,35 @@ export class SchedulerScriptCapabilityBroker implements ScriptCapabilityBroker {
             effort: schedule.effort as DispatchEffort | undefined,
             fastMode: !!schedule.fastMode,
             workingDir: schedule.workingDir ?? '',
-            workspaceKind: 'project',
-            permissionMode: 'bypassPermissions',
+            workspaceKind: 'project' as const,
+            permissionMode: 'bypassPermissions' as const,
           },
-        });
+        };
+        let result;
+        let receiptFields = {};
+        if (params.request_key !== undefined) {
+          const snapshot = getCurrentDbClientSnapshot();
+          if (!snapshot) fail('HOST_NOT_READY', 'database unavailable');
+          const assertCurrent = () => { if (getCurrentDbClientSnapshot() !== snapshot) fail('HOST_NOT_READY', 'account changed'); };
+          const target = dispatchParams.targetSessionId;
+          if (target) await assertScheduleSession(snapshot.client, schedule.id, target);
+          const durable = new AutomationDispatchService(createAutomationDispatchStore(snapshot.client), assertCurrent);
+          const sent = await durable.execute({ scope: { kind: 'schedule', id: schedule.id },
+            key: requireString(params, 'request_key'), operation: 'session_dispatch', targetSessionId: target,
+            payload: dispatchParams }, row => service.sendAutomationInput({ ...dispatchParams,
+              clientId: row.inputId, reservedSessionId: target ? undefined : row.sessionId,
+              scheduleOrigin: { kind: 'scheduler', scheduleId: schedule.id, scheduleName: schedule.name, runId },
+              ifIdle: params.if_idle === true,
+              expectedGeneration: typeof params.expected_generation === 'number' ? params.expected_generation : undefined,
+              expectedTurnGeneration: typeof params.expected_turn_generation === 'number' ? params.expected_turn_generation : undefined,
+            }));
+          result = sent.result;
+          receiptFields = { request_key: sent.receipt.requestKey, input_id: sent.receipt.inputId,
+            payload_hash: sent.receipt.payloadHash, receipt_status: sent.receipt.status };
+        } else result = await service.sendToSession(dispatchParams);
         if (!result.ok) fail(result.errorCode, result.message);
         return {
+          ...receiptFields,
           target_session_id: result.targetSessionId,
           agent_kind: result.agentKind,
           wake_kind: result.wakeKind,

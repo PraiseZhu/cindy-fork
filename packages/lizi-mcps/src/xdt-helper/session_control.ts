@@ -39,6 +39,7 @@ export interface SessionRuntimeProfile {
 }
 
 export interface SessionRuntimeSnapshot extends SessionActivitySnapshot {
+  queuedCount?: number;
   runtimeGeneration?: number;
   baselineProfile?: SessionRuntimeProfile;
   effectiveProfile?: SessionRuntimeProfile;
@@ -380,7 +381,8 @@ export function registerGetSessionRuntimeTool(
       return okPayload({
         session_id: targetSessionId,
         phase: runtime.phase,
-        active: runtime.phase === 'running' || runtime.phase === 'needs-interaction',
+        active: runtime.currentTurnActive === true || runtime.phase === 'running' || runtime.phase === 'needs-interaction',
+        queued_count: runtime.queuedCount ?? null,
         record_status: runtime.recordStatus ?? null,
         source: runtime.source,
         attention: runtime.attention,

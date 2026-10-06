@@ -94,6 +94,17 @@ function setup(opts?: { sessionId?: string | undefined }) {
 }
 
 describe('cindy_helper session control tools', () => {
+  it('does not report an active turn as idle just because its persisted phase is error', async () => {
+    const { deps, registry } = setup();
+    vi.mocked(deps.getSessionRuntime).mockResolvedValue({ ok: true, runtime: {
+      sessionId: 'target-session', phase: 'error', currentTurnActive: true, queuedCount: 1,
+      recordStatus: 'active', attention: true, workflow: null, source: 'persisted', turnGeneration: 2,
+      startedAtMs: null, lastActivityAtMs: null, currentActionSummary: null, gracefulStopState: 'none',
+    } });
+    expect(parse(await registry.call('get_session_runtime', { session_id: 'target-session' })))
+      .toMatchObject({ phase: 'error', active: true, queued_count: 1 });
+  });
+
   it('forwards a complete harness selection and reports the next-send boundary', async () => {
     const { deps, registry } = setup();
     const old = { agentKind: 'claude-code' as const, model: 'claude-fable-5', providerId: null, effort: 'high' as const, fastMode: false };
@@ -335,6 +346,7 @@ describe('cindy_helper session control tools', () => {
       session_id: 'target-session',
       phase: 'running',
       active: true,
+      queued_count: null,
       record_status: 'active',
       source: 'live',
       attention: false,

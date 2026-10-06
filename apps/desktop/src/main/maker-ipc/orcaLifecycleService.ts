@@ -96,6 +96,7 @@ export interface OrcaLifecycleDeps {
   createWorkerInTeam(params: OrcaWorkerCreateInTeamParams, assertCurrent?: () => Promise<void>,
     onCreated?: (assertCreatedCurrent: () => Promise<void>) => void): Promise<OrcaWorkerCreationResult>;
   dispatchWorkerTask(params: {
+    clientId?: string;
     targetSessionId: string;
     message: string;
     dispatchMeta: {
@@ -202,6 +203,7 @@ export function createOrcaLifecycleService(deps: OrcaLifecycleDeps): OrcaLifecyc
   }
 
   async function dispatchInitialTask(params: {
+    clientId?: string;
     workerSessionId: string;
     message: string | undefined;
     context: string;
@@ -221,6 +223,7 @@ export function createOrcaLifecycleService(deps: OrcaLifecycleDeps): OrcaLifecyc
     } : undefined;
     try {
       const result = await deps.dispatchWorkerTask({
+        clientId: params.clientId,
         targetSessionId: params.workerSessionId,
         message: params.message,
         dispatchMeta: {
@@ -271,13 +274,14 @@ export function createOrcaLifecycleService(deps: OrcaLifecycleDeps): OrcaLifecyc
 
     let dispatchResult: DispatchWorkerTaskResult | undefined;
     try {
-      if (initialTask) {
+      if (initialTask && params.start !== false) {
         dispatchResult = await dispatchInitialTask({
+          clientId: params.reservedIdentity?.inputId,
           workerSessionId: created.workerSessionId,
           message: initialTask,
           context: `create_worker/${created.workerSessionId}/initial_task`,
         }, assertCreatedCurrent);
-      } else {
+      } else if (params.start !== false) {
         await deps.sendWorkerReadyPlaceholder({
           workerSessionId: created.workerSessionId,
           agentKind: created.resolved.agent,

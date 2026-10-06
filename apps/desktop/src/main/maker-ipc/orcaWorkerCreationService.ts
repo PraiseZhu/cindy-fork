@@ -181,6 +181,8 @@ export type OrcaWorkerCreationResult =
 
 /** 普通 create_worker 入参，已由 IPC/MCP adapter 做过粗校验。 */
 export interface OrcaWorkerCreateParams {
+  start?: boolean;
+  reservedIdentity?: { workerId: string; sessionId: string; inputId: string };
   leadSessionId: string;
   role: string;
   agent: AgentKind;
@@ -1011,7 +1013,7 @@ export function createOrcaWorkerCreationService(deps: OrcaWorkerCreationDeps): O
         ),
       };
     }
-    const workerId = deps.createId();
+    const workerId = params.reservedIdentity?.workerId ?? deps.createId();
     let reservation:
       | { ok: true; occupiedSlotsBefore: number }
       | { ok: false; errorCode: 'DUPLICATE_LABEL' | 'WORKER_CREATION_IN_PROGRESS' | 'WORKER_LIMIT_HARD_EXCEEDED' };
@@ -1066,7 +1068,7 @@ export function createOrcaWorkerCreationService(deps: OrcaWorkerCreationDeps): O
       if (reservedPlanLimit != null && reservation.occupiedSlotsBefore >= reservedPlanLimit) {
         return { ok: false, errorCode: 'WORKER_LIMIT_HARD_EXCEEDED', message: 'Registered plan concurrency reached' };
       }
-      const workerSessionId = deps.createSessionId();
+      const workerSessionId = params.reservedIdentity?.sessionId ?? deps.createSessionId();
       const workerVendorOptions = {
         orcaRole: 'worker' as const,
         orcaWorkflowId: params.teamId,

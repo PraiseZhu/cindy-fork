@@ -1,3 +1,6 @@
+import { submitOrcaWorkerReport, autoReport } from './orcaReportService.js';
+import { AutomationDispatchService, AutomationDispatchError } from '../scheduler-host/automationDispatchService.js';
+import { createAutomationDispatchStore } from '../localDb/automationDispatchStore.js';
 import { openSession, setSessionOpeningModelAdmission } from '../localDb/sessionOpening.js';
 import { createPluginTaskReviewResolver } from './pluginTaskReviewContext.js';
 import { isPluginTaskPermissionAllowed, assertPluginTaskResult, createPluginTaskService, readPluginTaskPlanReceipt, PluginTaskError, type PluginTaskService } from './pluginTaskService.js';
@@ -1861,6 +1864,12 @@ type SendToSessionInternalResult =
 
 /** 暴露给 xdt-helper MCP provider 的协同控制面，必须复用 IPC 同源业务路径。 */
 interface OrcaCollabService {
+  inspectAutomationSession: (sessionId: string) => Promise<Record<string, unknown>>;
+  sendAutomationInput: (params: Parameters<OrcaCollabService['sendToSession']>[0] & {
+    clientId: string; reservedSessionId?: string; ifIdle?: boolean;
+    scheduleOrigin: Extract<NonNullable<AgentInputQueuedMessage['origin']>, { kind: 'scheduler' }>;
+    expectedGeneration?: number; expectedTurnGeneration?: number;
+  }) => Promise<SendToSessionInternalResult>;
   listSessionQueue: (
     sessionId: string,
   ) => Promise<
@@ -2029,6 +2038,7 @@ interface OrcaCollabService {
   /** start_team 只建立 team，不隐式创建 worker。 */
   startTeam: (params: {
     leadSessionId: string;
+    resultPolicy?: 'default' | 'event-only';
     workerPermissionMode?: OrcaWorkerPermissionMode;
   }) => Promise<
     | { ok: true; teamId: string; workerPermissionMode: OrcaWorkerPermissionMode; reused?: boolean }
@@ -2046,6 +2056,8 @@ interface OrcaCollabService {
     label: string;
     workingDir?: string;
     initialTask?: string;
+    requestKey?: string;
+    start?: boolean;
   }) => Promise<
     | {
         ok: true;
@@ -9231,6 +9243,8 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     message: string;
     persistedContent?: string;
     clientId?: string;
+    reservedSessionId?: string;
+    automationGuard?: () => void;
     dispatcherSessionId?: string;
     title?: string;
     useWorktree?: boolean;
@@ -9466,7 +9480,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
         }
         const newTitle = title?.trim() || message.split('\n')[0].slice(0, 60);
         const createOpts = buildCreateOptsWithStderr({
-          ...(handoffWorktree ? { id: handoffWorktree.sessionId } : {}),
+          ...(handoffWorktree ? { id: handoffWorktree.sessionId } : params.reservedSessionId ? { id: params.reservedSessionId } : {}),
           agentKind: inherited.agentKind,
           workspaceKind: inherited.workspaceKind,
           workingDir: handoffWorktree ? handoffWorktree.meta.path : inherited.workingDir,
@@ -9507,7 +9521,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
             });
           }
         }
-        const clientId = createId();
+        const clientId = explicitClientId ?? createId();
         createdPreviewSessionId = session.id;
         createdPreviewClientId = clientId;
         const sendResult = await sendUserMessageWithAwaitedGitBaseline(session, message, clientId, {
@@ -9633,6 +9647,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       // 失败时 shouldQueueNewTurn 仍返回 true(未恢复即入队),消息不丢。
       lockStage = 'queue-restore';
       await inputCoordinator.ensureQueueRestored(targetSessionId).catch(() => undefined);
+      params.automationGuard?.();
       // Private messages and authorization continuations use the durable coordinator, including an idle
       // recipient. This preserves input provenance and one recovery/dispatch path.
       // Pending selections also need the canonical send transaction: it consumes the intent,
@@ -9642,6 +9657,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
         lockStage = 'enqueue-queued-message';
         const qClientId = explicitClientId ?? createId();
         await enqueueSendToSessionMessage({
+          automationGuard: params.automationGuard,
           targetSessionId,
           message,
           persistedContent: persistedContent ?? message,
@@ -11560,6 +11576,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
 
   async function enqueueSendToSessionMessage(params: {
     targetSessionId: string;
+    automationGuard?: () => void;
     inheritTargetPlanMode?: boolean;
     message: string;
     persistedContent: string;
@@ -11576,6 +11593,8 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     authorizationGuard?: BotAuthorizationInputGuard;
   }): Promise<void> {
     const queued = await buildSessionControlInputItem(params);
+    await inputCoordinator.ensureQueueRestored(params.targetSessionId);
+    params.automationGuard?.();
     if (params.onAccepted) {
       orcaInterAgentDispatcher.registerQueuedOrcaInterAgentAcceptedCallback(
         params.clientId,
@@ -11589,7 +11608,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     }
     // 崩溃恢复排序:确保先读回持久化队列再追加本条(见 ensureQueueRestored)。
     // 失败时 enqueue 照常入队(shouldQueueNewTurn 已守住不会直发)。
-    await inputCoordinator.ensureQueueRestored(params.targetSessionId).catch(() => undefined);
+
     if (params.authorizationGuard) {
       await commitBotAuthorizationInput(params.authorizationGuard, () => {
         inputCoordinator.enqueue(params.targetSessionId, queued);
@@ -12222,6 +12241,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       getAgentIslandService()?.notifyQueueEmptied(leadSessionId);
     },
     dispatchWorkerMessage: async ({
+      clientId, admission, origin,
       targetSessionId,
       message,
       workerId,
@@ -12232,6 +12252,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       onAcceptedCommit,
     }) => {
       const result = await dispatchOrEnqueueOrcaInterAgentMessage({
+        clientId, admission, origin,
         targetSessionId,
         rawContent: message,
         source: 'lead',
@@ -12360,6 +12381,12 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       inputCoordinator.mergeQueuedMessagesAtomically(sessionId, clientIds, buildReplacement).merged,
     steerStoredQueuedMessage: steerStoredControlMessage,
     moveQueuedMessage: moveStoredControlMessage,
+    persistAutoReport: async (sessionId, turn) => {
+      const result = await submitOrcaWorkerReport({ workerSessionId: sessionId,
+        turnGeneration: maker.getSession(sessionId)?.getTurnGeneration() ?? 0,
+        source: 'auto', report: autoReport(turn.finalText), failed: turn.status === 'error' });
+      return result.handled;
+    },
     sendAutoBridgeToLead: async (leadSessionId, message, workerId) => {
       const result = await dispatchInterAgentMessage({
         targetSessionId: leadSessionId,
@@ -13520,8 +13547,14 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       const activity = await readCanonicalSessionActivity(sessionId);
       const turnControl = maker.getSession(sessionId)?.getTurnControlSnapshot();
       const botFallback = await readBotFallbackCandidate(sessionId, profiles.effective);
+      const counts = await resolveSessionQueueCounts([sessionId], {
+        getLiveQueue: (id) => inputCoordinator.getQueueInspectionIfRestored(id),
+        loadPersistedCounts: loadAgentInputQueueSnapshotCounts,
+      });
       return {
         ...activity,
+        currentTurnActive: activity.currentTurnActive === true || isSessionTurnDispatchBoundaryBusy(sessionTurnActivityTracker, sessionId, getStableSessionForTurnBoundary(sessionId)),
+        queuedCount: counts[sessionId] ?? 0,
         turnGeneration: turnControl?.turnGeneration ?? null,
         gracefulStopState: turnControl?.gracefulStopState ?? 'none',
         runtimeGeneration: profiles.control.generation,
@@ -13748,6 +13781,66 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     stopSessionTurn: (params) => sessionControlService.stopSessionTurn(params),
     getSessionRuntime: (params) => sessionControlService.getSessionRuntime(params),
     setSessionRuntime: (params) => sessionControlService.setSessionRuntime(params),
+    inspectAutomationSession: async (sessionId) => {
+      const result = await sessionControlService.getSessionRuntime({ targetSessionId: sessionId });
+      if (!result.ok) throwIpcError(result.errorCode, result.message);
+      await inputCoordinator.ensureQueueRestored(sessionId);
+      if (!inputCoordinator.isQueueRestored(sessionId)) throw new AutomationDispatchError('HOST_NOT_READY');
+      const live = getStableSessionForTurnBoundary(sessionId);
+      const active = isSessionTurnDispatchBoundaryBusy(sessionTurnActivityTracker, sessionId, live);
+      const queue = inputCoordinator.getQueueInspection(sessionId);
+      const r = result.runtime;
+      const metadata = await maker.getSessionMeta(sessionId);
+      const team = await readActiveOrcaTeamByLeadReadOnly(sessionId);
+      const parent = await getWorkerLink({ workerSessionId: sessionId });
+      const workers = team ? await listWorkersByLead(sessionId) : [];
+      return { session_id: sessionId, phase: active ? 'running' : r.phase, active,
+        record_status: r.recordStatus ?? 'active', generation: r.runtimeGeneration, working_dir: metadata?.workDir ?? null,
+        turn_generation: live?.getTurnGeneration() ?? r.turnGeneration,
+        effective: { harness: r.effectiveProfile.agentKind, model: r.effectiveProfile.model,
+          provider_id: r.effectiveProfile.providerId, effort: r.effectiveProfile.effort },
+        queued_count: queue.length, queued_input_ids: queue.map(item => item.queuedMessageId),
+        consuming: queue.some(item => item.consuming), team_id: team?.id ?? parent?.teamId ?? null,
+        worker_id: parent?.workerId ?? null, lead_session_id: parent?.leadSessionId ?? null,
+        workers: workers.map(w => ({ worker_id: w.id, session_id: w.sessionId, status: w.status })),
+        observed_at: new Date().toISOString() };
+    },
+    sendAutomationInput: async (params) => {
+      const owner = getCurrentDbClientSnapshot();
+      const id = params.targetSessionId;
+      const guardOwner = () => { if (!owner || getCurrentDbClientSnapshot() !== owner) throw new AutomationDispatchError('HOST_NOT_READY'); };
+      const guard = () => {
+        if (!owner || getCurrentDbClientSnapshot() !== owner) throw new AutomationDispatchError('HOST_NOT_READY');
+        if (!id) return;
+        const live = getStableSessionForTurnBoundary(id);
+        if (params.expectedGeneration !== undefined && getSessionRuntimeControlSnapshot(id).generation !== params.expectedGeneration)
+          throw new AutomationDispatchError('STATE_CHANGED');
+        if (params.expectedTurnGeneration !== undefined && live?.getTurnGeneration() !== params.expectedTurnGeneration)
+          throw new AutomationDispatchError('STATE_CHANGED');
+        if (params.ifIdle && (isSessionTurnDispatchBoundaryBusy(sessionTurnActivityTracker, id, live)
+          || inputCoordinator.shouldQueueNewTurn(id) || inputCoordinator.getQueueInspection(id).length
+          || hasPendingAgentInteractionForSession(id))) throw new AutomationDispatchError('TARGET_BUSY');
+      };
+      if (id) await inputCoordinator.ensureQueueRestored(id);
+      guard();
+      const link = id ? await getWorkerLink({ workerSessionId: id }) : null;
+      guard();
+      if (link && id) {
+        const sent = await orcaTeamService.dispatchWorkerTask({ targetSessionId: id, message: params.message,
+          clientId: params.clientId, admission: guard, origin: params.scheduleOrigin,
+          dispatchMeta: { source: 'scheduler', context: 'automation/' + params.clientId } });
+        await awaitAgentInputQueueSnapshotPersistence(id);
+        guardOwner();
+        if (!sent.dispatched && !sent.queued) return { ok: false, errorCode: 'INTERNAL', message: 'worker dispatch unconfirmed' };
+        return { ok: true, targetSessionId: id, agentKind: sent.agentKind, wakeKind: sent.wakeKind === 'steered' ? 'already-active' : sent.wakeKind,
+          targetTitle: sent.targetTitle, targetLastUserSendAt: sent.targetLastUserSendAt };
+      }
+      const result = await sendToSessionInternal({ ...params, automationGuard: guard, forceQueue: !!id, origin: params.scheduleOrigin, autoReviewUserText: { kind: 'delegated-continuation' } });
+      if (result.ok) await awaitAgentInputQueueSnapshotPersistence(result.targetSessionId);
+      else if (id) await awaitAgentInputQueueSnapshotPersistence(id);
+      guardOwner();
+      return result;
+    },
     sendToSession: sendToSessionInternal,
     enableOrca: enableOrcaInternal,
     disableOrca: disableOrcaInternal,
@@ -13763,11 +13856,41 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     mergeWorkerQueuedMessages: (params) => orcaTeamService.mergeWorkerQueuedMessages(params),
     steerWorkerQueuedMessage: (params) => orcaTeamService.steerWorkerQueuedMessage(params),
     moveWorkerQueuedMessage: (params) => orcaTeamService.moveWorkerQueuedMessage(params),
-    startTeam: ({ leadSessionId, workerPermissionMode }) => startOrcaTeamForCaller(leadSessionId, workerPermissionMode),
+    startTeam: async ({ leadSessionId, workerPermissionMode, resultPolicy }) => {
+      const owner = getCurrentDbClientSnapshot();
+      if (!owner) throw new AutomationDispatchError('HOST_NOT_READY');
+      const result = await startOrcaTeamForCaller(leadSessionId, workerPermissionMode);
+      if (result.ok && resultPolicy !== undefined) {
+        if (getCurrentDbClientSnapshot() !== owner) throw new AutomationDispatchError('HOST_NOT_READY');
+        const [team] = await owner.client.drizzle.select().from(orcaTeams).where(eq(orcaTeams.id, result.teamId)).limit(1);
+        if (!team) throw new AutomationDispatchError('HOST_NOT_READY');
+        if (team.resultPolicy !== resultPolicy) {
+          const [worker] = await owner.client.drizzle.select({ id: orcaWorkers.id }).from(orcaWorkers).where(eq(orcaWorkers.teamId, result.teamId)).limit(1);
+          if (worker) return { ok: false, errorCode: 'STATE_CHANGED', message: 'cannot change report policy after worker creation' };
+          const changed = await owner.client.drizzle.update(orcaTeams).set({ resultPolicy }).where(and(eq(orcaTeams.id, result.teamId),
+            eq(orcaTeams.resultPolicy, team.resultPolicy),
+            sql`NOT EXISTS (SELECT 1 FROM orca_workers WHERE team_id = ${result.teamId})`,
+            sql`NOT EXISTS (SELECT 1 FROM orca_worker_creation_reservations WHERE team_id = ${result.teamId})`)).returning({ id: orcaTeams.id });
+          if (changed.length !== 1) throw new AutomationDispatchError('STATE_CHANGED');
+        }
+      }
+      return result;
+    },
     createWorker: async (params) => {
       try {
         await assertLeadCollabProjectEnabled(params.leadSessionId);
-        return await orcaLifecycleService.createWorker(params);
+        if (!params.requestKey) return await orcaLifecycleService.createWorker(params);
+        if (params.start !== false && !params.initialTask?.trim()) return { ok: false, errorCode: 'INVALID_PARAMS', message: 'durable creation requires initial_task' };
+        const owner = getCurrentDbClientSnapshot();
+        if (!owner) throw new AutomationDispatchError('HOST_NOT_READY');
+        const team = await readActiveOrcaTeamByLeadReadOnly(params.leadSessionId);
+        if (!team) return { ok: false, errorCode: 'NOT_FOUND', message: 'no active team' };
+        const assertCurrent = () => { if (getCurrentDbClientSnapshot() !== owner) throw new AutomationDispatchError('HOST_NOT_READY'); };
+        const durable = new AutomationDispatchService(createAutomationDispatchStore(owner.client), assertCurrent);
+        const sent = await durable.execute({ scope: { kind: 'orca_team', id: team.id }, key: params.requestKey,
+          operation: 'create_worker', payload: params, teamId: team.id }, receipt => orcaLifecycleService.createWorker({ ...params,
+            reservedIdentity: { workerId: receipt.workerId!, sessionId: receipt.sessionId, inputId: receipt.inputId } }));
+        return sent.result;
       } catch (err) {
         return {
           ok: false,

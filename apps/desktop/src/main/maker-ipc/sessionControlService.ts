@@ -48,6 +48,7 @@ export type SessionStopResult =
   | Failure<'NOT_FOUND' | 'UNSUPPORTED_CAPABILITY'>;
 
 export interface SessionRuntimeDetails extends SessionActivitySnapshot {
+  queuedCount?: number;
   runtimeGeneration: number;
   baselineProfile: SessionRuntimeProfile;
   effectiveProfile: SessionRuntimeProfile;

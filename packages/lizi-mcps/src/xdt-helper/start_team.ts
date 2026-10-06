@@ -21,6 +21,7 @@ export interface StartTeamDeps {
   };
   startTeam: (params: {
     leadSessionId: string;
+    resultPolicy?: 'default' | 'event-only';
     workerPermissionMode?: 'auto' | 'bypassPermissions';
   }) => Promise<
     ControlResult<{
@@ -48,6 +49,7 @@ export function registerStartTeamTool(
     category: 'control',
     description: DESCRIPTION,
     inputShape: {
+      result_policy: z.enum(['default', 'event-only']).optional().describe('event-only persists worker reports without waking the lead.'),
       worker_permission_mode: z
         .enum(['auto', 'bypassPermissions'])
         .optional()
@@ -55,7 +57,7 @@ export function registerStartTeamTool(
           'Worker 创建默认权限。省略时沿用已保存偏好；没有保存过偏好时初始为 bypassPermissions，但可显式选择 auto，手动选择后 UI 与后续 create_worker/create_workers 都沿用该模式。当前 session 已是 Lead 时须显式指定才能更新默认值。',
         ),
     },
-    handler: async ({ worker_permission_mode }) => {
+    handler: async ({ worker_permission_mode, result_policy }) => {
       const ctx = deps.getSessionContext?.() ?? deps;
       if (!ctx.sessionId) {
         return errorPayload(
@@ -80,6 +82,7 @@ export function registerStartTeamTool(
       const result = await deps.startTeam({
         leadSessionId: ctx.sessionId,
         workerPermissionMode: worker_permission_mode,
+        resultPolicy: result_policy,
       });
       if (!result.ok) {
         if (
