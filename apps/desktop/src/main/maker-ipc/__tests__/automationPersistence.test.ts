@@ -98,6 +98,28 @@ describe('automation persistence boundaries', () => {
     expect(reconciled.result).toBeNull();
   });
 
+  it('bounds event pages by encoded bytes so valid reports cannot overflow the script protocol', async () => {
+    const service = new AutomationDispatchService(createAutomationDispatchStore(client), () => {});
+    await service.execute({ scope: { kind: 'schedule', id: 'schedule-a' }, key: 'a', operation: 'session_dispatch', targetSessionId: 'lead', payload: {} }, async () => ({ ok: true }));
+    for (let i = 0; i < 32; i++) await submitOrcaWorkerReport({ ...input, turnGeneration: i, source: 'manual', report: {
+      ...report('progress'), payload: { workId: 'work-1', evidenceRefs: Array.from({ length: 4 }, (_, n) => ({ path: '/' + 'x'.repeat(3000) + n, sha256: 'a'.repeat(64) })) },
+    } });
+    const page = await readScheduleEvents(client, 'schedule-a', 'team', 0, 50);
+    expect(Buffer.byteLength(JSON.stringify(page))).toBeLessThan(256 * 1024);
+    expect(page.has_more).toBe(true);
+    expect(page.events.length).toBeGreaterThan(0);
+    const ids = new Set(page.events.map(e => e.event_id));
+    let current = page;
+    while (current.has_more) {
+      const next = await readScheduleEvents(client, 'schedule-a', 'team', current.next_seq, 50);
+      expect(next.next_seq).toBeGreaterThan(current.next_seq);
+      expect(Buffer.byteLength(JSON.stringify(next))).toBeLessThan(256 * 1024);
+      for (const event of next.events) ids.add(event.event_id);
+      current = next;
+    }
+    expect(ids.size).toBe(32);
+  });
+
   it('replays durable receipt data after constructing a new store instance', async () => {
     const args = { scope: { kind: 'schedule' as const, id: 'a' }, key: 'key', operation: 'session_dispatch' as const, payload: { message: 'work' } };
     const original = await new AutomationDispatchService(createAutomationDispatchStore(client), () => {}).execute(args,

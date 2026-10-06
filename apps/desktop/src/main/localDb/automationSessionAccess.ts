@@ -24,11 +24,19 @@ export async function readScheduleEvents(db: DbClient, scheduleId: string, teamI
   await assertScheduleSession(db, scheduleId, team.leadSessionId);
   const rows = await db.drizzle.select().from(orcaWorkerEvents).where(and(eq(orcaWorkerEvents.teamId, teamId),
     gt(orcaWorkerEvents.seq, after))).orderBy(asc(orcaWorkerEvents.seq)).limit(limit + 1);
-  const events = rows.slice(0, limit).map(row => ({ seq: row.seq, event_id: row.eventId,
-    logical_report_id: row.logicalReportId, team_id: row.teamId, worker_id: row.workerId,
-    session_id: row.sessionId, turn_generation: row.turnGeneration, event_kind: row.eventKind,
-    work_revision: row.workRevision, evidence_revision: row.evidenceRevision, report: JSON.parse(row.report) }));
-  return { events, next_seq: events.at(-1)?.seq ?? after, has_more: rows.length > limit };
+  const events = [];
+  let bytes = 0;
+  for (const row of rows.slice(0, limit)) {
+    const event = { seq: row.seq, event_id: row.eventId,
+      logical_report_id: row.logicalReportId, team_id: row.teamId, worker_id: row.workerId,
+      session_id: row.sessionId, turn_generation: row.turnGeneration, event_kind: row.eventKind,
+      work_revision: row.workRevision, evidence_revision: row.evidenceRevision, report: JSON.parse(row.report) };
+    const size = Buffer.byteLength(JSON.stringify(event));
+    if (bytes + size > 128 * 1024) break;
+    events.push(event); bytes += size;
+  }
+  if (rows.length && !events.length) throw new AutomationDispatchError('EVENT_TOO_LARGE');
+  return { events, next_seq: events.at(-1)?.seq ?? after, has_more: rows.length > events.length };
 }
 
 export async function assertScheduleTeam(db: DbClient, scheduleId: string, teamId: string): Promise<void> {
