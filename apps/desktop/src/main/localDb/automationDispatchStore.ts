@@ -1,6 +1,8 @@
 import { and, eq, inArray } from 'drizzle-orm';
+import { readInputDeliveryReceipts } from './agentInputQueueSnapshots.js';
+import { getCurrentDbClientSnapshot } from './client/current.js';
 import type { DbClient } from './client/DbClient.js';
-import { automationDispatchReceipts, messages, orcaWorkers, sessions } from './schema.js';
+import { automationDispatchReceipts, orcaWorkers, sessions } from './schema.js';
 import type { AutomationReceipt, AutomationReceiptStore, DispatchPrincipal } from '../scheduler-host/automationDispatchService.js';
 
 export function createAutomationDispatchStore(client: DbClient): AutomationReceiptStore {
@@ -22,7 +24,8 @@ export function createAutomationDispatchStore(client: DbClient): AutomationRecei
     save: async row => {
       const changed = await client.drizzle.update(table).set({ status: row.status, wakeKind: row.wakeKind,
         errorCode: row.errorCode, result: row.result, updatedAt: row.updatedAt })
-        .where(and(eq(table.id, row.id), eq(table.payloadHash, row.payloadHash), eq(table.status, 'reserved')))
+        .where(and(eq(table.id, row.id), eq(table.payloadHash, row.payloadHash), inArray(table.status, row.status === 'accepted' || row.status === 'queued'
+          ? ['reserved', 'unknown', 'accepted', 'queued'] : ['reserved', 'unknown'])))
         .returning({ id: table.id });
       if (changed.length !== 1) throw new Error('DISPATCH_RECEIPT_CHANGED');
     },
@@ -39,17 +42,24 @@ export async function reconcileAutomationReceipt(client: DbClient, row: Automati
       eq(orcaWorkers.id, row.workerId ?? ''), eq(orcaWorkers.teamId, row.teamId ?? ''), eq(orcaWorkers.sessionId, row.sessionId))).limit(1);
     if (worker) result = { ok: true, workerId: worker.id, workerSessionId: row.sessionId, dispatched: false };
   } else {
-    const [input] = await client.drizzle.select({ id: messages.id, agentKind: sessions.agentKind }).from(messages)
-      .innerJoin(sessions, eq(sessions.id, messages.sessionId)).where(and(eq(messages.sessionId, row.sessionId),
-        eq(messages.clientId, row.inputId), eq(messages.role, 'user'))).limit(1);
-    if (input) result = { ok: true, targetSessionId: row.sessionId,
-      agentKind: input.agentKind === 'cc' ? 'claude-code' : input.agentKind, wakeKind: null,
-      targetTitle: null, targetLastUserSendAt: null };
+    // Use the same queue -> history transfer order and validation as recovery.
+    if (getCurrentDbClientSnapshot()?.client !== client) throw new Error('HOST_NOT_READY');
+    const [delivery] = await readInputDeliveryReceipts(row.sessionId, [row.inputId]);
+    assertCurrent();
+    const [session] = await client.drizzle.select({ agentKind: sessions.agentKind }).from(sessions)
+      .where(eq(sessions.id, row.sessionId)).limit(1);
+    if (session && (delivery.state === 'accepted' || delivery.state === 'pending')) {
+      result = { ok: true, targetSessionId: row.sessionId,
+        agentKind: session.agentKind === 'cc' ? 'claude-code' : session.agentKind,
+        wakeKind: delivery.state === 'pending' ? 'queued' : null,
+        targetTitle: null, targetLastUserSendAt: null };
+    }
   }
   assertCurrent();
   if (!result) return row;
-  const next = { status: 'accepted' as const, wakeKind: null,
-    result: row.operation === 'session_dispatch' ? null : JSON.stringify(result), updatedAt: Date.now() };
+  const next = { status: result.wakeKind === 'queued' ? 'queued' as const : 'accepted' as const,
+    wakeKind: result.wakeKind === 'queued' ? 'queued' : null, errorCode: null,
+    result: JSON.stringify(result), updatedAt: Date.now() };
   const table = automationDispatchReceipts;
   await client.drizzle.update(table).set(next).where(and(eq(table.id, row.id), eq(table.payloadHash, row.payloadHash),
     inArray(table.status, ['reserved', 'unknown'])));

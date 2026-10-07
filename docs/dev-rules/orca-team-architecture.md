@@ -4,7 +4,7 @@
 
 普通团队维持现有回报行为。自动化可在创建团队时显式选择 `start_team(result_policy="event-only")`：手工 `send_to_lead` 和终态自动补报先持久化结构化事件，不启动 Lead 回合。已有 worker 或创建 reservation 的团队不允许改变策略。
 
-手工事件通过 `send_to_lead.report` 提供 `event_kind/work_revision/evidence_revision/payload`。Host 从当前 Worker 身份绑定 team/session/turn，调用方不能指定另一个 Worker。progress/checkpoint 不结清终态；同一回合的不同种类事件不会相互吞掉，同一最终报告的手工/自动副本去重。普通消息正文不能成为事件模式下的执行指令，结构不完整时保持具体阻塞。
+手工事件通过 `send_to_lead.report` 提供 `event_kind/work_revision/evidence_revision/payload`。Host 从当前 Worker 身份绑定 team/session/turn，调用方不能指定另一个 Worker。progress/checkpoint 不结清终态；同一回合的不同种类事件不会相互吞掉，同一最终报告的手工/自动副本去重。回合身份包含 Host 的 session instanceId 和 turnGeneration，恢复后的新实例不复用旧回合；logical_report_id 标识此回合组，event_id 再绑定报告种类及版本。Host 的失败终态另记 failed，合法正文不覆盖实际失败。普通消息正文不能成为事件模式下的执行指令，结构不完整时保持具体阻塞。
 
 `create_worker` 和批量逐项可指定 `request_key`。Host 在 bootstrap 前持久保留 worker/session/input 身份；同键同内容返回原结果，不重新创建，异内容拒绝。未知结果保留 reservation，不因超时或 TTL 再建一份。`start=false` 只创建休眠 Worker，不发送任务或 ready 占位消息；后续通过原 Orca 派发通道启动，不能用普通 session 发送绕过其 accepted/rollback 语义。
 

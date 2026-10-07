@@ -44,6 +44,7 @@ export async function submitOrcaWorkerReport(input: {
   workerSessionId: string;
   workerId?: string;
   turnGeneration: number;
+  sessionInstanceId: string;
   source: 'manual' | 'auto';
   report?: unknown;
   failed?: boolean;
@@ -59,23 +60,28 @@ export async function submitOrcaWorkerReport(input: {
   if (!link || link.policy !== 'event-only') return { handled: false };
   if (link.teamStatus !== 'active' || link.sessionStatus !== 'active'
     || (input.workerId && input.workerId !== link.workerId)) throw new AutomationDispatchError('NOT_AUTHORIZED');
-  if (!Number.isSafeInteger(input.turnGeneration) || input.turnGeneration < 0) throw new AutomationDispatchError('REPORT_SCHEMA_MISSING');
+  if (!input.sessionInstanceId || !Number.isSafeInteger(input.turnGeneration) || input.turnGeneration < 0) throw new AutomationDispatchError('REPORT_SCHEMA_MISSING');
+  // The in-memory generation restarts at zero whenever this session is restored.
+  const turnId = dispatchHash([link.teamId, link.workerId, input.sessionInstanceId, input.turnGeneration]);
   let report: WorkerReport;
   try { report = parseWorkerReport(input.report); }
   catch (error) {
     if (input.source === 'manual') throw error;
     const [final] = await db.select({ id: orcaWorkerEvents.eventId }).from(orcaWorkerEvents).where(and(
-      eq(orcaWorkerEvents.workerId, link.workerId), eq(orcaWorkerEvents.turnGeneration, input.turnGeneration),
+      eq(orcaWorkerEvents.logicalReportId, turnId),
       eq(orcaWorkerEvents.eventKind, 'handed_off'))).limit(1);
     if (final && !input.failed) return { handled: true, event_id: final.id };
     report = { event_kind: input.failed ? 'failed' : 'checkpoint',
       work_revision: 'unreported', evidence_revision: `turn-${input.turnGeneration}`,
       payload: { reasonCode: input.failed ? 'WORKER_TURN_FAILED' : 'REPORT_SCHEMA_MISSING' } };
   }
-  const logical = dispatchHash([link.teamId, link.workerId, input.turnGeneration,
+  // Host terminal failure is authoritative even when the final text is valid JSON.
+  if (input.source === 'auto' && input.failed) report = { ...report, event_kind: 'failed',
+    payload: { ...report.payload, reasonCode: 'WORKER_TURN_FAILED' } };
+  const logical = dispatchHash([turnId,
     report.event_kind, report.work_revision, report.evidence_revision]);
   if (getCurrentDbClientSnapshot() !== owner) throw new AutomationDispatchError('HOST_NOT_READY');
-  await db.insert(orcaWorkerEvents).values({ eventId: logical, logicalReportId: logical,
+  await db.insert(orcaWorkerEvents).values({ eventId: logical, logicalReportId: turnId,
     teamId: link.teamId, workerId: link.workerId, sessionId: input.workerSessionId,
     turnGeneration: input.turnGeneration, eventKind: report.event_kind,
     workRevision: report.work_revision, evidenceRevision: report.evidence_revision,

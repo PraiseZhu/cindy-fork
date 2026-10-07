@@ -12384,6 +12384,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     persistAutoReport: async (sessionId, turn) => {
       const result = await submitOrcaWorkerReport({ workerSessionId: sessionId,
         turnGeneration: maker.getSession(sessionId)?.getTurnGeneration() ?? 0,
+        sessionInstanceId: maker.getSession(sessionId)?.instanceId ?? '',
         source: 'auto', report: autoReport(turn.finalText), failed: turn.status === 'error' });
       return result.handled;
     },

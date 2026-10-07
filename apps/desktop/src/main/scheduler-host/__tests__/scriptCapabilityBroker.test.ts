@@ -392,6 +392,15 @@ describe('SchedulerScriptCapabilityBroker', () => {
     ).rejects.toMatchObject({ code: 'METHOD_NOT_FOUND' });
   });
 
+  it.each([{ if_idle: true }, { expected_generation: 0 }, { expected_turn_generation: 1 }])(
+    'rejects unkeyed dispatch guards instead of silently ignoring them: %j', async guard => {
+      await expect(new SchedulerScriptCapabilityBroker().call(
+        { method: 'sessions.dispatch', params: { message: 'task', ...guard } },
+        new Set(['sessions.dispatch']), { schedule: schedule() },
+      )).rejects.toMatchObject({ code: 'INVALID_ARGS' });
+      expect(sendToSessionMock).not.toHaveBeenCalled();
+    });
+
   it('uses the bound owner for omitted dispatch targets and rejects another target', async () => {
     sendToSessionMock.mockResolvedValue({ ok: true, targetSessionId: 'owner', agentKind: 'codex', wakeKind: 'queued' });
     const broker = new SchedulerScriptCapabilityBroker();

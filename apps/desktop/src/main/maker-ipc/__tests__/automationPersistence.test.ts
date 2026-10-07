@@ -18,7 +18,8 @@ describe('automation persistence boundaries', () => {
     sqlite.exec(`CREATE TABLE migration_meta(key TEXT PRIMARY KEY,value TEXT);
       CREATE TABLE migration_history(seq INTEGER PRIMARY KEY,file_name TEXT,content_hash TEXT,applied_at INTEGER);
       CREATE TABLE sessions(id TEXT PRIMARY KEY,status TEXT NOT NULL,agent_kind TEXT NOT NULL DEFAULT 'codex');
-      CREATE TABLE messages(id TEXT PRIMARY KEY,session_id TEXT,client_id TEXT,role TEXT);
+      CREATE TABLE messages(id TEXT PRIMARY KEY,session_id TEXT,client_id TEXT,role TEXT,rewind_at INTEGER);
+      CREATE TABLE agent_input_queue_snapshots(session_id TEXT PRIMARY KEY,payload TEXT);
       CREATE TABLE orca_teams(id TEXT PRIMARY KEY,lead_session_id TEXT,status TEXT);
       CREATE TABLE orca_workers(id TEXT PRIMARY KEY,team_id TEXT,session_id TEXT);
       INSERT INTO sessions(id,status) VALUES ('lead','active'),('worker','active'),('other','active');
@@ -33,7 +34,7 @@ describe('automation persistence boundaries', () => {
 
   const report = (kind: 'progress' | 'decision_required' | 'handed_off' | 'failed') => ({ event_kind: kind,
     work_revision: 'work-1', evidence_revision: 'evidence-1', payload: { workId: 'work-1', generation: 1 } });
-  const input = { workerSessionId: 'worker', workerId: 'worker-id', turnGeneration: 1 };
+  const input = { workerSessionId: 'worker', workerId: 'worker-id', turnGeneration: 1, sessionInstanceId: 'instance-a' };
 
   it('retains progress then decision then handoff in one turn and folds only final duplicates', async () => {
     await submitOrcaWorkerReport({ ...input, source: 'manual', report: report('progress') });
@@ -61,6 +62,25 @@ describe('automation persistence boundaries', () => {
     expect(rows[1]).toMatchObject({ event_kind: 'failed' });
     expect(JSON.stringify(rows)).not.toContain('private provider');
   });
+  it('keeps restored-session reports separate even when generation and report revisions repeat', async () => {
+    const first = await submitOrcaWorkerReport({ ...input, source: 'manual', report: report('handed_off') });
+    const resumed = { ...input, sessionInstanceId: 'instance-b' };
+    const checkpoint = await submitOrcaWorkerReport({ ...resumed, source: 'auto' });
+    expect(checkpoint.event_id).not.toBe(first.event_id);
+    const final = await submitOrcaWorkerReport({ ...resumed, source: 'manual', report: report('handed_off') });
+    expect(final.event_id).not.toBe(first.event_id);
+    expect((await submitOrcaWorkerReport({ ...resumed, source: 'auto' })).event_id).toBe(final.event_id);
+    expect(sqlite.prepare('SELECT count(*) AS count FROM orca_worker_events').get()).toEqual({ count: 3 });
+  });
+  it.each(['progress', 'handed_off'] as const)('records Host failure despite valid %s final JSON', async kind => {
+    await submitOrcaWorkerReport({ ...input, source: 'manual', report: report(kind) });
+    await submitOrcaWorkerReport({ ...input, source: 'auto', failed: true, report: report(kind) });
+    const rows = sqlite.prepare('SELECT event_kind,report FROM orca_worker_events ORDER BY seq').all();
+    expect(rows).toHaveLength(2);
+    expect(rows[1]).toMatchObject({ event_kind: 'failed' });
+    expect(JSON.stringify(rows[1])).toContain('WORKER_TURN_FAILED');
+  });
+
   it('does not allow a report to impersonate another worker', async () => {
     await expect(submitOrcaWorkerReport({ ...input, workerId: 'other-worker', source: 'manual', report: report('handed_off') }))
       .rejects.toMatchObject({ code: 'NOT_AUTHORIZED' });
@@ -89,13 +109,35 @@ describe('automation persistence boundaries', () => {
       async () => { throw Error('response lost'); })).rejects.toMatchObject({ code: 'DISPATCH_UNKNOWN' });
     const row = (await store.find(scope, 'lost'))!;
     expect((await reconcileAutomationReceipt(client, row, () => {})).status).toBe('unknown');
-    sqlite.prepare('INSERT INTO messages VALUES (?,?,?,?)').run('wrong', 'other', row.inputId, 'user');
+    sqlite.prepare('INSERT INTO messages(id,session_id,client_id,role) VALUES (?,?,?,?)').run('wrong', 'other', row.inputId, 'user');
     expect((await reconcileAutomationReceipt(client, row, () => {})).status).toBe('unknown');
-    sqlite.prepare('INSERT INTO messages VALUES (?,?,?,?)').run('right', 'lead', row.inputId, 'user');
+    sqlite.prepare('INSERT INTO messages(id,session_id,client_id,role) VALUES (?,?,?,?)').run('right', 'lead', row.inputId, 'user');
     const reconciled = await reconcileAutomationReceipt(client, row, () => {});
     expect(reconciled.status).toBe('accepted');
     expect(reconciled.wakeKind).toBeNull();
-    expect(reconciled.result).toBeNull();
+    expect(JSON.parse(reconciled.result!)).toMatchObject({ ok: true, targetSessionId: 'lead' });
+  });
+
+  it.each([false, true])('completes a send whose receipt was reconciled concurrently (queued=%s)', async queued => {
+    const store = createAutomationDispatchStore(client);
+    const service = new AutomationDispatchService(store, () => {});
+    const args = { scope: { kind: 'schedule' as const, id: 'schedule-a' }, key: 'race',
+      operation: 'session_dispatch' as const, targetSessionId: 'lead', payload: { message: 'task' } };
+    let sends = 0;
+    const sent = await service.execute(args, async row => {
+      sends++;
+      if (queued) sqlite.prepare('INSERT INTO agent_input_queue_snapshots VALUES (?,?)').run('lead', JSON.stringify([{
+        clientId: row.inputId, text: 'task', persistedContent: 'task', chatMessage: {}, createOpts: { agentKind: 'codex' },
+      }]));
+      else sqlite.prepare('INSERT INTO messages(id,session_id,client_id,role) VALUES (?,?,?,?)').run('msg', 'lead', row.inputId, 'user');
+      const reconciled = await reconcileAutomationReceipt(client, row, () => {});
+      expect(reconciled.status).toBe(queued ? 'queued' : 'accepted');
+      const replay = await service.execute(args, async () => { throw Error('must not send twice'); });
+      expect(replay.reused).toBe(true);
+      return { ok: true, targetSessionId: 'lead', wakeKind: queued ? 'queued' : 'resumed', targetTitle: 'original title' };
+    });
+    expect(sends).toBe(1);
+    expect((await service.execute(args, async () => { throw Error('duplicate'); })).result).toEqual(sent.result);
   });
 
   it('bounds event pages by encoded bytes so valid reports cannot overflow the script protocol', async () => {

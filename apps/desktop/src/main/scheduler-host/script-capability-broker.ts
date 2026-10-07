@@ -371,7 +371,7 @@ export class SchedulerScriptCapabilityBroker implements ScriptCapabilityBroker {
           });
           result = row ? { request_key: row.requestKey, status: row.status, session_id: row.sessionId,
             input_id: row.inputId, payload_hash: row.payloadHash, wake_kind: row.wakeKind, error_code: row.errorCode,
-            ...(row.status === 'accepted' && row.result === null && row.wakeKind === null ? { proof_kind: 'persisted-input' } : {}) }
+            ...(row.operation === 'session_dispatch' && row.status === 'accepted' && row.wakeKind === null ? { proof_kind: 'persisted-input' } : {}) }
             : { request_key: params.request_key, status: 'not_found' };
         } else if (request.method === 'sessions.inspect') {
           const id = requireString(params, 'session_id');
@@ -390,6 +390,8 @@ export class SchedulerScriptCapabilityBroker implements ScriptCapabilityBroker {
       }
       case 'sessions.dispatch': {
         requireCapability(granted, 'sessions.dispatch');
+        if (params.request_key === undefined && ['if_idle', 'expected_generation', 'expected_turn_generation']
+          .some(key => params[key] !== undefined)) fail('INVALID_ARGS', 'dispatch guards require request_key');
         if (params.if_idle !== undefined && typeof params.if_idle !== 'boolean') fail('INVALID_ARGS', 'if_idle must be boolean');
         for (const key of ['expected_generation', 'expected_turn_generation']) {
           if (params[key] !== undefined && (!Number.isSafeInteger(params[key]) || Number(params[key]) < 0)) fail('INVALID_ARGS', 'invalid generation guard');
@@ -451,7 +453,8 @@ export class SchedulerScriptCapabilityBroker implements ScriptCapabilityBroker {
           const durable = new AutomationDispatchService(createAutomationDispatchStore(snapshot.client), assertCurrent);
           const sent = await durable.execute({ scope: { kind: 'schedule', id: schedule.id },
             key: requireString(params, 'request_key'), operation: 'session_dispatch', targetSessionId: target,
-            payload: dispatchParams }, row => service.sendAutomationInput({ ...dispatchParams,
+            payload: { ...dispatchParams, ifIdle: params.if_idle === true,
+              expectedGeneration: params.expected_generation, expectedTurnGeneration: params.expected_turn_generation } }, row => service.sendAutomationInput({ ...dispatchParams,
               clientId: row.inputId, reservedSessionId: target ? undefined : row.sessionId,
               scheduleOrigin: { kind: 'scheduler', scheduleId: schedule.id, scheduleName: schedule.name, runId },
               ifIdle: params.if_idle === true,

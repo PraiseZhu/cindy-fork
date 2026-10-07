@@ -1144,7 +1144,8 @@ export function getMaker(): Maker {
       },
       dispatchInterAgentMessage,
       submitWorkerReport: (input) => submitOrcaWorkerReport({ ...input,
-        turnGeneration: _maker?.getSession(input.workerSessionId)?.getTurnGeneration() ?? 0, source: 'manual' }),
+        turnGeneration: _maker?.getSession(input.workerSessionId)?.getTurnGeneration() ?? 0,
+        sessionInstanceId: _maker?.getSession(input.workerSessionId)?.instanceId ?? '', source: 'manual' }),
     } satisfies OrcaBridgeMcpDeps;
     const orcaWorkerBridgeProvider = createOrcaWorkerBridgeMcpProvider(orcaBridgeDeps);
     // Cindy Make 个人版任务专属工具:只有 sessions.source='cindy-make' 的任务在
