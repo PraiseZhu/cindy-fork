@@ -562,7 +562,11 @@ export interface MobileMakerTransport {
     providerId?: string,
     selection?: { effort: string | null; fastMode: boolean },
   ): Promise<{ deferred?: boolean; superseded?: boolean } | undefined>;
-  /** 登记跨 Agent 切换意图；真正切换在下一条消息发送时由 desktop main 执行。 */
+  /**
+   * 登记跨 Agent 切换意图；真正切换在下一条消息发送时由 desktop main 执行。
+   * 可选 options.agentDeviceId(远程 Agent)同时换 Agent 所在电脑:null = 改回被控电脑本机
+   * 运行;只在显式传入时作为第 7 个 wire 参数发送,缺省 = 位置不变(旧被控端忽略多余参数)。
+   */
   switchSessionAgent(
     sessionId: string,
     targetAgentKind: MobileAgentKind,
@@ -570,6 +574,7 @@ export interface MobileMakerTransport {
     providerId: string | null,
     effort?: string,
     fastMode?: boolean,
+    options?: { agentDeviceId?: string | null },
   ): Promise<MobileSessionAgentSwitchResult>;
   /** 读取 desktop main 的权威 pending intent，用于重连 / 重进页面恢复。 */
   getSessionAgentSwitchIntent(
@@ -1159,15 +1164,22 @@ export function createMobileMakerTransport({
       providerId,
       effort,
       fastMode,
+      options,
     ) =>
-      call("maker:switch-session-agent", [
-        sessionId,
-        targetAgentKind,
-        model,
-        providerId,
-        effort,
-        fastMode,
-      ]),
+      call(
+        "maker:switch-session-agent",
+        options?.agentDeviceId !== undefined
+          ? [
+              sessionId,
+              targetAgentKind,
+              model,
+              providerId,
+              effort ?? null,
+              fastMode ?? null,
+              { agentDeviceId: options.agentDeviceId },
+            ]
+          : [sessionId, targetAgentKind, model, providerId, effort, fastMode],
+      ),
     getSessionAgentSwitchIntent: (sessionId) =>
       call("maker:get-session-agent-switch-intent", [sessionId]),
     setEffort: (sessionId, effort) =>

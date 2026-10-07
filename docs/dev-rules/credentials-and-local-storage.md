@@ -63,10 +63,11 @@ Claude.ai 登录，也不得收集、存储或中转订阅凭证。Cindy 因此�
   端口，它对每个目标重新按系统代理 / PAC 决定直连或走代理（env 作用于整棵进程树，含 Bash
   工具里的 git / npm，内网例外必须照旧直连），明文 HTTP 不下发代理。都是 TCP 隧道，TLS
   端到端，代理、转发端口与 Cindy 都看不到凭证。
-- 订阅会话不设 host 接管标记，CLI 会直接应用工作区 `.claude/settings.json` /
-  `settings.local.json` 的 env（SDK 模式没有工作区信任确认，也不像 Claude Desktop 那样剥掉
-  项目级上游 / 鉴权键）。所以对 CLI 实际加载的项目级设置（工作目录的两份文件，加上主仓库
-  根目录的 `settings.local.json`）设闸（maker-core `workspace-settings-guard`）：
+- 订阅会话不设 host 接管标记；Cindy 的所有 Claude 会话统一使用 `claude-desktop` 入口，
+  CLI 会启用 Desktop 宿主的项目级上游 / 鉴权环境过滤。入口身份不改变凭证来源，普通项目
+  设置、权限与 hooks 仍由 CLI 加载。SDK 模式仍没有终端的工作区信任确认，因此继续对
+  CLI 实际加载的项目级设置（工作目录的两份文件，加上主仓库根目录的 `settings.local.json`）
+  设闸作为纵深防御（maker-core `workspace-settings-guard`），不依赖上游过滤替代宿主检查：
   - 每次拉起 CLI 进程前（含会话中途重建）命中就拒绝启动；
   - 会话运行中，任何设置变更（ConfigChange hook）与 Cindy 触发的 flag settings 应用（切模型 /
     effort / fast）前都整体复查；命中即判会话已污染，阻止这次变更并结束当前 CLI 进程——被拒
@@ -89,7 +90,9 @@ Claude.ai 登录，也不得收集、存储或中转订阅凭证。Cindy 因此�
 - 实现见 [claude-native-cli.ts](../../apps/desktop/src/main/maker-host/claude-native-cli.ts)、
   [env-builder.ts](../../packages/maker-core/src/agents/claude-code/env-builder.ts)；回归见
   [claudeAuthAdapterOAuthEnv.test.ts](../../apps/desktop/src/main/maker-host/__tests__/claudeAuthAdapterOAuthEnv.test.ts)
-  与 [env-builder.test.ts](../../packages/maker-core/src/agents/claude-code/__tests__/env-builder.test.ts)。
+  与 [env-builder.test.ts](../../packages/maker-core/src/agents/claude-code/__tests__/env-builder.test.ts)；
+  真实 CLI 的入口、项目设置、原生 / SDK hooks 与权限回归见
+  [smoke-claude-sdk.mjs](../../scripts/smoke-claude-sdk.mjs)。
 
 ## Linux Hyprland / Omarchy 凭证后端
 

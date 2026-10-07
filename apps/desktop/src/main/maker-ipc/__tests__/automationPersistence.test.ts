@@ -25,7 +25,7 @@ describe('automation persistence boundaries', () => {
       INSERT INTO sessions(id,status) VALUES ('lead','active'),('worker','active'),('other','active');
       INSERT INTO orca_teams VALUES ('team','lead','active');
       INSERT INTO orca_workers VALUES ('worker-id','team','worker');`);
-    runMigrationReplay(sqlite, { drizzleDir: fileURLToPath(new URL('../../../../drizzle/', import.meta.url)), currentVersion: 122 });
+    runMigrationReplay(sqlite, { drizzleDir: fileURLToPath(new URL('../../../../drizzle/', import.meta.url)), currentVersion: 123 });
     sqlite.exec("UPDATE orca_teams SET result_policy='event-only'");
     client = { drizzle: drizzle(sqlite) } as unknown as DbClient;
     setCurrentDbClient(client, 'test-owner');

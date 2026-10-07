@@ -231,6 +231,12 @@ vi.mock("@/session/MobileProviderMark", async () => {
       el("i", { "data-model-mark": providerId }),
   };
 });
+vi.mock("@/session/RemoteSourceMark", async () => {
+  const { createElement: el } = await import("react");
+  return {
+    RemoteSourceMark: ({ children }: AnyProps) => el("span", { "data-remote-mark": "" }, children),
+  };
+});
 vi.mock("@/session/sessionAgentSwitch", () => ({
   mobileAgentLabel: (agent: string) => `agent:${agent}`,
 }));

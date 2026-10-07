@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "cbb57b75-ca1b-48c7-8460-4e5811e7bdb6",
+  "id": "d06b22f6-84f0-4f67-b5ab-0f13f2e21a2a",
   "prevId": "caa7f32c-7494-48d9-a5cb-aa88d267b9bd",
   "tables": {
     "account_usage_snapshots": {
@@ -175,152 +175,6 @@
           "name": "auto_review_projections_session_id_lead_id_pk"
         }
       },
-      "uniqueConstraints": {},
-      "checkConstraints": {}
-    },
-    "automation_dispatch_receipts": {
-      "name": "automation_dispatch_receipts",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "text",
-          "primaryKey": true,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "principal_kind": {
-          "name": "principal_kind",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "principal_id": {
-          "name": "principal_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "request_key": {
-          "name": "request_key",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "operation": {
-          "name": "operation",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "payload_hash": {
-          "name": "payload_hash",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "status": {
-          "name": "status",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "session_id": {
-          "name": "session_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "input_id": {
-          "name": "input_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "worker_id": {
-          "name": "worker_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "team_id": {
-          "name": "team_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "wake_kind": {
-          "name": "wake_kind",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "error_code": {
-          "name": "error_code",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "result": {
-          "name": "result",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "updated_at": {
-          "name": "updated_at",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        }
-      },
-      "indexes": {
-        "uniq_automation_dispatch_principal_key": {
-          "name": "uniq_automation_dispatch_principal_key",
-          "columns": [
-            "principal_kind",
-            "principal_id",
-            "request_key"
-          ],
-          "isUnique": true
-        },
-        "idx_automation_dispatch_session": {
-          "name": "idx_automation_dispatch_session",
-          "columns": [
-            "session_id"
-          ],
-          "isUnique": false
-        },
-        "idx_automation_dispatch_team": {
-          "name": "idx_automation_dispatch_team",
-          "columns": [
-            "team_id"
-          ],
-          "isUnique": false
-        }
-      },
-      "foreignKeys": {},
-      "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "checkConstraints": {}
     },
@@ -3532,14 +3386,6 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false
-        },
-        "result_policy": {
-          "name": "result_policy",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false,
-          "default": "'default'"
         }
       },
       "indexes": {
@@ -3638,146 +3484,6 @@
         "orca_worker_creation_reservations_team_id_orca_teams_id_fk": {
           "name": "orca_worker_creation_reservations_team_id_orca_teams_id_fk",
           "tableFrom": "orca_worker_creation_reservations",
-          "tableTo": "orca_teams",
-          "columnsFrom": [
-            "team_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "checkConstraints": {}
-    },
-    "orca_worker_events": {
-      "name": "orca_worker_events",
-      "columns": {
-        "seq": {
-          "name": "seq",
-          "type": "integer",
-          "primaryKey": true,
-          "notNull": true,
-          "autoincrement": true
-        },
-        "event_id": {
-          "name": "event_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "logical_report_id": {
-          "name": "logical_report_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "team_id": {
-          "name": "team_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "worker_id": {
-          "name": "worker_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "session_id": {
-          "name": "session_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "turn_generation": {
-          "name": "turn_generation",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "event_kind": {
-          "name": "event_kind",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "work_revision": {
-          "name": "work_revision",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false,
-          "default": "''"
-        },
-        "evidence_revision": {
-          "name": "evidence_revision",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false,
-          "default": "''"
-        },
-        "source": {
-          "name": "source",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "report": {
-          "name": "report",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        }
-      },
-      "indexes": {
-        "uniq_orca_worker_events_event_id": {
-          "name": "uniq_orca_worker_events_event_id",
-          "columns": [
-            "event_id"
-          ],
-          "isUnique": true
-        },
-        "idx_orca_worker_events_team_seq": {
-          "name": "idx_orca_worker_events_team_seq",
-          "columns": [
-            "team_id",
-            "seq"
-          ],
-          "isUnique": false
-        },
-        "idx_orca_worker_events_logical": {
-          "name": "idx_orca_worker_events_logical",
-          "columns": [
-            "logical_report_id"
-          ],
-          "isUnique": false
-        }
-      },
-      "foreignKeys": {
-        "orca_worker_events_team_id_orca_teams_id_fk": {
-          "name": "orca_worker_events_team_id_orca_teams_id_fk",
-          "tableFrom": "orca_worker_events",
           "tableTo": "orca_teams",
           "columnsFrom": [
             "team_id"
@@ -5498,6 +5204,13 @@
         },
         "remote_host_id": {
           "name": "remote_host_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "agent_device_id": {
+          "name": "agent_device_id",
           "type": "text",
           "primaryKey": false,
           "notNull": false,

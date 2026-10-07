@@ -2,6 +2,7 @@ import { executeTaskTags, TASK_TAG_CHANNEL } from '../localDb/ipc/taskTags.js';
 import type { TaskTagRequest } from '@cindy/maker-shared';
 import {
   FILE_PEER_CHANNEL,
+  REMOTE_AGENT_CHANNEL,
   TASK_MIGRATION_CHANNEL,
   encodeSessionTagCatalog,
   decodeSessionTagCatalog,
@@ -324,6 +325,20 @@ export function setRemoteReviewInputGuard(guard: RemoteReviewInputGuard | null):
   remoteReviewInputGuard = guard;
 }
 
+/**
+ * 远程 Agent(同账号另一台电脑的任务让 Agent 在本机运行)的处理器；maker 就绪后由
+ * remote-agent/host/service.ts 接入。
+ */
+export interface RemoteAgentHandler {
+  handle(controller: string, raw: unknown): Promise<unknown>;
+  abortAll(): void;
+}
+let remoteAgentHandler: RemoteAgentHandler | null = null;
+
+export function setRemoteAgentHandler(handler: RemoteAgentHandler | null): void {
+  remoteAgentHandler = handler;
+}
+
 // Local renderer IPC keeps its sender guard; remote mutations enter the shared action here.
 type RemoteTurnChangeAction = (
   sessionId: unknown, id: unknown, action: unknown, assertAccess: () => Promise<void>,
@@ -634,6 +649,10 @@ function projectInvokeResultForTunnel(
     : {};
   const providers = (r.providers as Record<string, unknown>[]).map((p) => {
     const rest = { ...p };
+    // 「允许被远程调用」只是标记、不裁剪目录：远程控制与手机仍要看到全部供应商，
+    // 只有远程 Agent 的选择入口按它筛选。只放行布尔值。
+    delete rest.remoteInvocationEnabled;
+    if (typeof p.remoteInvocationEnabled === 'boolean') rest.remoteInvocationEnabled = p.remoteInvocationEnabled;
     const logoKind = typeof p.id === 'string'
       ? resolveProviderLogoKind(p.id, p.routing as ProviderLogoRouting | undefined)
       : null;
@@ -2171,6 +2190,7 @@ export function dropAllControllers(
   reason: 'user' | 'toggle-off' | 'shutdown',
 ): void {
   stopFilePeers();
+  remoteAgentHandler?.abortAll();
   remoteDesktop.stop();
   void remoteCredentialHost.closeAll().catch(() => remoteCredentialHost.dispose());
   const controllerIds = new Set([
@@ -3142,7 +3162,9 @@ function sendInvokeResultSafe(
   const attempt = trySendInvokeResult(client, src, requestId, proactive, channel, args);
   // 以真正能上 wire 的结果作为去重真相：超限原结果若被 compact/改成结构化错误，
   // 不能把缓存留在原始大对象上，否则缓存可能自淘汰且重复 requestId 会再次执行。
-  if (fingerprint !== undefined) {
+  // 远程 Agent 的每个 op 自带幂等(poll 按游标、其余按各自 id 去重)，高频的事件流结果不进
+  // 全局去重缓存，免得冲掉其它控制端非幂等调用的去重记录。
+  if (fingerprint !== undefined && channel !== REMOTE_AGENT_CHANNEL) {
     rememberRemoteInvokeResult(key, fingerprint, attempt.result);
   }
   if (attempt.sent) {
@@ -3862,6 +3884,33 @@ async function executeRemoteInvoke(src: string, payload: InvokePayload | undefin
     try { return { ok: true, result: await requestPluginOauth(src, payload.args[0]) }; }
     catch { return { ok: false, error: { code: 'IPC_ERROR', message: '[PRECONDITION_FAILED] Remote authorization unavailable' } }; }
   }
+  if (payload.channel === REMOTE_AGENT_CHANNEL) {
+    // 同账号的另一台电脑让 Agent 在本机运行；共享任务访客无权使用本机的 Agent 登录与额度
+    // (共享任务的通道清单里也没有它，这里再兜一层)。
+    if (isSharedTaskPeer(src)) {
+      return { ok: false, error: { code: 'IPC_ERROR', message: '[REMOTE_AGENT_UNSUPPORTED] not available to shared tasks' } };
+    }
+    const handler = remoteAgentHandler;
+    if (!handler) {
+      return { ok: false, error: { code: 'IPC_ERROR', message: '[REMOTE_AGENT_UNAVAILABLE] not ready yet' } };
+    }
+    try {
+      return { ok: true, result: await timing.measure('handler', () => handler.handle(src, payload.args?.[0])) };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return {
+        ok: false,
+        error: {
+          code: 'IPC_ERROR',
+          message: /^\[REMOTE_AGENT_[A-Z_]+\]/.test(message)
+            ? message
+            : message === 'REMOTE_AGENT_INVALID'
+              ? '[REMOTE_AGENT_INVALID] invalid remote agent request'
+              : '[REMOTE_AGENT_UNAVAILABLE] remote agent request failed',
+        },
+      };
+    }
+  }
   if (payload.channel === REMOTE_DESKTOP_CHANNEL) {
     try { return { ok: true, result: await timing.measure('handler', () => requestRemoteDesktop(src, payload.args?.[0])) }; }
     catch (error) { return { ok: false, error: { code: 'IPC_ERROR', message: error instanceof Error ? error.message : 'DESKTOP_UNAVAILABLE' } }; }
@@ -4204,6 +4253,7 @@ export const __testing = {
     setBroadcastTapListener(null);
     presenceOfflineCheck = null;
     remoteReviewInputGuard = null;
+    remoteAgentHandler = null;
     remoteTurnChangeAction = null;
     remoteXaiSubscriptionUsageReader = null;
     remoteClaudeSubscriptionUsageReader = null;

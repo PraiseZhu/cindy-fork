@@ -413,7 +413,9 @@
     "REMOTE_WORKDIR_UNAVAILABLE": "远程项目目录不可访问，请恢复网络盘连接后重试。",
     "RIGHT_SIDEBAR_TOO_MANY_TABS": "当前任务已达标签数量上限，请先关闭一些标签",
     "RIGHT_SIDEBAR_STATE_TOO_LARGE": "标签内容过大，无法添加",
-    "RIGHT_SIDEBAR_UNKNOWN_KIND": "该标签类型暂不可用"
+    "RIGHT_SIDEBAR_UNKNOWN_KIND": "该标签类型暂不可用",
+    "REMOTE_AGENT_DEVICE_UNREACHABLE": "模型未切换：要运行 Agent 的那台电脑暂时连不上。确认它在线并允许远程控制后重试。",
+    "REMOTE_AGENT_MODEL_UNAVAILABLE": "模型未切换：那台电脑上没有这个模型，或没有对这个供应商打开「允许被远程调用」。请换一个模型。"
   },
   "providerError": {
     "AUTH_INVALID": "API 密钥无效或已过期（401），请检查密钥后重试",
@@ -2536,6 +2538,12 @@
           "empty": "该供应商这次没有返回任何可用模型，下面是上次获取的列表。请确认账号权限后重试。"
         },
         "suspendedBanner": "该供应商已停用，凭证已保留；启用后其模型才会重新可用",
+        "remoteAccess": {
+          "label": "允许被远程调用",
+          "description": "开启后，同账号的其他电脑可以用这个供应商的模型，让 Agent 在这台电脑上运行，使用这台电脑的登录和配额。",
+          "ariaLabel": "允许同账号的其他电脑调用此供应商",
+          "writeFailed": "远程调用设置未能保存，请重试"
+        },
         "moreActionsAria": "更多操作"
       },
       "detect": {
@@ -7706,7 +7714,12 @@
         "reset": "恢复默认",
         "reorder": "调整{{name}}顺序，按上下方向键"
       },
-      "items": { "automations": "自动化", "plugins": "插件", "bots": "伙伴", "search": "搜索" }
+      "items": {
+        "automations": "自动化",
+        "plugins": "插件",
+        "bots": "伙伴",
+        "search": "搜索"
+      }
     },
     "user": {
       "settingsLink": "设置，当前用户：{{name}}",
@@ -8941,6 +8954,8 @@
         "ariaWithEffort": "选择模型。当前：{{model}}，推理强度：{{effort}}",
         "pendingAria": "选择模型。下条消息：{{agent}} · {{model}}",
         "pendingAriaWithEffort": "选择模型。下条消息：{{agent}} · {{model}}，推理强度：{{effort}}",
+        "agentDevice": "Agent 在 {{device}} 上运行",
+        "agentDeviceUnnamed": "Agent 在另一台电脑上运行",
         "agent": {
           "claudeCode": "Claude Code",
           "codex": "Codex",
@@ -8996,6 +9011,8 @@
       "unified": {
         "railFavorites": "收藏",
         "railAll": "全部",
+        "railRemoteProvider": "{{provider}} · {{device}}",
+        "remoteLoading": "正在读取那台电脑的模型…",
         "favoritesGroup": "收藏",
         "favoritesEmpty": "还没有收藏——把鼠标停到模型行上，点 ☆ 存到这里",
         "addFavorite": "存为收藏",
@@ -9281,6 +9298,13 @@
           "cancel": "保留当前 Agent",
           "dontShowAgain": "下次不再提醒"
         }
+      },
+      "agentRelocation": {
+        "titleLocal": "改回这台电脑运行 Agent？",
+        "titleOther": "改到「{{device}}」上运行 Agent？",
+        "description": "原来那台电脑上的对话记录带不过来，会整理成交接摘要接上，思考内容等不能保证完美继承。下一条消息发出时生效。",
+        "confirm": "换电脑运行",
+        "cancel": "保持不变"
       }
     },
     "agentSelect": {
@@ -10114,7 +10138,11 @@
         "toggleHint": "查看交接内容",
         "handoffTitle": "交接内容——切换时发送给新引擎的上下文摘要(不计入对话记录，仅在此展示)",
         "handoffTitleEnglishSource": "交接内容——切换时发送给新引擎的上下文摘要，原文为英文(不计入对话记录，仅在此展示)",
-        "resumedBadge": "已续接原任务"
+        "resumedBadge": "已续接原任务",
+        "relocatedHere": "Agent 已改到这台电脑上运行",
+        "relocatedTo": "Agent 已改到 {{device}} 上运行",
+        "relocatedTaskComputer": "Agent 已改到任务所在的电脑上运行",
+        "relocatedElsewhere": "Agent 已改到另一台电脑上运行"
       },
       "contextRebuild": {
         "labelOverflow": "已整理上下文并继续",
@@ -10343,7 +10371,15 @@
       "REMOTE_PROVIDER_UNSUPPORTED": "远端任务还不能使用这个模型供应商。请换一个供应商，或在本机任务里使用它。",
       "REMOTE_PROVIDER_UPDATING": "这个模型供应商的凭据正在更新。请稍后再试。",
       "REMOTE_WORKDIR_UNAVAILABLE": "远端工作目录现在不可用。请确认那台电脑上的目录还在，然后重试。",
-      "REMOTE_OPTIMISTIC_SESSION_STATE_UNAVAILABLE": "电脑端暂时无法确认这条消息是否已经发出。请稍后再试，不要重复发送同一条。"
+      "REMOTE_OPTIMISTIC_SESSION_STATE_UNAVAILABLE": "电脑端暂时无法确认这条消息是否已经发出。请稍后再试，不要重复发送同一条。",
+      "REMOTE_AGENT_UNAVAILABLE": "运行 Agent 的电脑暂时连不上。确认那台电脑在线并允许远程控制后重试。",
+      "REMOTE_AGENT_PEER_TOO_OLD": "那台电脑上的 Cindy 版本过旧，还不能替这台电脑运行 Agent。请先在那台电脑上更新 Cindy。",
+      "REMOTE_AGENT_EXPIRED": "这个任务在运行 Agent 的电脑上已经结束。请重新发送。",
+      "REMOTE_AGENT_NOT_FOUND": "这个任务在运行 Agent 的电脑上已经结束。请重新发送。",
+      "REMOTE_AGENT_BUSY": "那台电脑上同时运行的任务太多。先结束一些任务后再试。",
+      "REMOTE_AGENT_UNSUPPORTED": "那台电脑上这个 Agent 不可用。在那台电脑上安装或登录后再试，或换一个 Agent。",
+      "REMOTE_AGENT_INVALID": "和运行 Agent 的电脑通信出错。请重试；如果一直出现，请把两台电脑上的 Cindy 都更新到最新版。",
+      "REMOTE_AGENT_PROVIDER_NOT_ALLOWED": "那台电脑没有允许远程调用这个供应商。请在那台电脑的「设置 → 模型供应商」里打开「允许被远程调用」，或换一个模型。"
     },
     "generatedFiles": {
       "title": "本条消息生成的文件",
@@ -10637,7 +10673,8 @@
       "worktreeRepoHint": "可尝试重新选一次工作目录，等右下角文件夹标识刷新后再试",
       "sessionInactive": "任务已不再处于活跃状态",
       "remoteProjectBanner": "在 {{device}} 的 {{project}} 中新建任务",
-      "remoteDialogueBanner": "在 {{device}} 上新建对话（不绑定项目）"
+      "remoteDialogueBanner": "在 {{device}} 上新建对话（不绑定项目）",
+      "agentDeviceBanner": "任务和文件留在本机，Agent 在 {{device}} 上运行"
     },
     "jumpSession": {
       "emptyId": "请输入要跳转的任务 ID",
@@ -11033,7 +11070,9 @@
     },
     "sessionHeader": {
       "untitled": "未命名任务",
-      "moreActions": "更多操作"
+      "moreActions": "更多操作",
+      "agentDevice": "Agent 在 {{device}} 上运行",
+      "agentDeviceOffline": "Agent 在 {{device}} 上运行，那台电脑现在离线，连上后才能继续"
     },
     "gitContext": {
       "detached": "分离 HEAD",
@@ -13240,7 +13279,8 @@
     "sessionTitle": "审查 · {{title}}",
     "toast": {
       "failed": "无法开始审查",
-      "remoteUnsupported": "当前版本只支持审查本机任务"
+      "remoteUnsupported": "当前版本只支持审查本机任务",
+      "agentDeviceUnsupported": "Agent 在另一台电脑运行的任务暂不支持审查"
     },
     "externalArtifactConfirm": {
       "title": "允许审查工作区外的成果？",

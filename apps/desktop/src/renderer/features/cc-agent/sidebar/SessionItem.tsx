@@ -808,6 +808,8 @@ export const SessionItem = withSidebarNavigation<SessionItemProps>(function Sess
     !isEmpty &&
     !session.remoteHostId &&
     !session.deviceLinkDeviceId &&
+    // Agent 在另一台电脑运行：它的会话记录按项目路径存在那台，移动后无法继续。
+    !session.agentDeviceId &&
     session.status !== 'archived';
 
   // 导出 .cshare 的可见性:draft 无内容、remote 转录在远端、device-link 数据在
@@ -817,7 +819,9 @@ export const SessionItem = withSidebarNavigation<SessionItemProps>(function Sess
     !isEmpty &&
     !session.remoteHostId &&
     session.orcaRole !== 'worker' &&
-    !session.deviceLinkDeviceId;
+    !session.deviceLinkDeviceId &&
+    // Agent 在另一台电脑运行：转录在那台，本机打包不全。
+    !session.agentDeviceId;
 
   const exportShareMenuItem = canExportShare ? (
     <DropdownMenuItem onSelect={handleExportShareSelect} className={MENU_ITEM_CLASS}>
@@ -1074,6 +1078,17 @@ export const SessionItem = withSidebarNavigation<SessionItemProps>(function Sess
               size={12}
               strokeWidth={1.8}
               connectionStatus={remoteIconConnectionStatus}
+              className={cn(
+                isActive ? 'text-sidebar-item-active-foreground' : 'text-sidebar-action-icon',
+              )}
+            />
+          )}
+          {/* 任务在本机、Agent 在另一台电脑运行。 */}
+          {!remoteIconKind && session.agentDeviceId && (
+            <RemoteProjectIcon
+              kind="agent-device"
+              size={12}
+              strokeWidth={1.8}
               className={cn(
                 isActive ? 'text-sidebar-item-active-foreground' : 'text-sidebar-action-icon',
               )}

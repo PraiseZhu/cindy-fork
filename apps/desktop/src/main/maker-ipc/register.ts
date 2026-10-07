@@ -23,7 +23,13 @@ import { getManagedLlamaCppService } from '../local-model-runtime/llamaCppServic
 import { ensureManagedLlamaCppProvider } from '../local-model-runtime/managedLlamaCppProvider.js';
 import { setBotRemoteMessageService } from './botRemoteMessageReceiver.js';
 import { handleListDevices, defaultDeps as deviceDirectoryDeps } from '../device-link/ipc.js';
-import { getHostSourceDevice, getSelfDeviceId, remoteInvoke as invokeBotPeer } from '../device-link/index.js';
+import { getHostSourceDevice, getSelfDeviceId, remoteBackgroundInvoke, remoteInvoke as invokeBotPeer } from '../device-link/index.js';
+import { readDeviceProviderViews } from '../remote-agent/controller/deviceCatalog.js';
+import { checkDeviceRoute } from '../remote-agent/controller/deviceRouteCheck.js';
+import {
+  isRemoteProviderInvocationAllowed,
+  setRemoteProviderInvocationEnabled,
+} from '../maker-host/remote-provider-access-store.js';
 import { registerModelFavoritesSync } from './modelFavoritesSync.js';
 import { advanceRuntimeRecoveryNotice } from '../im/shared/runtimeRecoveryNotice.js';
 import { markImSessionManualRouteOverride } from '../im/shared/manualRouteOverride.js';
@@ -134,7 +140,7 @@ import { upsertRecentWorkdir } from '../localDb/ipc/recentWorkdirs.js';
 import { isRetainableProjectSession } from '../../shared/sessionSource.js';
 import { initializePluginOauthCards } from '../plugin-oauth/cards.js';
 import { currentOauthIdentityScope, loadOauthSigningKey } from '../plugin-oauth/desktopIdentity.js';
-import { readDeviceLinkSettings } from '../device-link/settings-store.js';
+import { readDeviceLinkSettings, readLastKnownDeviceNames } from '../device-link/settings-store.js';
 import { getDeviceLinkStatus, getMobileNotifyGeneration, sendMobileBotGroupNotify } from '../device-link/index.js';
 import type { AgentMeta, Session as RendererSession } from '../../renderer/lib/ccAgent.types';
 import {
@@ -930,7 +936,12 @@ import {
   refreshActiveCatalogFromSource,
   refreshCustomProvidersIntoCatalog,
 } from '../maker-host/createDesktopProviderService.js';
-import { readOrcaWorkerProviderRoutingContext, sshCodexWorkerRoutingContext } from './orcaProviderRoutingContext.js';
+import {
+  deviceAvailableModels,
+  deviceWorkerRoutingContext,
+  readOrcaWorkerProviderRoutingContext,
+  sshCodexWorkerRoutingContext,
+} from './orcaProviderRoutingContext.js';
 import {
   clearSessionProvider,
   getSessionProvider,
@@ -2221,7 +2232,7 @@ interface OrcaCollabService {
   }) => Promise<
     { ok: true; workerId?: string } | { ok: false; errorCode: string; message: string }
   >;
-  listAvailableModels: (params: { agent?: AgentKind }) => Promise<
+  listAvailableModels: (params: { agent?: AgentKind; callerSessionId?: string }) => Promise<
     | {
         ok: true;
         codex?: Array<{
@@ -6083,6 +6094,10 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     setModelsDisabled: (providerId, modelIds, disabled) =>
       setModelsDisabled(providerId, modelIds, disabled),
     setProviderDisabled: (providerId, disabled) => setProviderDisabled(providerId, disabled),
+    getRemoteProviderInvocationEnabled: (providerId) =>
+      isRemoteProviderInvocationAllowed(providerId),
+    setRemoteProviderInvocationEnabled: (providerId, enabled) =>
+      setRemoteProviderInvocationEnabled(providerId, enabled),
     stageClearProviderDisableOverrides: (providerId) =>
       stageProviderDisableOverridesClear(providerId),
     // 「恢复默认」= 删除该供应商整组停用 override(configuration-and-overrides.md §4)。
@@ -7023,6 +7038,65 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
   }
 
   /**
+   * 任务记录里「Agent 在哪台电脑运行」(null = 本机)。读失败按本机处理：本机任务的行为与读取
+   * 之前完全一致，只有确认是另一台电脑上的任务才走对应分支。
+   */
+  async function readSessionAgentDeviceId(sessionId: string): Promise<string | null> {
+    try {
+      const [row] = await getDbClient()
+        .drizzle.select({ agentDeviceId: sessions.agentDeviceId, remoteHostId: sessions.remoteHostId })
+        .from(sessions)
+        .where(eq(sessions.id, sessionId))
+        .limit(1);
+      return row?.agentDeviceId && !row.remoteHostId ? row.agentDeviceId : null;
+    } catch (error) {
+      log.warn('session agent device lookup failed; treating the task as local', {
+        sessionId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return null;
+    }
+  }
+
+  /**
+   * Agent 将在另一台电脑运行时的选择准入(远程 Agent)：那台在线、允许被远程调用这个来源、
+   * 目录里有这个模型。在选择时就拒绝，不留一个发送时在那台失败、且每次发送都重试的意图。
+   */
+  async function assertAgentDeviceRouteUsable(
+    deviceId: string,
+    agent: AgentKind,
+    model: string,
+    providerId: string | null,
+  ): Promise<void> {
+    const rejection = await checkDeviceRoute(
+      () => readDeviceProviderViews(remoteBackgroundInvoke, deviceId),
+      agent,
+      providerId,
+      model,
+    );
+    if (!rejection) return;
+    log.warn('remote agent selection rejected', { agent, model, providerId, rejection });
+    // device-link 控制端降级为 PRECONDITION_FAILED(不把新 code 变成跨版本 wire 契约)。
+    const code = rejection === 'unreachable' ? 'REMOTE_AGENT_DEVICE_UNREACHABLE' : 'REMOTE_AGENT_MODEL_UNAVAILABLE';
+    throwIpcError(
+      isDeviceLinkInvoke() ? 'PRECONDITION_FAILED' : code,
+      rejection === 'unreachable'
+        ? 'the computer that would run the agent is not reachable; the model was not changed'
+        : 'that computer does not offer this model to other computers; the model was not changed',
+    );
+  }
+
+  /** 分隔条展示用的电脑名：null = 任务所在电脑(本机)，其他按设备目录最近一次的名字。 */
+  function describeAgentDevice(deviceId: string | null): string | null {
+    if (!deviceId) return getHostSourceDevice().name ?? null;
+    try {
+      return readLastKnownDeviceNames()[deviceId] ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
    * 懒启动 / 队列恢复时,renderer 传来的 createOpts 可能没有 providerId,但 DB 里的
    * sessions.provider_id 才是这条会话的真实来源选择。必须在 maker.createSession 前补齐,
    * 否则 agent 首轮 auth gate 会按默认 fallback 判断,之后 hydrate 路由表已经太晚。
@@ -7138,6 +7212,13 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     didInjectProjectContext: boolean;
   }> {
     assertAccess?.();
+    // Agent 在另一台电脑上运行的任务：恢复时调用方可能没带设备，以任务记录为准。
+    if (o.id && o.agentDeviceId === undefined && !o.remoteHostId) {
+      const agentDeviceId = await readSessionAgentDeviceId(o.id);
+      if (agentDeviceId) o.agentDeviceId = agentDeviceId;
+    }
+    // 模型与供应商来自那台电脑(由那台按它自己的目录校验)，本机目录里没有它们。
+    const agentOnOtherDevice = Boolean(o.agentDeviceId) && !o.remoteHostId;
     if (o.id && !o.remoteHostId) worktreeManager.assertPrecreatedSessionNotCancelled(o.id);
     if (o.id && o.workingDir && !o.remoteHostId) {
       o.workingDir = workingDirectoryRecovery.resolve(o.id, o.workingDir);
@@ -7189,11 +7270,13 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
 
     await hydrateProviderIdBeforeSessionStart(o);
     assertAccess?.();
-    await ensureManagedOllamaReadyForSession({
-      providerId: o.providerId,
-      remoteHostId: o.remoteHostId ?? null,
-      userDataDir: app.getPath('userData'),
-    });
+    if (!agentOnOtherDevice) {
+      await ensureManagedOllamaReadyForSession({
+        providerId: o.providerId,
+        remoteHostId: o.remoteHostId ?? null,
+        userDataDir: app.getPath('userData'),
+      });
+    }
     // 停用轴准入(PR #744 review):**新建**会话不得路由到用户停用的模型 / 来源。
     // renderer 选择器已过滤,但 create-session 在 device-link allowlist 内,老控制端
     // 可直接点名 —— main 必须自己裁决。resume 豁免(运行中的会话不打断)只给
@@ -7203,7 +7286,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     // 隐式来源的原生默认落点被停用而有启用替代拷贝时,把会话显式改路由过去(下方
     // persistAndHydrateSessionProvider 会把它落库):实际路由层对隐式来源走原生
     // 默认、不查停用标志,仅放行等于继续用停用拷贝付费。
-    if (typeof o.model === 'string' && o.model) {
+    if (typeof o.model === 'string' && o.model && !agentOnOtherDevice) {
       let verifiedResume = false;
       if (o.resumeSessionId && typeof o.id === 'string' && o.id) {
         try {
@@ -8206,6 +8289,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
           agentKind: sessions.agentKind,
           source: sessions.source,
           remoteHostId: sessions.remoteHostId,
+          agentDeviceId: sessions.agentDeviceId,
           status: sessions.status,
         })
         .from(sessions)
@@ -8222,6 +8306,11 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       }
       if (source.remoteHostId) {
         throwIpcError('UNSUPPORTED_CAPABILITY', 'Review is local-only in this version');
+      }
+      // Agent 在另一台电脑运行的任务：审查任务会沿用它的模型与来源(都在那台)，而只读审查还不能
+      // 在那台运行。
+      if (source.agentDeviceId) {
+        throwIpcError('UNSUPPORTED_CAPABILITY', 'Review is not available for tasks whose agent runs on another computer');
       }
       if (!source.workingDir) {
         throwIpcError('INVALID_PARAMS', 'The source task has no working directory to review');
@@ -8705,11 +8794,18 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
           providerId: sessions.providerId,
           effort: sessions.effort,
           fastMode: sessions.fastMode,
+          agentDeviceId: sessions.agentDeviceId,
+          remoteHostId: sessions.remoteHostId,
         })
         .from(sessions)
         .where(eq(sessions.id, sessionId))
         .limit(1);
       if (!row) return;
+      // Agent 换电脑也在发送事务内落地：快照里的旧位置不能把 Agent 拉回原来那台。
+      // 缺省(undefined)交给 bootstrapSession 按任务记录读取，与恢复路径同一口径。
+      if (!co.remoteHostId && !row.remoteHostId) {
+        co.agentDeviceId = row.agentDeviceId ?? undefined;
+      }
       const dbMakerKind = dbToMakerAgentKind(row.agentKind);
       if (co.agentKind !== dbMakerKind) {
         log.warn('lazy-create: createOpts agentKind drifted from DB (agent switch); reconciling', {
@@ -8792,8 +8888,16 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
   const agentSwitchDeps: MakerSessionAgentSwitchHandlerDeps = {
     withSessionLock: withSendToSessionLock,
     // 停用轴边界裁决:目标路由被停用 → 抛错;隐式默认落点被停用 → 返回启用替代来源。
-    assertModelRouteUsable: (agent, model, providerId) =>
-      assertModelRouteUsable(agent, model, providerId),
+    // Agent 在另一台电脑运行的任务：目标模型属于那台的目录，由那台的 Agent 启动时裁决(选择时另
+    // 有 assertAgentDeviceRouteUsable 预检)。本次选择换了位置时按目标位置判断。
+    assertModelRouteUsable: async (agent, model, providerId, sessionId, targetAgentDeviceId) => {
+      const agentDeviceId = targetAgentDeviceId !== undefined
+        ? targetAgentDeviceId
+        : sessionId ? await readSessionAgentDeviceId(sessionId) : null;
+      return agentDeviceId ? undefined : assertModelRouteUsable(agent, model, providerId);
+    },
+    assertAgentDeviceRouteUsable,
+    describeAgentDevice,
     getSessionRow: async (sessionId) => {
       const db = getDbClient().drizzle;
       const [row] = await db
@@ -8807,6 +8911,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
           orcaRole: sessions.orcaRole,
           sdkSessionId: sessions.sdkSessionId,
           source: sessions.source,
+          agentDeviceId: sessions.agentDeviceId,
         })
         .from(sessions)
         .where(eq(sessions.id, sessionId))
@@ -8820,7 +8925,9 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     findParkedEngineSession: (sessionId, targetDbKind) =>
       findParkedEngineSession(sessionId, targetDbKind),
     applyAgentSwitchToDb: async (sessionId, patch) => {
-      const verifiedWindow = lookupVerifiedContextWindow(
+      // 把 Agent 挪到另一台电脑时那台的目录才算数，不拿本机目录的窗口写进去。
+      const movingToOtherDevice = typeof patch.agentDeviceId === 'string';
+      const verifiedWindow = movingToOtherDevice ? undefined : lookupVerifiedContextWindow(
         (agentKind, modelId, pid) =>
           resolveConfiguredContextWindow(
             getActiveCatalog(),
@@ -8904,6 +9011,8 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       const result = await applySessionRuntimeSelection(sessionId, intent.model, intent.providerId, {
         effort: (intent.effort ?? null) as SessionRuntimeProfile['effort'],
         fastMode: intent.fastMode ?? false,
+        // 只有 Agent 在另一台电脑运行的任务会在意图里带确认过的目标窗口。
+        ...(intent.confirmedContextWindow ? { confirmedContextWindow: intent.confirmedContextWindow } : {}),
       }, { source: 'user', sessionLockHeld: true, applyingUserSelectionOnSend: applyNow,
         runtimeSource: intent.runtimeSource, configStaged: intent.configStaged === true,
         assertSelectionCurrent });
@@ -9345,6 +9454,8 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       let createdPreviewClientId: string | null = null;
       let createdPreviewStarted = false;
       let handoffWorktree: { sessionId: string; meta: WorktreeMeta } | null = null;
+      // 来源任务的 Agent 在另一台电脑运行：新任务继承同一台电脑(它的模型与来源都在那台)。
+      let inheritedAgentDeviceId: string | undefined;
       try {
         const db = getDbClient().drizzle;
         let inherited: SendToSessionCreateDefaults;
@@ -9385,6 +9496,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
             .from(sessions)
             .where(eq(sessions.id, dispatcherSessionId))
             .limit(1);
+          if (meta.agentDeviceId && !meta.remoteHostId) inheritedAgentDeviceId = meta.agentDeviceId;
           const inheritedBase: SendToSessionCreateDefaults = {
             agentKind: meta.agentKind,
             workingDir: resolvedWorkDir,
@@ -9411,6 +9523,12 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
               executionOverrides.fastMode !== undefined);
           if (hasExecutionOverrides) {
             const targetAgent = executionOverrides.agentKind ?? inheritedBase.agentKind;
+            const deviceRouting = inheritedAgentDeviceId
+              ? deviceWorkerRoutingContext(
+                  await readDeviceProviderViews(remoteBackgroundInvoke, inheritedAgentDeviceId),
+                  targetAgent,
+                )
+              : null;
             const resolvedExecution = resolveSendToSessionExecutionConfig({
               source: {
                 agentKind: inheritedBase.agentKind,
@@ -9420,9 +9538,9 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
                 providerId: inheritedBase.providerId,
               },
               overrides: executionOverrides,
-              availableModels: maker.getCapabilities(targetAgent).availableModels,
-              providerRouting: await getProviderRoutingContext(),
-              hasCindyAiApiKey: readClaudeApiKey() != null,
+              availableModels: deviceRouting?.remoteCodexModels ?? maker.getCapabilities(targetAgent).availableModels,
+              providerRouting: deviceRouting ?? await getProviderRoutingContext(),
+              hasCindyAiApiKey: inheritedAgentDeviceId ? true : readClaudeApiKey() != null,
             });
             if (!resolvedExecution.ok) {
               return {
@@ -9490,13 +9608,15 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
           providerId: inherited.providerId,
           title: newTitle,
           permissionMode: inherited.permissionMode ?? 'bypassPermissions',
+          ...(inheritedAgentDeviceId ? { agentDeviceId: inheritedAgentDeviceId } : {}),
         });
         const { row: openedRow, value: { session } } = await openSession({
           id: createOpts.id, body: { title: newTitle,
             agentKind: inherited.agentKind === 'claude-code' ? 'cc' : inherited.agentKind,
             model: inherited.model, providerId: inherited.providerId, effort: inherited.effort,
             fastMode: !!inherited.fastMode, permissionMode: createOpts.permissionMode,
-            workspaceKind: inherited.workspaceKind, workingDir: createOpts.workingDir },
+            workspaceKind: inherited.workspaceKind, workingDir: createOpts.workingDir,
+            ...(inheritedAgentDeviceId ? { agentDeviceId: inheritedAgentDeviceId } : {}) },
         }, async (row, assertCurrent) => {
           const created = await bootstrapSession({ ...createOpts, id: row.id, model: row.model,
             providerId: row.providerId, effort: (row.effort || undefined) as CreateOpts['effort'],
@@ -12541,6 +12661,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
         fastMode: !!leadRow.fastMode,
         providerId: leadRow.providerId ?? null,
         remoteHostId: leadRow.remoteHostId ?? null,
+        ...(leadRow.agentDeviceId && !leadRow.remoteHostId ? { agentDeviceId: leadRow.agentDeviceId } : {}),
       };
     },
     getWorkerDefaults: getWorkerDefaultsFromNewMaker,
@@ -12561,9 +12682,12 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       return resolved;
     },
     getAvailableModels: (agent) => maker.getCapabilities(agent).availableModels,
-    getProviderRoutingContext: async (agent, remoteHostId) => agent === 'codex' && remoteHostId
-      ? sshCodexWorkerRoutingContext(await readSshCodexModelList({ id: remoteHostId }, listSshCodexProviders))
-      : getProviderRoutingContext(),
+    getProviderRoutingContext: async (agent, remoteHostId, agentDeviceId) => agentDeviceId && !remoteHostId
+      // lead 的 Agent 在另一台电脑运行：worker 的模型与来源按那台的目录。
+      ? deviceWorkerRoutingContext(await readDeviceProviderViews(remoteBackgroundInvoke, agentDeviceId), agent ?? 'claude-code')
+      : agent === 'codex' && remoteHostId
+        ? sshCodexWorkerRoutingContext(await readSshCodexModelList({ id: remoteHostId }, listSshCodexProviders))
+        : getProviderRoutingContext(),
     readClaudeApiKey,
     reserveWorkerCreation,
     renewWorkerCreationReservation,
@@ -13005,6 +13129,9 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     route: SessionRouteSelection,
     currentAgentKind: AgentKind,
   ): Promise<void> => {
+    // 自动跟随(渠道默认 / 伙伴模型)给的是本机目录里的路由；Agent 在另一台电脑运行的任务
+    // 用那台的目录，不跟随。
+    if (await readSessionAgentDeviceId(sessionId)) return;
     if (route.agentKind !== currentAgentKind) {
       await performSessionAgentSwitch(agentSwitchDeps, {
         sessionId, targetAgentKind: route.agentKind, model: route.model,
@@ -13292,6 +13419,10 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     try {
       const profiles = await readSessionRuntimeProfiles(sessionId);
       if (!profiles || !isCurrent()) return { session: null, outcome: 'superseded' };
+      // 自动换模型的候选来自本机目录；Agent 在另一台电脑运行的任务不在本机换，照常重试原路由。
+      if (await readSessionAgentDeviceId(sessionId)) {
+        return { session: null, outcome: requireRouteChange ? 'exhausted' : 'unchanged' };
+      }
       // A previously accepted Agent/fallback mutation owns the next boundary.
       // Do not let a later infrastructure retry replace that pending intent.
       if (profiles.control.pending ||
@@ -14072,9 +14203,21 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
         };
       }
     },
-    listAvailableModels: async ({ agent }) => {
+    listAvailableModels: async ({ agent, callerSessionId }) => {
       try {
         const agents: AgentKind[] = agent ? [agent] : ['codex', 'claude-code', 'pi'];
+        // Agent 在另一台电脑运行的任务：Worker 也在那台运行，列那台的模型与来源。
+        const agentDeviceId = callerSessionId ? await readSessionAgentDeviceId(callerSessionId) : null;
+        if (agentDeviceId) {
+          const views = await readDeviceProviderViews(remoteBackgroundInvoke, agentDeviceId);
+          return {
+            ok: true,
+            ...Object.fromEntries(agents.map((a) => [
+              a === 'codex' ? 'codex' : a === 'pi' ? 'pi' : 'claude_code',
+              deviceAvailableModels(views, a),
+            ])),
+          };
+        }
         const providerRouting = await getProviderRoutingContext();
         const result: Record<
           string,
@@ -18030,6 +18173,167 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
   // session 不存在(被 close / 还没 send 创建出来)就 no-op 不报错, 让 renderer
   // 可以乐观调用 (UI 更新先行, IPC 失败也不会回滚 UI, 老 agentManager 同语义)。
 
+  /**
+   * Agent 在另一台电脑上运行的任务：模型目录、来源、思考档与上下文窗口都属于那台电脑，本机目录
+   * 不参与校验，由那台的 Agent 在切换时裁决(不认识的模型直接报错，任务保持原模型)。点选仍先
+   * 记成意图、在发送时于同一把会话锁里落地，与本机任务一致。
+   */
+  const applyAgentDeviceRuntimeSelection = async (input: {
+    sessionId: string;
+    model: string;
+    providerId: unknown;
+    atomicSelection: { effort: SessionRuntimeProfile['effort']; fastMode: boolean } | undefined;
+    /** 渲染端按那台的目录确认过的目标上下文窗口(换到更小窗口的模型时)。 */
+    confirmedContextWindow?: number;
+    internalOptions: InternalRuntimeSelectionOptions;
+    runtimeStatus: {
+      orcaRole: string | null;
+      agentKind: string;
+      providerId: string | null;
+      effort: string | null;
+      fastMode: boolean;
+      agentDeviceId: string | null;
+    };
+    assertRuntimeOwnerCurrent(): void;
+    assertSharedTaskCurrent: { admit(): void };
+    supersededByOwnerBoundary(): boolean;
+  }): ReturnType<typeof applySessionRuntimeSelection> => {
+    const {
+      sessionId, model, providerId, atomicSelection, internalOptions, runtimeStatus,
+      assertRuntimeOwnerCurrent, assertSharedTaskCurrent, supersededByOwnerBoundary,
+    } = input;
+    const targetContextWindow = typeof input.confirmedContextWindow === 'number' && input.confirmedContextWindow > 0
+      ? input.confirmedContextWindow
+      : undefined;
+    const currentProviderId = hasSessionProvider(sessionId)
+      ? getSessionProvider(sessionId)
+      : runtimeStatus.providerId?.trim() || null;
+    const pendingSelection = agentSwitchPending.get(sessionId);
+    const targetProviderId =
+      typeof providerId === 'string' || providerId === null
+        ? (normalizeSessionProviderId(providerId) ?? null)
+        : internalOptions.source === 'user' && pendingSelection?.sameAgentSelection
+          ? (pendingSelection.providerId ?? null)
+          : currentProviderId;
+    const targetEffort = atomicSelection
+      ? atomicSelection.effort
+      : ((runtimeStatus.effort ?? null) as SessionRuntimeProfile['effort']);
+    const targetFastMode = atomicSelection?.fastMode ?? runtimeStatus.fastMode;
+    const agentKind = dbToMakerAgentKind(runtimeStatus.agentKind as 'cc' | 'codex' | 'pi');
+    if (internalOptions.source === 'user' && !internalOptions.applyingUserSelectionOnSend &&
+        !runtimeStatus.orcaRole) {
+      assertRuntimeOwnerCurrent();
+      assertSharedTaskCurrent.admit();
+      // 那台的目录里没有这个模型(例如控制端列的是任务所在电脑的目录)：现在就拒绝，
+      // 不登记一个发送时必然失败、之后每次发送都重试的意图。
+      if (runtimeStatus.agentDeviceId) {
+        await assertAgentDeviceRouteUsable(runtimeStatus.agentDeviceId, agentKind, model, targetProviderId);
+        if (supersededByOwnerBoundary()) return { deferred: false, superseded: true };
+        assertRuntimeOwnerCurrent();
+        assertSharedTaskCurrent.admit();
+      }
+      const intent = {
+        ...(internalOptions.runtimeSource ? { runtimeSource: internalOptions.runtimeSource } : {}),
+        ...(internalOptions.configStaged === true ? { configStaged: true } : {}),
+        sameAgentSelection: true,
+        targetAgentKind: agentKind,
+        model,
+        providerId: targetProviderId,
+        effort: targetEffort ?? undefined,
+        fastMode: targetFastMode,
+        ...(targetContextWindow ? { confirmedContextWindow: targetContextWindow } : {}),
+      };
+      agentSwitchPending.set(sessionId, intent);
+      agentSwitchDeps.onPendingSwitchChanged?.(sessionId, projectPendingAgentSwitchIntent(intent));
+      wakeSessionInputAfterCredentialSwitch(sessionId);
+      const response = { deferred: true, superseded: false, pendingUntilSend: true };
+      return response;
+    }
+    if (supersededByOwnerBoundary()) return { deferred: false, superseded: true };
+    const live = maker.getSession(sessionId);
+    if (live && isSessionInTurn(sessionId)) {
+      // 自动跟随(渠道默认 / 回退)在回合中不改；用户的选择由发送边界在回合外落地。
+      if (internalOptions.source !== 'user') return { deferred: false, superseded: true };
+      throwIpcError('PRECONDITION_FAILED', 'the agent is still working; change the model after this turn');
+    }
+    assertSharedTaskCurrent.admit();
+    // 换到上下文更小的模型：与本机任务同一套保护——占用超过目标窗口的安全线时先把对话交接
+    // 成摘要、关掉当前会话，下一次发送按新模型重新开始。目标窗口来自那台的目录(点选时已确认)。
+    let rebuiltForWindow = false;
+    if (live && targetContextWindow && contextOverflowRolloverHolder) {
+      const prepared = await contextOverflowRolloverHolder.prepareModelWindowSwitch(sessionId, {
+        contextWindow: targetContextWindow,
+        recheckTargetPressure: true,
+        confirmedTargetPressure: internalOptions.applyingUserSelectionOnSend === true,
+        assertCanCommit: () => {
+          assertRuntimeOwnerCurrent();
+          assertSharedTaskCurrent.admit();
+        },
+      });
+      if (prepared === 'busy') {
+        throwIpcError('PRECONDITION_FAILED', 'the agent is still working; change the model after this turn');
+      }
+      if (prepared === 'confirmation-required') {
+        return { deferred: false, superseded: false, contextWindowConfirmationRequired: targetContextWindow };
+      }
+      rebuiltForWindow = prepared === 'rebuilt';
+    }
+    if (live && !rebuiltForWindow) {
+      // 那台的 Agent 认为需要换进程(跨来源等)时关掉本次连接，下一次发送按新路由重新启动
+      // 并接上原来的对话；否则直接在那台的会话里切换。
+      const rebuild = await live.requiresModelSwitchRebuild?.(model, { providerId: targetProviderId }) ?? false;
+      if (rebuild) {
+        await withRehydrateCloseSuppressed(sessionId, () => maker.closeSession(sessionId, 'runtime-refresh'));
+      } else {
+        await live.setModel?.(model, {
+          providerId: targetProviderId,
+          ...(targetEffort ? { effort: targetEffort } : {}),
+        });
+        if (atomicSelection) await live.setFastMode?.(targetFastMode);
+      }
+    }
+    setSessionProvider(sessionId, targetProviderId);
+    if (atomicSelection) {
+      setSessionEffort(sessionId, targetEffort);
+      setSessionFastMode(sessionId, targetFastMode);
+    }
+    const patch: Record<string, unknown> = { model, providerId: targetProviderId };
+    if (atomicSelection) {
+      if (targetEffort !== null) patch.effort = targetEffort;
+      patch.fastMode = targetFastMode;
+    }
+    await persistSessionFields(sessionId, patch);
+    if (!internalOptions.applyingUserSelectionOnSend) {
+      agentSwitchPending.clear(sessionId);
+      broadcastSessionPatched(sessionId, { agentSwitchIntent: null, agentSwitchIntentCanceled: true });
+    }
+    const profile: SessionRuntimeProfile = {
+      agentKind,
+      model,
+      providerId: targetProviderId,
+      effort: targetEffort ?? (getSessionEffort(sessionId) as SessionRuntimeProfile['effort']) ?? null,
+      fastMode: targetFastMode,
+    };
+    const generation = internalOptions.source === 'user'
+      ? recordUserSessionRuntimeMutation(sessionId)
+      : acceptSessionRuntimeMutation({
+          sessionId,
+          source: internalOptions.source,
+          previousProfile: internalOptions.previousProfile,
+          deferred: false,
+          profile,
+        });
+    wakeSessionInputAfterCredentialSwitch(sessionId);
+    await broadcastSessionRuntimeProjection(sessionId, internalOptions.source === 'user' ? profile : undefined)
+      .catch((error) => {
+        log.debug('agent-device runtime projection broadcast failed', {
+          sessionId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      });
+    return { deferred: false, superseded: false, generation, effectiveProviderId: targetProviderId };
+  };
+
   const handleSetModel = async (
     sessionId: unknown,
     model: unknown,
@@ -18134,6 +18438,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
           orcaRole: sessions.orcaRole,
           agentKind: sessions.agentKind,
           remoteHostId: sessions.remoteHostId,
+          agentDeviceId: sessions.agentDeviceId,
           sdkSessionId: sessions.sdkSessionId,
           model: sessions.model,
           providerId: sessions.providerId,
@@ -18173,6 +18478,13 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
         agentSwitchPending.revision?.(sessionId) !== expectedAgentSwitchRevision
       ) {
         return { deferred: false, superseded: true };
+      }
+      if (runtimeStatus.agentDeviceId && !runtimeStatus.remoteHostId) {
+        return applyAgentDeviceRuntimeSelection({
+          sessionId, model, providerId, atomicSelection, internalOptions, runtimeStatus,
+          assertRuntimeOwnerCurrent, assertSharedTaskCurrent, supersededByOwnerBoundary,
+          ...(typeof confirmedContextWindow === 'number' ? { confirmedContextWindow } : {}),
+        });
       }
       // 停用轴准入(PR #744 review;第十二轮移入锁内):切换模型是一次新的路由选择,
       // 不得切到用户停用的模型 / 来源(本机选择器已过滤,但本 channel 在 device-link

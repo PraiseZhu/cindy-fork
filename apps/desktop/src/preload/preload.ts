@@ -6044,6 +6044,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
       providers: import('@cindy/model-providers').ProviderView[];
       providerOrder: string[];
     }> => ipcRenderer.invoke('maker:provider:list'),
+    setProviderRemoteAccess: (input: { providerId: string; enabled: boolean }): Promise<{ ok: true; enabled: boolean }> =>
+      ipcRenderer.invoke('maker:provider:remote-access:set', input),
     /** Refresh one built-in provider through its existing main-process discovery source. */
     refreshBuiltinProviderModels: (
       providerId: import('../shared/providerModelRefresh').BuiltinRefreshableProviderId,
@@ -6898,6 +6900,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
       providerId?: string | null,
       effort?: string,
       fastMode?: boolean,
+      // 远程 Agent:同时换 Agent 所在电脑(null = 任务所在电脑)。不传 = 位置不变。
+      options?: { agentDeviceId?: string | null },
     ): Promise<{
       switched: boolean;
       agentKind: 'claude-code' | 'codex' | 'pi';
@@ -6907,15 +6911,26 @@ contextBridge.exposeInMainWorld('electronAPI', {
       sameEngineRevision?: number;
       sameEngineSuperseded?: boolean;
     }> =>
-      ipcRenderer.invoke(
-        'maker:switch-session-agent',
-        sessionId,
-        targetAgentKind,
-        model,
-        providerId,
-        effort,
-        fastMode,
-      ),
+      options
+        ? ipcRenderer.invoke(
+            'maker:switch-session-agent',
+            sessionId,
+            targetAgentKind,
+            model,
+            providerId,
+            effort,
+            fastMode,
+            options,
+          )
+        : ipcRenderer.invoke(
+            'maker:switch-session-agent',
+            sessionId,
+            targetAgentKind,
+            model,
+            providerId,
+            effort,
+            fastMode,
+          ),
     // 读 main 权威的 pending 切换意图(内存态,不落库)。重开视图 / 远程会话重连后
     // 用它恢复乐观显示——否则用户登记的意图在 UI 上凭空消失,下一条消息却按意图切换。
     getSessionAgentSwitchIntent: (

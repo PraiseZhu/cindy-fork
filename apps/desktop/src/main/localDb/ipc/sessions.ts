@@ -644,6 +644,8 @@ export async function applyAgentSwitchToSessionRow(
     effort?: string;
     fastMode?: boolean;
     contextWindow?: number | null;
+    /** 远程 Agent 换电脑:undefined = 不动,null = 改回任务所在电脑。 */
+    agentDeviceId?: string | null;
   },
 ): Promise<void> {
   const ownerScope = captureOwnerScope();
@@ -656,6 +658,7 @@ export async function applyAgentSwitchToSessionRow(
     updatedAt: Date.now(),
   };
   if (patch.providerId !== undefined) setObj.providerId = patch.providerId;
+  if (patch.agentDeviceId !== undefined) setObj.agentDeviceId = patch.agentDeviceId;
   // effort 值域由 renderer 按目标引擎 capabilities 解析(schema 列是字面量联合,
   // 跨层传输后此处以 string 到达;非法值与直改 DB 同级,运行时由引擎侧收敛)。
   // 固定 effort 模型运行时为 null；sessions.effort NOT NULL，省略该字段。
@@ -682,6 +685,7 @@ export async function applyAgentSwitchToSessionRow(
       model: patch.model,
       sdkSessionId: nextSdkSessionId,
       ...(patch.providerId !== undefined ? { providerId: patch.providerId } : {}),
+      ...(patch.agentDeviceId !== undefined ? { agentDeviceId: patch.agentDeviceId } : {}),
       ...(persistableEffort !== undefined ? { effort: persistableEffort } : {}),
       ...(patch.fastMode !== undefined ? { fastMode: patch.fastMode } : {}),
       ...(typeof patch.contextWindow === 'number' && patch.contextWindow > 0
@@ -1360,6 +1364,14 @@ export function registerSessionIpc(
       !ALLOWED_ORCA_ROLES.has(bodyObj.orcaRole as string)
     ) {
       throwIpcError('INVALID_PARAMS', `invalid orcaRole: ${String(bodyObj.orcaRole)}`);
+    }
+    // Agent 在同账号另一台电脑运行：只接受设备 id 形态的值(与 maker:create-session 同一规则)。
+    if (
+      bodyObj.agentDeviceId !== undefined &&
+      bodyObj.agentDeviceId !== null &&
+      (typeof bodyObj.agentDeviceId !== 'string' || !/^[A-Za-z0-9_.:-]{1,128}$/.test(bodyObj.agentDeviceId))
+    ) {
+      throwIpcError('INVALID_PARAMS', 'agentDeviceId must be a device id');
     }
     const workspaceKind =
       (createBody?.workspaceKind as 'project' | 'dialogue' | undefined) ?? 'project';

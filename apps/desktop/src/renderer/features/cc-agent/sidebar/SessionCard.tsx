@@ -544,7 +544,9 @@ export const SessionCard = withSidebarNavigation<SessionCardProps>(function Sess
     !isEmpty &&
     !session.remoteHostId &&
     session.orcaRole !== 'worker' &&
-    !session.deviceLinkDeviceId;
+    !session.deviceLinkDeviceId &&
+    // Agent 在另一台电脑运行：转录在那台，本机打包不全。
+    !session.agentDeviceId;
 
   const exportShareMenuItem = canExportShare ? (
     <DropdownMenuItem onSelect={handleExportShareSelect} className={MENU_ITEM_CLASS}>
@@ -558,6 +560,8 @@ export const SessionCard = withSidebarNavigation<SessionCardProps>(function Sess
     !isEmpty &&
     !session.remoteHostId &&
     !session.deviceLinkDeviceId &&
+    // Agent 在另一台电脑运行：它的会话记录按项目路径存在那台，移动后无法继续。
+    !session.agentDeviceId &&
     session.status !== 'archived';
 
   const moveToProjectSubmenu = canMoveToProject ? (
@@ -804,6 +808,19 @@ export const SessionCard = withSidebarNavigation<SessionCardProps>(function Sess
                       size={12}
                       strokeWidth={1.8}
                       connectionStatus={remoteIconConnectionStatus}
+                      className={
+                        isActive
+                          ? 'text-sidebar-item-active-foreground'
+                          : 'text-sidebar-action-icon'
+                      }
+                    />
+                  )}
+                  {/* 任务在本机、Agent 在另一台电脑运行。 */}
+                  {!remoteIconKind && session.agentDeviceId && (
+                    <RemoteProjectIcon
+                      kind="agent-device"
+                      size={12}
+                      strokeWidth={1.8}
                       className={
                         isActive
                           ? 'text-sidebar-item-active-foreground'
@@ -1079,6 +1096,16 @@ export const SessionCard = withSidebarNavigation<SessionCardProps>(function Sess
                 size={11}
                 strokeWidth={1.8}
                 connectionStatus={remoteIconConnectionStatus}
+                className={
+                  isActive ? 'text-sidebar-item-active-foreground' : 'text-[var(--text-tertiary)]'
+                }
+              />
+            )}
+            {!remoteIconKind && session.agentDeviceId && (
+              <RemoteProjectIcon
+                kind="agent-device"
+                size={11}
+                strokeWidth={1.8}
                 className={
                   isActive ? 'text-sidebar-item-active-foreground' : 'text-[var(--text-tertiary)]'
                 }

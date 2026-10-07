@@ -20,6 +20,7 @@
  *  - renderer 不感知 thread_id / app-server 任何概念
  */
 
+import { deviceHostedEnvironmentNote, stripTrailingSlashes } from '../shared/device-hosted.js';
 import { LIBRARY_READ_ROOT, withLibraryNativeReadContext } from '../shared/library-native-read.js';
 import os from 'node:os';
 import path from 'node:path';
@@ -3555,6 +3556,11 @@ assertRouteCurrent();
     const sid = opts.sessionId ?? '';
     const log = this.deps.logger.child(sid ? `s:${sid}/codex` : 'codex');
     const reviewMode = opts.reviewMode === true;
+    // 设备托管：Codex 在本机运行(本机的登录与供应商)，项目、文件与命令在任务所在电脑上。
+    // 那台电脑经隧道提供 Codex 原生的 exec-server 环境，命令、读写与补丁都在那里执行；
+    // Cindy 工具也经隧道。opts.workingDir 是本机影子目录。
+    const hosted = opts.deviceHosted && !opts.remoteHostId && !reviewMode ? opts.deviceHosted : undefined;
+    const hostedEnvironmentId = hosted ? `cindy-device-${randomUUID()}` : undefined;
     const botSkillGrants = !opts.remoteHostId && !reviewMode
       ? snapshotManagedSkillGrants(opts.botRuntimeProfile?.skillPolicy) : undefined;
     let refreshedBotSkillConfig: Record<string, unknown> | undefined;
@@ -3602,11 +3608,12 @@ assertRouteCurrent();
     // This per-session injection flag must not mutate the shared manager.
     if (makerMemoryEnabled && makerMemory) {
       try {
-        const store = await makerMemory.getStore(memoryScopeKey);
+        // 设备托管：记忆在任务所在电脑上，只用随启动选项带来的快照，不打开本机记忆库。
+        const store = hosted ? null : await makerMemory.getStore(memoryScopeKey);
         makerMemoryRules = opts.makerMemoryScopeKey?.startsWith('bot:')
           ? ''
           : MAKER_MEMORY_RULES;
-        makerMemoryIndex = opts.makerMemoryIndexSnapshot ?? await store.getIndex();
+        makerMemoryIndex = opts.makerMemoryIndexSnapshot ?? (store ? await store.getIndex() : '');
         memoryFlushController = new MemoryFlushController({
           logger: log.child('memory-flush'),
           workdir: memoryScopeKey,
@@ -5370,7 +5377,23 @@ assertRouteCurrent();
         );
       }
     }
+    // 设备托管：本机 MCP 一律停用，只用任务所在电脑经隧道提供的 Cindy 工具(令牌放在隧道路径里，
+    // 本机 MCP 的 bearer 令牌对隧道无效)。
+    let hostedLocalMcpNames: string[] = [];
+    const readHostedMcpConfig = (): Record<string, unknown> => {
+      const out: Record<string, unknown> = {};
+      for (const name of hostedLocalMcpNames) {
+        if (!hosted!.mcpServers.includes(name)) out[`mcp_servers.${name}.enabled`] = false;
+      }
+      const base = `${stripTrailingSlashes(hosted!.tunnelUrl)}/t/${encodeURIComponent(hosted!.tunnelToken)}/mcp/`;
+      for (const name of hosted!.mcpServers) {
+        out[`mcp_servers.${name}.url`] = `${base}${encodeURIComponent(name)}`;
+        out[`mcp_servers.${name}.enabled`] = true;
+      }
+      return out;
+    };
     const readSessionMcpConfig = (): Record<string, unknown> => {
+      if (hosted) return readHostedMcpConfig();
       const config = host.getSessionMcpConfig(opts.sessionInstanceId, { vendorOptions: vo });
       if (opts.remoteHostId && opts.botRuntimeProfile?.mcpPolicy
         && typeof config['mcp_servers.cindy_helper.url'] !== 'string') {
@@ -5525,17 +5548,18 @@ assertRouteCurrent();
     const codexExtraWritableRoots = reviewMode || !sessionCodexHome
       ? []
       : [joinCodexHome('memories')];
+    // 设备托管：工作区在任务所在电脑上，根目录用那台电脑的真实路径(随 exec-server 环境下发)。
     const runtimeWorkspaceRoots = (): string[] =>
       reviewMode
         ? [opts.workingDir]
-        : [...new Set([opts.workingDir, ...mutableExtraDirs, ...mutableWritableDirs])];
+        : [...new Set([hosted?.workingDir ?? opts.workingDir, ...mutableExtraDirs, ...mutableWritableDirs])];
     const runtimeWritableRoots = (): string[] =>
-      reviewMode ? [] : [...new Set([opts.workingDir, ...mutableWritableDirs])];
+      reviewMode ? [] : [...new Set([hosted?.workingDir ?? opts.workingDir, ...mutableWritableDirs])];
     // Auto-review 传给 core 的会话平台(决定是否抹平 macOS /private firmlink)。远端会话的 host
     // process.platform 不代表远端 OS(host 可能 macOS、远端 Linux)——远端 OS 未接入前保守传 'linux'
     // 关掉抹平 → fail-closed(不把远端 /private/tmp 误当 /tmp 区内)。本地用真实 process.platform。
     // 定义在此(startSession 作用域,opts=session)以避开 awaitApprovalDecision 内层 opts 的遮蔽。
-    const sessionReviewPlatform: NodeJS.Platform = opts.remoteHostId ? 'linux' : process.platform;
+    const sessionReviewPlatform: NodeJS.Platform = opts.remoteHostId ? 'linux' : hosted ? hosted.platform : process.platform;
     const reviewAutoAction = (action: ReviewableAction, hostAutoApprove = false, hostShortcutOnly = false): Promise<AutoReviewDecision> => {
       const directoryGeneration = autoReviewDirectoryGeneration;
       const request = {
@@ -6227,6 +6251,18 @@ assertRouteCurrent();
     let appliedContextLimit = currentContextLimit();
     activeTurnContextLimit = effectiveThreadContextWindow(appliedContextLimit);
 
+    /** 设备托管：线程与每轮都选中任务所在电脑上的 exec-server 环境(工作目录与根都是那台电脑的路径)。 */
+    function hostedEnvironmentParams(): { environments?: Array<Record<string, unknown>> } {
+      if (!hosted || !hostedEnvironmentId) return {};
+      return {
+        environments: [{
+          environmentId: hostedEnvironmentId,
+          cwd: hosted.workingDir,
+          runtimeWorkspaceRoots: runtimeWorkspaceRoots(),
+        }],
+      };
+    }
+
     function currentThreadWorkspaceConfig(contextLimit = currentContextLimit()): Pick<
       ThreadStartParams,
       | 'approvalPolicy'
@@ -6300,7 +6336,9 @@ assertRouteCurrent();
         // Review disables only transport-bearing entries discovered above.
         // Its host omits Cindy's MCP bridge, so a bare memory override would
         // create an invalid transport even though the entry is disabled.
+        // 设备托管：只停用本机确实配置了的 cindy_memory(没有传输配置的空条目会让 Codex 拒绝配置)。
         ...(!reviewMode && !makerMemoryEnabled && !opts.botRuntimeProfile
+          && (!hosted || hostedLocalMcpNames.includes('cindy_memory'))
           ? { 'mcp_servers.cindy_memory.enabled': false }
           : {}),
         // Configure the native window and its 90% compaction budget together.
@@ -6318,11 +6356,13 @@ assertRouteCurrent();
       const shared = {
         approvalPolicy,
         ...(approvalsReviewer ? { approvalsReviewer } : {}),
-        ...(readonlyReferenceDirsSupported
+        // 设备托管：工作区根随 exec-server 环境下发，本机线程不设本地根。
+        ...(readonlyReferenceDirsSupported && !hosted
           ? {
               runtimeWorkspaceRoots: runtimeWorkspaceRoots(),
             }
           : {}),
+        ...(hostedEnvironmentParams()),
         ...(Object.keys(config).length > 0 ? { config } : {}),
       };
       if (permissionProfile) {
@@ -6356,9 +6396,10 @@ assertRouteCurrent();
       const shared = {
         approvalPolicy,
         ...(approvalsReviewer ? { approvalsReviewer } : {}),
-        ...(readonlyReferenceDirsSupported
+        ...(readonlyReferenceDirsSupported && !hosted
           ? { runtimeWorkspaceRoots: runtimeWorkspaceRoots() }
           : {}),
+        ...(hostedEnvironmentParams()),
       };
       if (
         currentWorkspacePermissionProfile() !== undefined &&
@@ -6712,9 +6753,15 @@ assertRouteCurrent();
       makerMemoryRules,
       contactsRules,
       ghostRosterPrompt,
-      runtimeSystemPrompt: opts.botRuntimeProfile
-        ? undefined
-        : this.deps.runtimeConfig.systemPrompt,
+      // 本机任务逐字保持原值；设备托管时在末尾加上「项目在哪台电脑」的说明。
+      runtimeSystemPrompt: hosted
+        ? [
+            opts.botRuntimeProfile ? undefined : this.deps.runtimeConfig.systemPrompt,
+            deviceHostedEnvironmentNote(hosted, opts.workingDir),
+          ].filter((part): part is string => !!part && part.trim().length > 0).join('\n\n')
+        : opts.botRuntimeProfile
+          ? undefined
+          : this.deps.runtimeConfig.systemPrompt,
       makerMemoryIndex,
       botProfilePrompt: reviewMode ? undefined : opts.botProfilePrompt,
       botProfileContextPrompt: reviewMode ? undefined : opts.botProfileContextPrompt,
@@ -6740,7 +6787,7 @@ assertRouteCurrent();
     let codexProductPromptDelivery: AgentSessionHandle['codexProductPromptDelivery'];
 
     const withMcpDiscoveryContext = <T>(run: () => Promise<T>): Promise<T> => {
-      if (reviewMode || !sid || !opts.sessionInstanceId || !this.deps.withCodexMcpDiscoveryContext) return run();
+      if (hosted || reviewMode || !sid || !opts.sessionInstanceId || !this.deps.withCodexMcpDiscoveryContext) return run();
       return this.deps.withCodexMcpDiscoveryContext({
         sessionId: sid, sessionInstanceId: opts.sessionInstanceId,
         workingDir: opts.workingDir, vendorOptions: vo,
@@ -6848,6 +6895,25 @@ assertRouteCurrent();
       settingsUpdateChain = run;
       return run;
     };
+    if (hosted && hostedEnvironmentId) {
+      // 设备托管：本机 MCP 名单(全部停用，只留隧道提供的)，再把任务所在电脑的 exec-server 接成环境。
+      try {
+        const response = await host.request<{ config?: Record<string, unknown> }>(
+          Method.ConfigRead, { includeLayers: false },
+          { timeoutMs: CRITICAL_THREAD_RPC_TIMEOUT_MS },
+        );
+        hostedLocalMcpNames = Object.keys(asRecord(asRecord(response.config).mcp_servers));
+      } catch (error) {
+        log.warn('codex: hosted session could not list local MCP servers', { error: String(error) });
+      }
+      assertCurrentHost('environment/add');
+      await host.request(Method.EnvironmentAdd, {
+        environmentId: hostedEnvironmentId,
+        execServerUrl: `${stripTrailingSlashes(hosted.tunnelUrl.replace(/^http/, 'ws'))}/ws/exec-server`,
+        authBearerToken: hosted.tunnelToken,
+      }, { timeoutMs: CRITICAL_THREAD_RPC_TIMEOUT_MS });
+      assertCurrentHost('environment/add');
+    }
     if (opts.resumeSessionId && isLikelyValidThreadId(opts.resumeSessionId)) {
       // Phase 3: thread/resume is the historical-session path. Only the exact
       // provider "no rollout found" response below may fall back to thread/start.

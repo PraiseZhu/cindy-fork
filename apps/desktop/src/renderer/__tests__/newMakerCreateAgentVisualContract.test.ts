@@ -170,9 +170,9 @@ describe('NewMakerDraftRoute CREATE AGENT visual contract', () => {
       // 并非真实授予的上下文。本机草稿行为不变;把 picker 路由到对端后恢复,见 issue #1012。
       'onExtraDirsChange={isDeviceLinkDraft ? undefined : handleExtraDirsChange}',
       'onNewGoal={(text) =>',
-      'rememberedEffortByModel={isDeviceLinkDraft ? undefined : draft.effortByModel}',
+      'rememberedEffortByModel={usesDeviceCatalog ? undefined : draft.effortByModel}',
       'onRememberedEffortChange={',
-      'isDeviceLinkDraft ? undefined : handleRememberedEffortChange',
+      'usesDeviceCatalog ? undefined : handleRememberedEffortChange',
       "placeholder={t('newChat.chatInput.createAgentPlaceholder')}",
       // 统一模型选择器(M5):新会话的选中直通 + 收藏锚点选中态。撤掉 AgentSelect 后,
       // 「换引擎」这件事只剩这一条路径 —— 掉了它草稿就再也换不了引擎。

@@ -28,7 +28,11 @@ describe('sidebar remote project icon', () => {
   });
 
   it('maps device-link sessions to the device-link project icon and SSH sessions to the SSH project icon', () => {
-    expect(remoteProjectIconSource).toContain("kind === 'device-link' ? MonitorSmartphone : Globe");
+    expect(remoteProjectIconSource).toMatch(
+      /kind === 'device-link'\s+\?\s+MonitorSmartphone\s+:\s+Globe/,
+    );
+    // Agent 在另一台电脑运行的本机任务有自己的标识,不冒充远程设备任务。
+    expect(remoteProjectIconSource).toMatch(/kind === 'agent-device'\s+\?\s+Cpu/);
     expect(sessionItemSource).toMatch(
       /const remoteIconKind = session\.deviceLinkDeviceId\s+\?\s+'device-link'\s+:\s+session\.remoteHostId\s+\?\s+'ssh'\s+:\s+null/,
     );

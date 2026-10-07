@@ -45,6 +45,8 @@ import { ComposerSheet } from "./ComposerSheet";
 import { ComposerNativeSection as Section } from "./ComposerNativeSection";
 import { ComposerNativeRow } from "./ComposerNativeRow";
 import { MobileModelIconMark, MobileProviderMark } from "./MobileProviderMark";
+import { RemoteSourceMark } from "./RemoteSourceMark";
+import { groupSourceFilters } from "./remoteSourceFilters";
 import { mobileAgentLabel } from "./sessionAgentSwitch";
 import type { UnifiedMobilePickerViewProps } from "./UnifiedModelPickerSheet";
 
@@ -63,6 +65,25 @@ function NativeMark({ children }: { children: ReactNode }) {
         {children}
       </View>
     </RNHostView>
+  );
+}
+
+/** 来源格的供应商 mark;另一台电脑上的供应商带远程标记(右上角一道波纹加一个点)。 */
+function ProviderSourceMark({
+  filter,
+}: {
+  filter: UnifiedMobilePickerViewProps["filters"][number] | undefined;
+}) {
+  const mark = (
+    <MobileProviderMark
+      {...filter?.providerMark}
+      name={filter?.providerMark?.name ?? ""}
+    />
+  );
+  return filter?.remote ? (
+    <RemoteSourceMark size={iconSize.action}>{mark}</RemoteSourceMark>
+  ) : (
+    mark
   );
 }
 
@@ -134,13 +155,8 @@ export function UnifiedModelPickerView(p: UnifiedMobilePickerViewProps) {
             mark(LayoutGrid)
           ) : (
             <NativeMark>
-              <MobileProviderMark
-                {...p.filters.find((item) => item.id === p.filter)
-                  ?.providerMark}
-                name={
-                  p.filters.find((item) => item.id === p.filter)?.providerMark
-                    ?.name ?? ""
-                }
+              <ProviderSourceMark
+                filter={p.filters.find((item) => item.id === p.filter)}
               />
             </NativeMark>
           )}
@@ -238,11 +254,21 @@ export function UnifiedModelPickerView(p: UnifiedMobilePickerViewProps) {
                       justifyContent: "center",
                     }}
                   >
-                    <MobileModelIconMark
-                      icon={row.entry.icon}
-                      {...row.providerMark}
-                      color={colors.textSecondary}
-                    />
+                    {row.remoteDevice ? (
+                      <RemoteSourceMark size={iconSize.action}>
+                        <MobileModelIconMark
+                          icon={row.entry.icon}
+                          {...row.providerMark}
+                          color={colors.textSecondary}
+                        />
+                      </RemoteSourceMark>
+                    ) : (
+                      <MobileModelIconMark
+                        icon={row.entry.icon}
+                        {...row.providerMark}
+                        color={colors.textSecondary}
+                      />
+                    )}
                   </View>
                 </RNHostView>
               }
@@ -270,6 +296,48 @@ export function UnifiedModelPickerView(p: UnifiedMobilePickerViewProps) {
       ) : null}
     </>
   );
+  const sourceRow = (item: (typeof p.filters)[number]) => (
+    <ComposerNativeRow
+      key={item.id}
+      title={item.remote?.providerLabel ?? item.label}
+      subtitle={item.quota?.label}
+      testID={`${p.testID}.source.${item.id}`}
+      selected={p.filter === item.id}
+      selectionIcon={mark(Check)}
+      leading={
+        item.providerMark ? (
+          <VStack spacing={2}>
+            <NativeMark>
+              <ProviderSourceMark filter={item} />
+            </NativeMark>
+            {item.quota ? (
+              <ProgressView
+                value={item.quota.remaining / 100}
+                modifiers={[
+                  progressViewStyle("linear"),
+                  frame({ width: 24 }),
+                  tint(colors.textSecondary),
+                  accessibilityLabel(item.quota.label),
+                ]}
+                testID={`${p.testID}.source.${item.id}.quota`}
+              />
+            ) : null}
+          </VStack>
+        ) : (
+          mark(
+            item.id === "favorites" ? Star : LayoutGrid,
+            item.id === "favorites" && p.filter === "favorites",
+          )
+        )
+      }
+      onPress={() => {
+        p.onFilter(item.id);
+        setPage(null);
+      }}
+    />
+  );
+  // 来源页分块:被控电脑自己的格一块,其他电脑每台一块。
+  const sourceGroups = groupSourceFilters(p.filters);
   return (
     <ComposerSheet
       nativeContent
@@ -298,48 +366,15 @@ export function UnifiedModelPickerView(p: UnifiedMobilePickerViewProps) {
         </Section>
       ) : null}
       {page === "sources" ? (
-        <Section>
-          {p.filters.map((item) => (
-            <ComposerNativeRow
-              key={item.id}
-              title={item.label}
-              subtitle={item.quota?.label}
-              testID={`${p.testID}.source.${item.id}`}
-              selected={p.filter === item.id}
-              selectionIcon={mark(Check)}
-              leading={
-                item.providerMark ? (
-                  <VStack spacing={2}>
-                    <NativeMark>
-                      <MobileProviderMark {...item.providerMark} />
-                    </NativeMark>
-                    {item.quota ? (
-                      <ProgressView
-                        value={item.quota.remaining / 100}
-                        modifiers={[
-                          progressViewStyle("linear"),
-                          frame({ width: 24 }),
-                          tint(colors.textSecondary),
-                          accessibilityLabel(item.quota.label),
-                        ]}
-                        testID={`${p.testID}.source.${item.id}.quota`}
-                      />
-                    ) : null}
-                  </VStack>
-                ) : (
-                  mark(
-                    item.id === "favorites" ? Star : LayoutGrid,
-                    item.id === "favorites" && p.filter === "favorites",
-                  )
-                )
-              }
-              onPress={() => {
-                p.onFilter(item.id);
-                setPage(null);
-              }}
-            />
+        <>
+          <Section>{sourceGroups.local.map(sourceRow)}</Section>
+          {/* 其他电脑的供应商:每台电脑单独一块,块标题是电脑名。 */}
+          {sourceGroups.devices.map((device) => (
+            <Section key={device.deviceId} title={device.name}>
+              {device.filters.map(sourceRow)}
+            </Section>
           ))}
-        </Section>
+        </>
       ) : page === "harness" && options && config ? (
         <Section>
           {options.agents.map((agent) => (

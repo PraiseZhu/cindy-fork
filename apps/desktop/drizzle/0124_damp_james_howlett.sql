@@ -39,4 +39,4 @@ CREATE TABLE `orca_worker_events` (
 --> statement-breakpoint
 CREATE UNIQUE INDEX `uniq_orca_worker_events_event_id` ON `orca_worker_events` (`event_id`);--> statement-breakpoint
 CREATE INDEX `idx_orca_worker_events_team_seq` ON `orca_worker_events` (`team_id`,`seq`);--> statement-breakpoint
-CREATE INDEX `idx_orca_worker_events_logical` ON `orca_worker_events` (`logical_report_id`);
+CREATE INDEX `idx_orca_worker_events_logical` ON `orca_worker_events` (`logical_report_id`);--> statement-breakpoint

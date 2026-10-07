@@ -384,6 +384,21 @@ describe('projectInvokeResultForTunnel — maker:provider:list 投影', () => {
     expect(providers[0].routing).toEqual({ codex: {}, 'claude-code': {} });
   });
 
+  it('「允许被远程调用」只作标记透传，不裁剪目录(远程控制与手机仍看到全部供应商)', () => {
+    const base = xdProviderWithFullRouting();
+    const { providers } = project({
+      providers: [
+        { ...base, id: 'shared', remoteInvocationEnabled: true },
+        { ...base, id: 'private', remoteInvocationEnabled: false },
+        { ...base, id: 'odd', remoteInvocationEnabled: 'yes' },
+        { ...base, id: 'legacy' },
+      ],
+    });
+    expect(providers.map((p) => p.id)).toEqual(['shared', 'private', 'odd', 'legacy']);
+    expect(providers.map((p) => p.remoteInvocationEnabled)).toEqual([true, false, undefined, undefined]);
+    expect(providers[2]).not.toHaveProperty('remoteInvocationEnabled');
+  });
+
   it('非 maker:provider:list 通道 → 原样返回不改', () => {
     const other = { foo: 'bar', providers: [xdProviderWithFullRouting()] };
     expect(__testing.projectInvokeResultForTunnel('maker:set-model', other)).toBe(other);

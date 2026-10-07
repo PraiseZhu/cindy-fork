@@ -165,6 +165,7 @@ import {
 import { isDeviceLinkRemotePushCurrent } from '@/lib/remoteDataOwnerPushFence';
 import { canAccessBillingSettings } from '@/components/settings/billingVisibility';
 import { useDeviceProviders } from '@/hooks/useDeviceProviders';
+import { useSelectableDevices } from '@/hooks/useControllableDevices';
 import {
   canExposeWritableDirsChange,
   resolveManualCompactChannel,
@@ -2089,17 +2090,47 @@ export function CCAgentSessionView({
   // device-link 远程会话用被控端经隧道带来的 providers(per-provider,fast 判定与本地同口径)。
   const { providers: localProviders } = useProviders();
   const { mode: authMode, user: authUser, dataOwnerId } = useAuth();
-  const { providers: deviceProviders } = useDeviceProviders(remoteDeviceId);
-  const providers = remoteDeviceId ? deviceProviders : localProviders;
+  // Agent 在另一台电脑运行的任务:模型目录同样以那台为准(任务本身在本机)。
+  const agentDeviceId = remoteDeviceId ? undefined : (session?.agentDeviceId ?? undefined);
+  // 远程 Agent:本机任务的模型面板也列出其他电脑的供应商(选中 = 把 Agent 挪过去,下一条消息
+  // 生效)。Agent 当前所在电脑与挂着的换位置目标即使掉线也保留,让用户看得到、换得回来。
+  const { devices: selectableDevices } = useSelectableDevices();
+  const pendingAgentDeviceId = agentSwitchIntent?.agentDeviceId;
+  const remoteAgentDevices = useMemo(
+    () =>
+      remoteDeviceId || session?.remoteHostId
+        ? undefined
+        : selectableDevices
+            .filter(
+              (device) =>
+                device.online ||
+                device.deviceId === agentDeviceId ||
+                device.deviceId === pendingAgentDeviceId,
+            )
+            .map(({ deviceId, name }) => ({ deviceId, name })),
+    [selectableDevices, remoteDeviceId, session?.remoteHostId, agentDeviceId, pendingAgentDeviceId],
+  );
+  const agentDeviceName = agentDeviceId
+    ? (selectableDevices.find((device) => device.deviceId === agentDeviceId)?.name ?? null)
+    : null;
+  const catalogDeviceId = remoteDeviceId ?? agentDeviceId;
+  const { providers: deviceProviders } = useDeviceProviders(catalogDeviceId);
+  const providers = catalogDeviceId ? deviceProviders : localProviders;
   const canSwitchToClaudeSubscription = useMemo(() => {
-    if (remoteDeviceId || session?.remoteHostId || session?.agentKind !== 'cc' || !session.model) {
+    if (
+      remoteDeviceId ||
+      agentDeviceId ||
+      session?.remoteHostId ||
+      session?.agentKind !== 'cc' ||
+      !session.model
+    ) {
       return false;
     }
     return connectedProvidersForAgent(localProviders, 'claude-code').some(
       (provider) =>
         provider.id === 'anthropic' && providerOffersModel(provider, session.model, 'claude-code'),
     );
-  }, [localProviders, remoteDeviceId, session?.agentKind, session?.model, session?.remoteHostId]);
+  }, [localProviders, remoteDeviceId, agentDeviceId, session?.agentKind, session?.model, session?.remoteHostId]);
   /**
    * 余额不足横幅的「查看余额」出口 —— 只在计费面对当前账号可见时提供（cloud +
    * personal，与设置页「用量和计费」同一判据）。org / local / 未登录账号在 Cindy 里
@@ -3284,6 +3315,11 @@ export function CCAgentSessionView({
           toast.warning(t('review.toast.remoteUnsupported'));
           return { handled: true, accepted: false, message };
         }
+        if (agentDeviceId) {
+          // Agent 在另一台电脑运行：审查任务暂不能在那台以只读方式运行。
+          toast.warning(t('review.toast.agentDeviceUnsupported'));
+          return { handled: true, accepted: false, message };
+        }
         const attachments = files?.length ? serializeAttachedFiles(files) : undefined;
         try {
           const request = {
@@ -3326,6 +3362,7 @@ export function CCAgentSessionView({
     [
       getHelpCommandsSnapshot,
       isRemoteSession,
+      agentDeviceId,
       session?.agentKind,
       session?.remoteHostId,
       session?.id,
@@ -4284,7 +4321,10 @@ export function CCAgentSessionView({
     if (!shouldFallbackVendorModel(providers, sessionModel, agent, {
       providerId: sessionProviderId,
       hasSwitchIntent: agentSwitchIntent != null,
-      isRemote: Boolean(isRemoteSession || remoteDeviceId || getSessionDeviceId(sessionId)),
+      // Agent 在另一台电脑运行时模型同样以那台为准，本机不替它纠正。
+      isRemote: Boolean(
+        isRemoteSession || remoteDeviceId || agentDeviceId || getSessionDeviceId(sessionId),
+      ),
     })) return;
     // 用三值化后的 agent 映射选默认模型:Pi 会话必须回退到 Pi 目录默认,而不是被
     // `isCodex ? 'codex' : 'cc'` 误写成 CC 首选(可能是更贵的 Opus)(codex review)。
@@ -4301,6 +4341,7 @@ export function CCAgentSessionView({
     providers,
     refreshServerSession,
     remoteDeviceId,
+    agentDeviceId,
     sessionAgentKind,
     sessionId,
     sessionModel,
@@ -4727,6 +4768,7 @@ export function CCAgentSessionView({
       // 消息下方 Fork / Rewind icon 的显示 (Codex rewind=false → 隐藏)。
       agentKind={session?.agentKind}
       remoteHostId={session?.remoteHostId ?? null}
+      agentOnOtherDevice={Boolean(agentDeviceId)}
       sessionSource={session?.source}
       // text-lightbox-trigger-extension F1/F2: cwd flows from session
       // owner down through MessageStream → AssistantMessage / UserMessage.
@@ -5499,6 +5541,9 @@ export function CCAgentSessionView({
                   initialWorkingDir={session?.workingDir}
                   remoteHostId={session?.remoteHostId ?? null}
                   deviceLinkDeviceId={rightSidebarDeviceLinkDeviceId}
+                  agentDeviceId={session?.agentDeviceId ?? null}
+                  agentDeviceName={agentDeviceName}
+                  {...(remoteAgentDevices ? { remoteAgentDevices } : {})}
                   modelMemoryOverride={remoteModelMemoryOverride}
                   initialModel={session?.model}
                   initialProviderId={session?.providerId ?? null}

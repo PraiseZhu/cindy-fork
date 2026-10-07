@@ -54,6 +54,7 @@ import { MarkdownRenderer } from './MarkdownRenderer';
 import { CindyMakeDoctorCard } from './CindyMakeDoctorCard';
 import { builtInSkillDescriptionKey } from '@/features/skillhub/lib/builtInSkillPresentation';
 import { CindyMakeCompleteCard } from '@/components/cindy-make/CindyMakeCompleteCard';
+import { getSessionDeviceId } from '@/features/device-link/remoteProjectsStore';
 
 interface SystemCardProps {
   cardType:
@@ -1097,7 +1098,28 @@ function isEnglishSourceHandoff(handoff: string): boolean {
  * 的上下文摘要全文)——默认不打扰,想看时可核查我们替用户做了什么交接。
  * 全灰度(docs/design-rules/cindy-design-system.md §4),无 chromatic 色;展开面板复用 msg-tool 系 token。
  */
-function AgentSwitchCard({ data }: { data?: Record<string, unknown> }) {
+/**
+ * 远程 Agent 换电脑的分隔条文案:只有边界行带 toAgentDeviceId 时才是换电脑。null = 任务所在电脑 ——
+ * 在本机打开的任务就是「本机」;远程控制另一台电脑上的任务时那台不是本机,用切换时快照的名字。
+ */
+function agentRelocationLabel(
+  data: Record<string, unknown> | undefined,
+  sessionId: string | undefined,
+  t: ReturnType<typeof useTranslation>['t'],
+): string | null {
+  if (!data || !('toAgentDeviceId' in data)) return null;
+  const name =
+    typeof data.toAgentDeviceName === 'string' && data.toAgentDeviceName ? data.toAgentDeviceName : null;
+  if (data.toAgentDeviceId === null && (!sessionId || !getSessionDeviceId(sessionId))) {
+    return t('chat.systemCard.agentSwitch.relocatedHere');
+  }
+  if (name) return t('chat.systemCard.agentSwitch.relocatedTo', { device: name });
+  return data.toAgentDeviceId === null
+    ? t('chat.systemCard.agentSwitch.relocatedTaskComputer')
+    : t('chat.systemCard.agentSwitch.relocatedElsewhere');
+}
+
+function AgentSwitchCard({ data, sessionId }: { data?: Record<string, unknown>; sessionId?: string }) {
   const { t } = useTranslation();
   const [expanded, setExpanded] = useState(false);
   const engineLabel = (kind: unknown): string =>
@@ -1106,7 +1128,9 @@ function AgentSwitchCard({ data }: { data?: Record<string, unknown> }) {
   const toLabel = engineLabel(data?.toAgentKind);
   const toModel = typeof data?.toModel === 'string' ? data.toModel : '';
   const handoff = typeof data?.handoff === 'string' ? data.handoff : '';
-  const label = t('chat.systemCard.agentSwitch.label', { from: fromLabel, to: toLabel });
+  const label =
+    agentRelocationLabel(data, sessionId, t) ??
+    t('chat.systemCard.agentSwitch.label', { from: fromLabel, to: toLabel });
 
   return (
     <div className="w-full select-none py-2" role="separator" aria-label={label}>
@@ -1375,7 +1399,7 @@ export function SystemCard({
     case 'auto-resume-pending':
       return <AutoResumeActionRow state="live" info={readAutoResumeInfo(data)} />;
     case 'agent-switch':
-      return <AgentSwitchCard data={data} />;
+      return <AgentSwitchCard data={data} sessionId={sessionId} />;
     case 'context-rebuild':
       return <ContextRebuildCard data={data} />;
     case 'learn':

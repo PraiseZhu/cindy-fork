@@ -290,6 +290,7 @@ function createDb(filename = ':memory:'): void {
       extra_dirs TEXT NOT NULL DEFAULT '[]',
       writable_dirs TEXT NOT NULL DEFAULT '[]',
       remote_host_id TEXT,
+      agent_device_id TEXT,
       source TEXT NOT NULL DEFAULT 'desktop',
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL,
@@ -4254,6 +4255,8 @@ describe('Bot Session task end-to-end runtime', () => {
       readSessionRuntimeProfiles: async () => ({ effective: { providerId: 'openai', model: 'gpt-6-astra' },
         control: { generation: 1, visitedRoutes: [], fallbackHop: 0 } }),
       canApplyAutomaticRuntimeSelection: () => true,
+      // 本机任务(Agent 不在另一台电脑运行)。
+      readSessionAgentDeviceId: async () => null,
       readBotFallbackCandidate: async () => ({ isBot: false, candidate: null }),
       readSessionRuntimeFallbackSettings: () => ({ enabled: true }),
       getDesktopProviderService: () => ({ listProviders: async () => [] }),

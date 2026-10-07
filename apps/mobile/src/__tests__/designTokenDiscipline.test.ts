@@ -76,6 +76,11 @@ const ALLOWLIST: Array<{ file: string; snippet: string; reason: string }> = [
     snippet: 'borderRadius: 0',
     reason: '显式方角覆盖,非漂移(通栏布局回退恢复,用户改稿 2026-07-21)',
   },
+  {
+    file: 'src/session/RemoteSourceMark.tsx',
+    snippet: 'strokeWidth={1.4}',
+    reason: '远程标记波纹:16 单位 viewBox 内的图形几何(移植桌面同值,随图标缩放),非阶梯图标描边',
+  },
 ];
 
 function collectFiles(): string[] {

@@ -1,4 +1,4 @@
-import { isPeerResetRetryableReadChannel, isBackgroundInvoke, bypassInvokeScheduling } from './invokePolicy.js';
+import { isPeerResetRetryableInvoke, isBackgroundInvoke, bypassInvokeScheduling } from './invokePolicy.js';
 import { InvokeScheduler } from './invokeScheduler.js';
 import { encodeSharedTaskEnvelope, decodeSharedTaskEnvelope } from './sharedTaskEnvelope.js';
 import { isSharedTaskPeer } from './sharedTaskPeer.js';
@@ -508,8 +508,8 @@ interface PendingRequest {
 
 function isPeerResetRetryableRead(env: Omit<Envelope, 'id'>): boolean {
   if (env.kind !== 'invoke') return false;
-  const channel = (env.payload as InvokePayload | undefined)?.channel;
-  return typeof channel === 'string' && isPeerResetRetryableReadChannel(channel);
+  const payload = env.payload as InvokePayload | undefined;
+  return typeof payload?.channel === 'string' && isPeerResetRetryableInvoke(payload.channel, payload.args);
 }
 
 interface PendingReliableMessage {

@@ -25,6 +25,7 @@
  * Renderer 可调用。它由业务 dispatch 拦截,绝不放行通用 UI / shell IPC。
  */
 import { FILE_PEER_CHANNEL } from './filePeer.js';
+import { REMOTE_AGENT_CHANNEL } from './remoteAgent.js';
 import { TASK_MIGRATION_CHANNEL } from './taskMigration.js';
 import { SESSION_ACTIVITY_CHANNEL, SESSION_SYNC_CHANNEL } from './topics.js';
 import { REMOTE_DESKTOP_INVOKE_MS } from './remoteDesktopIce.js';
@@ -330,6 +331,10 @@ const CORE_INVOKE_CHANNELS: readonly string[] = [
   DL_MEDIA_FETCH_CHANNEL,
   FILE_PEER_CHANNEL,
   TASK_MIGRATION_CHANNEL,
+  // 远程 Agent(被控端 dispatch 拦截执行，不落 ipcMain handler)：在被控端用它自己的登录与
+  // 供应商运行 Agent，文件、命令与 Cindy 工具回到控制端执行。准入同 fs:list-dir 的论证：
+  // 同账号 + 被控端显式打开远程控制时，控制端本就能驱动被控端的 Agent；不进共享任务白名单。
+  REMOTE_AGENT_CHANNEL,
   // 出方向语音转写(被控端 dispatch 拦截执行,不落 ipcMain handler;复用被控端 ASR 配置)。
   DL_VOICE_TRANSCRIBE_CHANNEL,
   // 临时 voice credential 同步(被控端 dispatch 拦截执行,不落 ipcMain handler;禁止泛化)。

@@ -330,6 +330,8 @@ export class PiNativeProviderProxyNotReadyError extends Error {
  * sessionId 缺省 → host 不注册、URL 不带 query(匿名会话走无 ctx 兜底,行为同改动前)。
  */
 export interface PiExtraSpawnConfigContext {
+  /** 使用这些工具的 Agent(缺省 pi)。Agent 在另一台电脑上运行的任务也借这套桥身份。 */
+  agentKind?: AgentKind;
   sessionId?: string;
   /** 当前 Maker Session 实例代号；用于阻断旧 bridge 请求借用新实例权限。 */
   sessionInstanceId?: string;
@@ -1730,6 +1732,33 @@ export class TurnDispatchRejectedError extends Error {
   }
 }
 
+/** 设备托管会话的描述(见 StartSessionOptions.deviceHosted)。 */
+export interface DeviceHostedSession {
+  /** Agent 主机上的虚拟工作目录，执行器映射到任务真实目录；旧协议兼容真实路径。 */
+  workingDir: string;
+  extraDirs: string[];
+  writableDirs: string[];
+  /** 任务所在电脑的平台与 shell(写进给模型的环境说明)。 */
+  platform: NodeJS.Platform;
+  /** 虚拟工作区路径采用 Agent 进程所在主机的路径风格；缺省按当前进程判断。 */
+  pathPlatform?: NodeJS.Platform;
+  shell: string;
+  osVersion?: string;
+  homeDir?: string;
+  isGitRepo: boolean;
+  /** 本机 loopback 隧道：Agent 经它访问任务所在电脑的执行器与 Cindy 工具。 */
+  tunnelUrl: string;
+  tunnelToken: string;
+  /** 经隧道可用的 Cindy MCP 服务名(`<tunnelUrl>/mcp/<name>`)。 */
+  mcpServers: string[];
+  /**
+   * 本机虚拟工作区根：父目录层级对应执行端的上级说明文件，Agent 照常向上加载。
+   */
+  mirrorRoot?: string;
+  /** 任务所在电脑上用户的个人说明(该 Agent 的用户级说明文件)，写进给模型的环境说明。 */
+  personalInstructions?: string;
+}
+
 export interface StartSessionOptions {
   /**
    * Business 层 session id (host 调用 maker.createSession 时传的 opts.id, 由
@@ -1765,6 +1794,13 @@ export interface StartSessionOptions {
    * 目前仅 Codex 支持; Claude 不消费此字段 (会被忽略)。
    */
   remoteHostId?: string;
+  /**
+   * 设备托管：Agent 进程在本机运行(用本机的程序、登录、供应商与网络)，任务、项目文件与
+   * 命令执行在同账号的另一台电脑上。workingDir 是本机的影子目录(只放同步过来的项目说明，
+   * 供 Agent 照常加载)；文件与命令工具、Cindy 工具全部经 tunnel 回到任务所在电脑执行。
+   * 与 remoteHostId 互斥。
+   */
+  deviceHosted?: DeviceHostedSession;
   model: string;
   /**
    * 本次会话显式选择的供应商来源。maker-core 只用它推导子进程凭证形态;

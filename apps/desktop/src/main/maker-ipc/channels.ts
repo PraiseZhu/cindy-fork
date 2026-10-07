@@ -251,6 +251,8 @@ export const MAKER_INVOKE = {
    * **不进 device-link allowlist**(远程改被控端全局设置越权,见 allowlist.ts 准入判据)。
    */
   MODEL_DISABLE_SET: 'maker:model-disable:set',
+  /** 本机供应商是否允许同账号另一台电脑的远程 Agent 调用；仅本机可信 renderer 可写。 */
+  PROVIDER_REMOTE_ACCESS_SET: 'maker:provider:remote-access:set',
   /**
    * Owner-scoped provider display-order override.
    * Input = { dataOwnerId: string | null; ownerGeneration: number; providerIds: string[] }.

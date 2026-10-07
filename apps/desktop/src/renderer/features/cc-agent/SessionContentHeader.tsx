@@ -77,8 +77,41 @@ import { isRemoteSessionWriteBlocked } from './lib/remoteSessionWriteGuard';
 import { Tip } from '@/components/ui/tooltip';
 import { TaskTagDots, TaskTagMenuSection, TaskTagEditor } from '@/features/task-tags/TaskTags';
 import { isSharedTaskPeer } from '@cindy/device-link';
+import { useDeviceLinkDeviceList } from '@/features/device-link/useDeviceLinkDeviceList';
 
 const log = createLogger('SessionContentHeader');
+
+/**
+ * 任务在本机、Agent 在同账号另一台电脑上运行:标明那台电脑，离线时如实提示(不自动改在本机跑)。
+ */
+function AgentDeviceIndicator({ deviceId }: { deviceId: string }) {
+  const { t } = useTranslation();
+  const devices = useDeviceLinkDeviceList();
+  const device = devices?.find((item) => item.deviceId === deviceId);
+  const name = device?.name || deviceId;
+  const offline = device ? !device.online : false;
+  return (
+    <Tip
+      text={t(
+        offline ? 'ccAgent.sessionHeader.agentDeviceOffline' : 'ccAgent.sessionHeader.agentDevice',
+        { device: name },
+      )}
+    >
+      <span
+        role="img"
+        aria-label={t('ccAgent.sessionHeader.agentDevice', { device: name })}
+        className="inline-flex"
+        style={WINDOW_NO_DRAG_STYLE}
+      >
+        <RemoteProjectIcon
+          kind="agent-device"
+          connectionStatus={offline ? 'disconnected' : 'connected'}
+          className="mr-1 text-[var(--cmd-palette-item-meta)]"
+        />
+      </span>
+    </Tip>
+  );
+}
 
 /**
  * 注册器组件：由路由直挂的 CCAgentSessionView 条件渲染（仅当该实例"拥有"
@@ -552,6 +585,9 @@ export function SessionContentHeader({
             className="mr-1 text-[var(--cmd-palette-item-meta)]"
           />
         </Tip>
+      )}
+      {!isEditing && !remoteIconKind && session.agentDeviceId && (
+        <AgentDeviceIndicator deviceId={session.agentDeviceId} />
       )}
 
       {isEditing ? (

@@ -413,7 +413,9 @@
     "REMOTE_WORKDIR_UNAVAILABLE": "遠端專案目錄不可訪問，請恢復網路盤連線後重試。",
     "RIGHT_SIDEBAR_TOO_MANY_TABS": "目前任務已達標籤數量上限，請先關閉一些標籤",
     "RIGHT_SIDEBAR_STATE_TOO_LARGE": "標籤內容過大，無法新增",
-    "RIGHT_SIDEBAR_UNKNOWN_KIND": "此標籤類型暫時無法使用"
+    "RIGHT_SIDEBAR_UNKNOWN_KIND": "此標籤類型暫時無法使用",
+    "REMOTE_AGENT_DEVICE_UNREACHABLE": "模型未切換：要執行 Agent 的那台電腦暫時連不上。確認它在線並允許遠端控制後重試。",
+    "REMOTE_AGENT_MODEL_UNAVAILABLE": "模型未切換：那台電腦上沒有這個模型，或沒有對這個供應商開啟「允許遠端呼叫」。請換一個模型。"
   },
   "providerError": {
     "AUTH_INVALID": "API 金鑰無效或已過期（401），請檢查金鑰後重試",
@@ -2536,6 +2538,12 @@
           "empty": "該供應商這次沒有返回任何可用模型，下面是上次獲取的列表。請確認帳號權限後重試。"
         },
         "suspendedBanner": "該供應商已停用，憑證已保留；啟用後其模型才會重新可用",
+        "remoteAccess": {
+          "label": "允許遠端呼叫",
+          "description": "開啟後，同帳號的其他電腦可以用這個供應商的模型，讓 Agent 在這台電腦上執行，使用這台電腦的登入和配額。",
+          "ariaLabel": "允許同帳號的其他電腦呼叫此供應商",
+          "writeFailed": "遠端呼叫設定未能儲存，請重試"
+        },
         "moreActionsAria": "更多操作"
       },
       "detect": {
@@ -7706,7 +7714,12 @@
         "reset": "恢復預設",
         "reorder": "調整{{name}}順序，按上下方向鍵"
       },
-      "items": { "automations": "自動化", "plugins": "插件", "bots": "夥伴", "search": "搜尋" }
+      "items": {
+        "automations": "自動化",
+        "plugins": "插件",
+        "bots": "夥伴",
+        "search": "搜尋"
+      }
     },
     "user": {
       "settingsLink": "設定，當前使用者：{{name}}",
@@ -8940,6 +8953,8 @@
         "ariaWithEffort": "選擇模型。當前：{{model}}，推理強度：{{effort}}",
         "pendingAria": "選擇模型。下條訊息：{{agent}} · {{model}}",
         "pendingAriaWithEffort": "選擇模型。下條訊息：{{agent}} · {{model}}，推理強度：{{effort}}",
+        "agentDevice": "Agent 在 {{device}} 上執行",
+        "agentDeviceUnnamed": "Agent 在另一臺電腦上執行",
         "agent": {
           "claudeCode": "Claude Code",
           "codex": "Codex",
@@ -8995,6 +9010,8 @@
       "unified": {
         "railFavorites": "收藏",
         "railAll": "全部",
+        "railRemoteProvider": "{{provider}} · {{device}}",
+        "remoteLoading": "正在讀取那臺電腦的模型…",
         "favoritesGroup": "收藏",
         "favoritesEmpty": "還沒有收藏——把滑鼠停到模型列上，點 ☆ 存到這裡",
         "addFavorite": "存為收藏",
@@ -9281,6 +9298,13 @@
           "cancel": "保留當前 Agent",
           "dontShowAgain": "下次不再提醒"
         }
+      },
+      "agentRelocation": {
+        "titleLocal": "改回這台電腦執行 Agent？",
+        "titleOther": "改到「{{device}}」上執行 Agent？",
+        "description": "原來那台電腦上的對話記錄帶不過來，會整理成交接摘要接上，思考內容等不能保證完美繼承。下一則訊息送出時生效。",
+        "confirm": "換電腦執行",
+        "cancel": "保持不變"
       }
     },
     "agentSelect": {
@@ -10113,7 +10137,11 @@
         "toggleHint": "檢視交接內容",
         "handoffTitle": "交接內容——切換時傳送給新引擎的上下文摘要(不計入對話記錄，僅在此展示)",
         "handoffTitleEnglishSource": "交接內容——切換時傳送給新引擎的上下文摘要，原文為英文(不計入對話記錄，僅在此展示)",
-        "resumedBadge": "已續接原任務"
+        "resumedBadge": "已續接原任務",
+        "relocatedHere": "Agent 已改到這台電腦上執行",
+        "relocatedTo": "Agent 已改到 {{device}} 上執行",
+        "relocatedTaskComputer": "Agent 已改到任務所在的電腦上執行",
+        "relocatedElsewhere": "Agent 已改到另一台電腦上執行"
       },
       "contextRebuild": {
         "labelOverflow": "已整理上下文並繼續",
@@ -10342,7 +10370,15 @@
       "REMOTE_PROVIDER_UNSUPPORTED": "遠端任務還不能使用這個模型供應商。請換一個供應商，或在本機任務裡使用它。",
       "REMOTE_PROVIDER_UPDATING": "這個模型供應商的憑證正在更新。請稍後再試。",
       "REMOTE_WORKDIR_UNAVAILABLE": "遠端工作目錄現在無法使用。請確認那台電腦上的目錄還在，然後重試。",
-      "REMOTE_OPTIMISTIC_SESSION_STATE_UNAVAILABLE": "電腦端暫時無法確認這則訊息是否已經送出。請稍後再試，不要重複傳送同一則。"
+      "REMOTE_OPTIMISTIC_SESSION_STATE_UNAVAILABLE": "電腦端暫時無法確認這則訊息是否已經送出。請稍後再試，不要重複傳送同一則。",
+      "REMOTE_AGENT_UNAVAILABLE": "暫時連不上執行 Agent 的電腦。確認那臺電腦在線並允許遠端控制後重試。",
+      "REMOTE_AGENT_PEER_TOO_OLD": "那臺電腦上的 Cindy 版本過舊，還不能替這臺電腦執行 Agent。請先在那臺電腦上更新 Cindy。",
+      "REMOTE_AGENT_EXPIRED": "這個任務在執行 Agent 的電腦上已經結束。請重新傳送。",
+      "REMOTE_AGENT_NOT_FOUND": "這個任務在執行 Agent 的電腦上已經結束。請重新傳送。",
+      "REMOTE_AGENT_BUSY": "那臺電腦上同時執行的任務太多。先結束一些任務後再試。",
+      "REMOTE_AGENT_UNSUPPORTED": "那臺電腦上這個 Agent 無法使用。在那臺電腦上安裝或登入後再試，或換一個 Agent。",
+      "REMOTE_AGENT_INVALID": "與執行 Agent 的電腦通訊時出錯。請重試；如果持續出現，請把兩臺電腦上的 Cindy 都更新到最新版。",
+      "REMOTE_AGENT_PROVIDER_NOT_ALLOWED": "那臺電腦沒有允許遠端呼叫這個供應商。請在那臺電腦的「設定 → 模型供應商」裡開啟「允許遠端呼叫」，或換一個模型。"
     },
     "generatedFiles": {
       "title": "本條訊息生成的檔案",
@@ -10637,7 +10673,8 @@
       "worktreeRepoHint": "可嘗試重新選一次工作目錄，等右下角資料夾標識重新整理後再試",
       "sessionInactive": "任務已不再處於活躍狀態",
       "remoteProjectBanner": "在 {{device}} 的 {{project}} 中新建任務",
-      "remoteDialogueBanner": "在 {{device}} 上新建對話（不繫結專案）"
+      "remoteDialogueBanner": "在 {{device}} 上新建對話（不繫結專案）",
+      "agentDeviceBanner": "任務和檔案留在本機，Agent 在 {{device}} 上執行"
     },
     "jumpSession": {
       "emptyId": "請輸入要跳轉的任務 ID",
@@ -11033,7 +11070,9 @@
     },
     "sessionHeader": {
       "untitled": "未命名任務",
-      "moreActions": "更多操作"
+      "moreActions": "更多操作",
+      "agentDevice": "Agent 在 {{device}} 上執行",
+      "agentDeviceOffline": "Agent 在 {{device}} 上執行，那臺電腦目前離線，連上後才能繼續"
     },
     "gitContext": {
       "detached": "分離 HEAD",
@@ -13240,7 +13279,8 @@
     "sessionTitle": "審查 · {{title}}",
     "toast": {
       "failed": "無法開始審查",
-      "remoteUnsupported": "當前版本只支援審查本機任務"
+      "remoteUnsupported": "當前版本只支援審查本機任務",
+      "agentDeviceUnsupported": "Agent 在另一臺電腦執行的任務暫不支援審查"
     },
     "externalArtifactConfirm": {
       "title": "允許審查工作區外的成果？",
