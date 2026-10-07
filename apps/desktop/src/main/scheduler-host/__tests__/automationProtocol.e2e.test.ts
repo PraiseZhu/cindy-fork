@@ -34,6 +34,7 @@ it('replays a keyed script input across database reopen and enforces scope throu
   try {
     sqlite.exec(`CREATE TABLE migration_meta(key TEXT PRIMARY KEY,value TEXT);
       CREATE TABLE migration_history(seq INTEGER PRIMARY KEY,file_name TEXT,content_hash TEXT,applied_at INTEGER);
+      CREATE TABLE schedules(id TEXT PRIMARY KEY,target_session_id TEXT);
       CREATE TABLE sessions(id TEXT PRIMARY KEY,status TEXT NOT NULL,agent_kind TEXT NOT NULL DEFAULT 'codex');
       CREATE TABLE messages(id TEXT PRIMARY KEY,session_id TEXT,client_id TEXT,role TEXT,rewind_at INTEGER);
       CREATE TABLE agent_input_queue_snapshots(session_id TEXT PRIMARY KEY,payload TEXT);

@@ -11437,6 +11437,24 @@ describe('AgentInputCoordinator scheduler 排队心跳(review 反馈回归)', ()
     ).toBe(true);
   });
 
+  it('persists keyed automation scheduler input and restores it once while dropping cron heartbeats', async () => {
+    const writer = createHarness(), sid = 'durable-automation-queue';
+    await writer.coordinator.ensureQueueRestored(sid);
+    writer.setRunning(true);
+    writer.coordinator.enqueue(sid, makeItem('durable-input', 'keyed work', { origin: { ...schedOrigin, durableAutomation: true } }));
+    writer.coordinator.enqueue(sid, makeItem('heartbeat', 'cron', { origin: schedOrigin }));
+    await flush();
+    const snapshot = JSON.parse(JSON.stringify(writer.persistQueueSnapshot.mock.calls.at(-1)?.[1] ?? []));
+    expect(snapshot.map((item: AgentInputQueuedMessage) => item.clientId)).toEqual(['durable-input']);
+    const restarted = createHarness();
+    restarted.setLoadQueueSnapshot(async () => snapshot);
+    await restarted.coordinator.ensureQueueRestored(sid);
+    await restarted.coordinator.ensureQueueRestored(sid);
+    expect(restarted.coordinator.getProjection(sid).pendingQueue.map(item => item.clientId)).toEqual(['durable-input']);
+    expect(restarted.coordinator.isQueuePaused(sid)).toBe(true);
+    expect(restarted.sendToAgent).not.toHaveBeenCalled();
+  });
+
   it('崩溃快照恢复时丢弃 scheduler 项(不进暂停队列,普通项照常恢复)', async () => {
     // 静默会话的恢复队列是 queuePausedByRestore 暂停态,自动化项等不来"用户显式
     // 输入"的放行,会永远滞留并让同任务去重把后续 fire 全判 duplicate —— 无人值守

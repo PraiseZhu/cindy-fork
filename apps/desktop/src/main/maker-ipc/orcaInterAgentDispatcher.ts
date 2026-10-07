@@ -174,7 +174,7 @@ export interface OrcaInterAgentDispatcherDeps<TSessionMeta> {
     sessionId: string,
     meta: TSessionMeta,
   ) => Promise<AgentInputCreateOpts>;
-  enqueueQueuedMessage: (sessionId: string, item: AgentInputQueuedMessage) => void;
+  enqueueQueuedMessage: (sessionId: string, item: AgentInputQueuedMessage, beforeEnqueue?: () => void) => void | Promise<void>;
   /** Restore first, then synchronously reserve the item at the live queue head. */
   reserveNextQueuedMessage: (
     sessionId: string,
@@ -430,7 +430,7 @@ export function createOrcaInterAgentDispatcher<TSessionMeta>(
           params.onAcceptedCommit,
         );
       }
-      deps.enqueueQueuedMessage(params.targetSessionId, queued);
+      await deps.enqueueQueuedMessage(params.targetSessionId, queued, params.admission);
       log.info(logEvent, {
         targetSessionId: params.targetSessionId,
         clientId,

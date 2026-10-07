@@ -289,6 +289,8 @@ export interface AgentInputQueuedMessage {
          * 落库时写进 user 消息 agentMeta.origin(renderer 渲染自动化标签)。
          */
         kind: 'scheduler';
+        /** Host-only keyed automation input; unlike a cron heartbeat it must survive restart. */
+        durableAutomation?: true;
         scheduleId: string;
         scheduleName: string;
         /** 老队列快照可能没有；新 scheduler run 始终写入。 */

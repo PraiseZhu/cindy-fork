@@ -1032,6 +1032,10 @@ function isActiveTurnDispatched(active: ActiveTurn): boolean {
  * 派发前会话关闭。前两轮只改了派发失败那一条,漏掉的两条照样造出重试入口
  * (review #944 第十八轮 P1)。
  */
+function isEphemeralSchedulerItem(item: AgentInputQueuedMessage): boolean {
+  return item.origin?.kind === 'scheduler' && item.origin.durableAutomation !== true;
+}
+
 function isSchedulerOriginItem(item: AgentInputQueuedMessage | null | undefined): boolean {
   return item?.origin?.kind === 'scheduler';
 }
@@ -1424,15 +1428,16 @@ export class AgentInputCoordinator {
     } else {
       this.lastQueueSnapshotJson.delete(sessionId);
     }
-    // scheduler 撞忙排队项不跨重启恢复(persist 侧已不再写入,这里兜老快照):
+    // 普通 scheduler 心跳不跨重启恢复；Host 标记的幂等输入必须保留。
+    // persist 侧过滤普通心跳，这里兜老快照：
     // 静默会话的恢复队列处于 queuePausedByRestore 暂停态,自动化项等不来"用户
     // 显式输入"的放行,会永远滞留;同任务去重又会把它当在途,后续每轮 fire 都
     // 判 duplicate 顺延 —— 无人值守自动化整体停摆(PR #972 review P1)。直接
     // 丢弃并走 onDiscarded 释放回调注册表;下一轮 cron fire 按当下状态重新走
     // 排队/直发,不丢任务只丢陈旧副本。
     const restorable = boundaryFilteredItems.filter((item) => !existingIds.has(item.clientId));
-    const staleSchedulerItems = restorable.filter((item) => item.origin?.kind === 'scheduler');
-    const restored = restorable.filter((item) => item.origin?.kind !== 'scheduler');
+    const staleSchedulerItems = restorable.filter(isEphemeralSchedulerItem);
+    const restored = restorable.filter((item) => !isEphemeralSchedulerItem(item));
     if (staleSchedulerItems.length > 0) {
       for (const item of staleSchedulerItems) {
         this.deps.onDiscardedQueuedMessage?.(sessionId, item);
@@ -4105,12 +4110,13 @@ export class AgentInputCoordinator {
       !state.pendingQueue.some((q) => q.clientId === active.item?.clientId)
         ? [active.item]
         : [];
-    // scheduler 撞忙排队项不进崩溃快照:runner 的 run 在重启时会被 sweep 标
+    // 普通 scheduler 心跳不进崩溃快照；durableAutomation 输入保留。
+    // runner 的 run 在重启时会被 sweep 标
     // interrupted,恢复出的副本没有等待方;心跳 prompt 每轮 fire 重新生成,
     // 陈旧副本无价值,恢复它只会造成"暂停队列里的僵尸自动化"(restore 侧
     // 有对老快照的同款过滤,见 restoreQueueSnapshot)。
     return [...activeItem, ...state.pendingQueue]
-      .filter((item) => item.origin?.kind !== 'scheduler')
+      .filter((item) => !isEphemeralSchedulerItem(item))
       .map(sanitizeQueuedMessageForPersistence);
   }
 

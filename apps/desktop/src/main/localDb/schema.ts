@@ -2327,7 +2327,7 @@ export const automationDispatchReceipts = sqliteTable(
     principalKind: text('principal_kind', { enum: ['schedule', 'orca_team'] }).notNull(),
     principalId: text('principal_id').notNull(),
     requestKey: text('request_key').notNull(),
-    operation: text('operation', { enum: ['session_dispatch', 'create_worker'] }).notNull(),
+    operation: text('operation', { enum: ['session_dispatch', 'create_worker', 'create_worker_with_input'] }).notNull(),
     payloadHash: text('payload_hash').notNull(),
     status: text('status', {
       enum: [

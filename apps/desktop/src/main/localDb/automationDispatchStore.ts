@@ -3,6 +3,7 @@ import { readInputDeliveryReceipts } from './agentInputQueueSnapshots.js';
 import { getCurrentDbClientSnapshot } from './client/current.js';
 import type { DbClient } from './client/DbClient.js';
 import { automationDispatchReceipts, orcaWorkers, sessions } from './schema.js';
+import { AutomationDispatchError } from '../scheduler-host/automationDispatchService.js';
 import type { AutomationReceipt, AutomationReceiptStore, DispatchPrincipal } from '../scheduler-host/automationDispatchService.js';
 
 export function createAutomationDispatchStore(client: DbClient): AutomationReceiptStore {
@@ -32,14 +33,26 @@ export function createAutomationDispatchStore(client: DbClient): AutomationRecei
   };
 }
 
+export async function assertAutomationInputPersisted(client: DbClient, sessionId: string, inputId: string, assertCurrent: () => void): Promise<void> {
+  assertCurrent();
+  if (getCurrentDbClientSnapshot()?.client !== client) throw new AutomationDispatchError('HOST_NOT_READY');
+  const [delivery] = await readInputDeliveryReceipts(sessionId, [inputId]);
+  assertCurrent();
+  if (!delivery || !['pending', 'accepted'].includes(delivery.state)) throw new AutomationDispatchError('DISPATCH_UNKNOWN');
+}
+
 /** Reconcile only a request-bound persisted input or Worker link, never a session's mere existence. */
 export async function reconcileAutomationReceipt(client: DbClient, row: AutomationReceipt, assertCurrent: () => void): Promise<AutomationReceipt> {
   if (!['reserved', 'unknown'].includes(row.status)) return row;
   assertCurrent();
   let result: Record<string, unknown> | undefined;
-  if (row.operation === 'create_worker') {
+  if (row.operation !== 'session_dispatch') {
     const [worker] = await client.drizzle.select({ id: orcaWorkers.id }).from(orcaWorkers).where(and(
       eq(orcaWorkers.id, row.workerId ?? ''), eq(orcaWorkers.teamId, row.teamId ?? ''), eq(orcaWorkers.sessionId, row.sessionId))).limit(1);
+    if (worker && row.operation === 'create_worker_with_input') {
+      try { await assertAutomationInputPersisted(client, row.sessionId, row.inputId, assertCurrent); }
+      catch (error) { if (error instanceof AutomationDispatchError && error.code === 'DISPATCH_UNKNOWN') return row; throw error; }
+    }
     if (worker) result = { ok: true, workerId: worker.id, workerSessionId: row.sessionId, dispatched: false };
   } else {
     // Use the same queue -> history transfer order and validation as recovery.

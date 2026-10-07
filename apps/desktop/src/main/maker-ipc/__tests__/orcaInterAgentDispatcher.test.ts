@@ -1019,3 +1019,18 @@ it.each(['Do not publish', ''])('ordinary live continuation retains the last acc
   const result=await h.dispatcher.dispatchOrEnqueueOrcaInterAgentMessage({targetSessionId:'target-session',rawContent:'Publish now',source:'lead',senderLabel:'Lead',meta:{source:'orca',context:'ordinary-live'}});
   expect(result.ok).toBe(true);
 });
+
+
+describe('durable queue admission', () => {
+  it('does not report queued before enqueue and persistence complete', async () => {
+    let release!: () => void;
+    const persist = new Promise<void>(resolve => { release = resolve; });
+    const h = createHarness({ shouldQueueNewTurn: () => true, enqueueQueuedMessage: async () => persist });
+    let settled = false;
+    const dispatch = h.dispatcher.dispatchOrEnqueueOrcaInterAgentMessage({ targetSessionId: 'target-session', rawContent: 'work',
+      source: 'lead', senderLabel: 'Lead', meta: { source: 'orca', context: 'durable-test' } }).then(value => { settled = true; return value; });
+    await vi.waitFor(() => expect(h.deps.buildCreateOptsForQueuedSession).toHaveBeenCalled());
+    expect(settled).toBe(false); release();
+    expect(await dispatch).toMatchObject({ ok: true, mode: 'queued' });
+  });
+});

@@ -5,7 +5,7 @@ import { runMigrationReplay } from '../../localDb/migrationRunner.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { DbClient } from '../../localDb/client/DbClient.js';
 import { setCurrentDbClient, clearCurrentDbClient } from '../../localDb/client/current.js';
-import { createAutomationDispatchStore, reconcileAutomationReceipt } from '../../localDb/automationDispatchStore.js';
+import { assertAutomationInputPersisted, createAutomationDispatchStore, reconcileAutomationReceipt } from '../../localDb/automationDispatchStore.js';
 import { assertScheduleSession, readScheduleEvents } from '../../localDb/automationSessionAccess.js';
 import { AutomationDispatchService } from '../../scheduler-host/automationDispatchService.js';
 import { submitOrcaWorkerReport } from '../orcaReportService.js';
@@ -17,6 +17,7 @@ describe('automation persistence boundaries', () => {
     sqlite = new Database(':memory:');
     sqlite.exec(`CREATE TABLE migration_meta(key TEXT PRIMARY KEY,value TEXT);
       CREATE TABLE migration_history(seq INTEGER PRIMARY KEY,file_name TEXT,content_hash TEXT,applied_at INTEGER);
+      CREATE TABLE schedules(id TEXT PRIMARY KEY,target_session_id TEXT);
       CREATE TABLE sessions(id TEXT PRIMARY KEY,status TEXT NOT NULL,agent_kind TEXT NOT NULL DEFAULT 'codex');
       CREATE TABLE messages(id TEXT PRIMARY KEY,session_id TEXT,client_id TEXT,role TEXT,rewind_at INTEGER);
       CREATE TABLE agent_input_queue_snapshots(session_id TEXT PRIMARY KEY,payload TEXT);
@@ -138,6 +139,35 @@ describe('automation persistence boundaries', () => {
     });
     expect(sends).toBe(1);
     expect((await service.execute(args, async () => { throw Error('duplicate'); })).result).toEqual(sent.result);
+  });
+
+  it('authorizes a persisted schedule binding and its workers before the first receipt', async () => {
+    sqlite.prepare('INSERT INTO schedules VALUES (?,?)').run('bound-schedule', 'lead');
+    await expect(assertScheduleSession(client, 'bound-schedule', 'lead')).resolves.toBeUndefined();
+    await expect(assertScheduleSession(client, 'bound-schedule', 'worker')).resolves.toBeUndefined();
+    await expect(readScheduleEvents(client, 'bound-schedule', 'team', 0, 10)).resolves.toMatchObject({ events: [] });
+    await expect(assertScheduleSession(client, 'unbound', 'lead')).rejects.toMatchObject({ code: 'NOT_AUTHORIZED' });
+    sqlite.prepare('UPDATE schedules SET target_session_id=? WHERE id=?').run('other', 'bound-schedule');
+    await expect(assertScheduleSession(client, 'bound-schedule', 'worker')).rejects.toMatchObject({ code: 'NOT_AUTHORIZED' });
+  });
+  it('requires the reserved initial input before accepting an eager worker creation', async () => {
+    const store = createAutomationDispatchStore(client), service = new AutomationDispatchService(store, () => {});
+    const args = { scope: { kind: 'orca_team' as const, id: 'team' }, key: 'create-input', operation: 'create_worker_with_input' as const,
+      teamId: 'team', payload: { initialTask: 'work' } };
+    await expect(service.execute(args, async row => {
+      sqlite.prepare('INSERT INTO sessions(id,status) VALUES (?,?)').run(row.sessionId, 'active');
+      sqlite.prepare('INSERT INTO orca_workers VALUES (?,?,?)').run(row.workerId, 'team', row.sessionId);
+      await assertAutomationInputPersisted(client, row.sessionId, row.inputId, () => {});
+      return { ok: true };
+    })).rejects.toMatchObject({ code: 'DISPATCH_UNKNOWN' });
+    const row = (await store.find(args.scope, args.key))!;
+    expect((await reconcileAutomationReceipt(client, row, () => {})).status).toBe('unknown');
+    sqlite.prepare('INSERT INTO agent_input_queue_snapshots VALUES (?,?)').run(row.sessionId, JSON.stringify([{
+      clientId: row.inputId, text: 'task', persistedContent: 'task', chatMessage: {}, createOpts: { agentKind: 'codex' },
+    }]));
+    await expect(assertAutomationInputPersisted(client, row.sessionId, row.inputId, () => {})).resolves.toBeUndefined();
+    expect((await reconcileAutomationReceipt(client, row, () => {})).status).toBe('accepted');
+    expect((await service.execute(args, async () => { throw Error('duplicate worker'); })).reused).toBe(true);
   });
 
   it('bounds event pages by encoded bytes so valid reports cannot overflow the script protocol', async () => {

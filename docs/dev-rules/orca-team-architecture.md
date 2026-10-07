@@ -8,7 +8,7 @@
 
 `create_worker` 和批量逐项可指定 `request_key`。Host 在 bootstrap 前持久保留 worker/session/input 身份；同键同内容返回原结果，不重新创建，异内容拒绝。未知结果保留 reservation，不因超时或 TTL 再建一份。`start=false` 只创建休眠 Worker，不发送任务或 ready 占位消息；后续通过原 Orca 派发通道启动，不能用普通 session 发送绕过其 accepted/rollback 语义。
 
-Scheduler 的 `sessions.inspect/dispatch_status/events` 默认拒绝，需逐项授予，仅能访问该 schedule 的持久回执及真实 Orca 后代。inspect 不返回队列正文，且不能把持久化 error 当作实际空闲；运行态与队列均参与发送准入。带 `request_key` 的 dispatch 绑定账号/schedule，真实队列持久化后才返回接收回执。`if_idle/expected_generation/expected_turn_generation` 在入队处复核，目标忙或版本变化时拒绝。
+Scheduler 的 `sessions.inspect/dispatch_status/events` 默认拒绝，需逐项授予，仅能访问该 schedule 的持久绑定目标、持久回执及真实 Orca 后代。inspect 不返回队列正文，且不能把持久化 error 当作实际空闲；运行态与队列均参与发送准入。带 `request_key` 的 dispatch 绑定账号/schedule，真实队列持久化后才返回接收回执。带键输入由 Host 标记 durableAutomation，保留 scheduler 来源，但不随普通 cron 心跳被快照过滤；重启后遵守恢复队列暂停规则，不隐式重发。带初始任务的幂等 worker 创建单独记 create_worker_with_input，worker link 本身不能证明初始输入送达；必须查到相同 inputId 的持久队列或消息。`if_idle/expected_generation/expected_turn_generation` 在入队处复核，目标忙或版本变化时拒绝。
 
 身份记录、运行回合和业务交付是不同状态。负责人回合结束后，Worker 可以继续；在途任务结束前不得用 end_team 休眠负责人，因为 end_team 仍会中止 Worker。幂等回执只能证明 Host 接收，不能证明模型执行完毕、代码通过或 PR 可交付。
 

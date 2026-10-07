@@ -7,7 +7,7 @@ export interface AutomationReceipt {
   principalKind: DispatchPrincipal['kind'];
   principalId: string;
   requestKey: string;
-  operation: 'session_dispatch' | 'create_worker';
+  operation: 'session_dispatch' | 'create_worker' | 'create_worker_with_input';
   payloadHash: string;
   status: ReceiptStatus;
   sessionId: string;
@@ -55,7 +55,7 @@ export class AutomationDispatchService {
       id: randomUUID(), principalKind: args.scope.kind, principalId: args.scope.id, requestKey: args.key,
       operation: args.operation, payloadHash: dispatchHash([args.operation, args.payload]), status: 'reserved',
       sessionId: args.targetSessionId ?? randomUUID(), inputId: randomUUID(),
-      workerId: args.operation === 'create_worker' ? randomUUID() : null, teamId: args.teamId ?? null,
+      workerId: args.operation !== 'session_dispatch' ? randomUUID() : null, teamId: args.teamId ?? null,
       wakeKind: null, errorCode: null, result: null, createdAt: now, updatedAt: now,
     };
     const { row, inserted } = await this.store.reserve(candidate);

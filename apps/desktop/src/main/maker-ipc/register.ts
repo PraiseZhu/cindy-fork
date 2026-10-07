@@ -1,6 +1,6 @@
 import { submitOrcaWorkerReport, autoReport } from './orcaReportService.js';
 import { AutomationDispatchService, AutomationDispatchError } from '../scheduler-host/automationDispatchService.js';
-import { createAutomationDispatchStore } from '../localDb/automationDispatchStore.js';
+import { assertAutomationInputPersisted, createAutomationDispatchStore } from '../localDb/automationDispatchStore.js';
 import { openSession, setSessionOpeningModelAdmission } from '../localDb/sessionOpening.js';
 import { createPluginTaskReviewResolver } from './pluginTaskReviewContext.js';
 import { isPluginTaskPermissionAllowed, assertPluginTaskResult, createPluginTaskService, readPluginTaskPlanReceipt, PluginTaskError, type PluginTaskService } from './pluginTaskService.js';
@@ -11727,7 +11727,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       );
     }
     // 崩溃恢复排序:确保先读回持久化队列再追加本条(见 ensureQueueRestored)。
-    // 失败时 enqueue 照常入队(shouldQueueNewTurn 已守住不会直发)。
+    // 恢复失败拒绝本次入队，不覆盖尚未读回的持久快照。
 
     if (params.authorizationGuard) {
       await commitBotAuthorizationInput(params.authorizationGuard, () => {
@@ -11831,13 +11831,12 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     prepareUnhealthySession: (sessionId) =>
       contextOverflowRolloverHolder?.prepareUnhealthySession(sessionId) ?? Promise.resolve(false),
     buildCreateOptsForQueuedSession,
-    enqueueQueuedMessage: (sessionId, item) => {
-      // 先 await 恢复再 enqueue:确保恢复的排队 prompt 在新消息之前,且恢复后
-      // 队列处于 paused 态不会被新消息的 getDrainableHead 立刻 drain。
-      void (async () => {
-        await inputCoordinator.ensureQueueRestored(sessionId).catch(() => undefined);
-        inputCoordinator.enqueue(sessionId, item);
-      })();
+    enqueueQueuedMessage: async (sessionId, item, beforeEnqueue) => {
+      // The dispatch result cannot precede restoration and actual queue ownership.
+      await inputCoordinator.ensureQueueRestored(sessionId);
+      beforeEnqueue?.();
+      inputCoordinator.enqueue(sessionId, item);
+      await awaitAgentInputQueueSnapshotPersistence(sessionId);
     },
     reserveNextQueuedMessage: async (sessionId, item, onReserved, beforeReserve) => {
       await inputCoordinator.ensureQueueRestored(sessionId);
@@ -13940,6 +13939,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     sendAutomationInput: async (params) => {
       const owner = getCurrentDbClientSnapshot();
       const id = params.targetSessionId;
+      const durableOrigin = { ...params.scheduleOrigin, durableAutomation: true as const };
       const guardOwner = () => { if (!owner || getCurrentDbClientSnapshot() !== owner) throw new AutomationDispatchError('HOST_NOT_READY'); };
       const guard = () => {
         if (!owner || getCurrentDbClientSnapshot() !== owner) throw new AutomationDispatchError('HOST_NOT_READY');
@@ -13959,16 +13959,20 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       guard();
       if (link && id) {
         const sent = await orcaTeamService.dispatchWorkerTask({ targetSessionId: id, message: params.message,
-          clientId: params.clientId, admission: guard, origin: params.scheduleOrigin,
+          clientId: params.clientId, admission: guard, origin: durableOrigin,
           dispatchMeta: { source: 'scheduler', context: 'automation/' + params.clientId } });
         await awaitAgentInputQueueSnapshotPersistence(id);
         guardOwner();
+        await assertAutomationInputPersisted(owner!.client, id, params.clientId, guardOwner);
         if (!sent.dispatched && !sent.queued) return { ok: false, errorCode: 'INTERNAL', message: 'worker dispatch unconfirmed' };
         return { ok: true, targetSessionId: id, agentKind: sent.agentKind, wakeKind: sent.wakeKind === 'steered' ? 'already-active' : sent.wakeKind,
           targetTitle: sent.targetTitle, targetLastUserSendAt: sent.targetLastUserSendAt };
       }
-      const result = await sendToSessionInternal({ ...params, automationGuard: guard, forceQueue: !!id, origin: params.scheduleOrigin, autoReviewUserText: { kind: 'delegated-continuation' } });
-      if (result.ok) await awaitAgentInputQueueSnapshotPersistence(result.targetSessionId);
+      const result = await sendToSessionInternal({ ...params, automationGuard: guard, forceQueue: !!id, origin: durableOrigin, autoReviewUserText: { kind: 'delegated-continuation' } });
+      if (result.ok) {
+        await awaitAgentInputQueueSnapshotPersistence(result.targetSessionId);
+        await assertAutomationInputPersisted(owner!.client, result.targetSessionId, params.clientId, guardOwner);
+      }
       else if (id) await awaitAgentInputQueueSnapshotPersistence(id);
       guardOwner();
       return result;
@@ -14020,8 +14024,15 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
         const assertCurrent = () => { if (getCurrentDbClientSnapshot() !== owner) throw new AutomationDispatchError('HOST_NOT_READY'); };
         const durable = new AutomationDispatchService(createAutomationDispatchStore(owner.client), assertCurrent);
         const sent = await durable.execute({ scope: { kind: 'orca_team', id: team.id }, key: params.requestKey,
-          operation: 'create_worker', payload: params, teamId: team.id }, receipt => orcaLifecycleService.createWorker({ ...params,
-            reservedIdentity: { workerId: receipt.workerId!, sessionId: receipt.sessionId, inputId: receipt.inputId } }));
+          operation: params.start === false ? 'create_worker' : 'create_worker_with_input', payload: params, teamId: team.id }, async receipt => {
+            const created = await orcaLifecycleService.createWorker({ ...params,
+              reservedIdentity: { workerId: receipt.workerId!, sessionId: receipt.sessionId, inputId: receipt.inputId } });
+            if (created.ok && params.start !== false) {
+              await awaitAgentInputQueueSnapshotPersistence(receipt.sessionId);
+              await assertAutomationInputPersisted(owner.client, receipt.sessionId, receipt.inputId, assertCurrent);
+            }
+            return created;
+          });
         return sent.result;
       } catch (err) {
         return {

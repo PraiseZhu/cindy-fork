@@ -1,16 +1,20 @@
 import { and, asc, eq, gt } from 'drizzle-orm';
 import type { DbClient } from './client/DbClient.js';
-import { automationDispatchReceipts, orcaTeams, orcaWorkers, orcaWorkerEvents } from './schema.js';
+import { automationDispatchReceipts, orcaTeams, orcaWorkers, orcaWorkerEvents, schedules } from './schema.js';
 import { AutomationDispatchError } from '../scheduler-host/automationDispatchService.js';
 
 export async function assertScheduleSession(db: DbClient, scheduleId: string, sessionId: string): Promise<void> {
   const t = automationDispatchReceipts;
+  const [binding] = await db.drizzle.select({ target: schedules.targetSessionId }).from(schedules)
+    .where(eq(schedules.id, scheduleId)).limit(1);
+  if (binding?.target === sessionId) return;
   const [direct] = await db.drizzle.select({ id: t.id }).from(t).where(and(eq(t.principalKind, 'schedule'),
     eq(t.principalId, scheduleId), eq(t.sessionId, sessionId))).limit(1);
   if (direct) return;
   const [worker] = await db.drizzle.select({ lead: orcaTeams.leadSessionId }).from(orcaWorkers)
     .innerJoin(orcaTeams, eq(orcaWorkers.teamId, orcaTeams.id)).where(eq(orcaWorkers.sessionId, sessionId)).limit(1);
   if (worker) {
+    if (binding?.target === worker.lead) return;
     const [owner] = await db.drizzle.select({ id: t.id }).from(t).where(and(eq(t.principalKind, 'schedule'),
       eq(t.principalId, scheduleId), eq(t.sessionId, worker.lead))).limit(1);
     if (owner) return;
