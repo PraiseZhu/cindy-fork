@@ -42,7 +42,6 @@ export interface ViewerSnapshot {
   target: RemoteViewerState['target'];
   status: string;
   error: string | null;
-  clipboardError?: boolean;
   controlling: boolean;
   controlPending: boolean;
   caps: RemoteDesktopCapabilities | null;
@@ -75,6 +74,23 @@ function connectionBudget(caps: RemoteDesktopCapabilities | null): number {
   return (
     REMOTE_DESKTOP_CONNECTION_TIMEOUT_MS +
     (caps?.displays.some((display) => display.id === 'wayland-portal') ? 120_000 : 0)
+  );
+}
+
+const CLIPBOARD_FAILURE_KEYS: Record<string, string> = {
+  DESKTOP_VIEW_ONLY: 'remoteDesktop.viewer.controlRequired',
+  CLIPBOARD_UNSUPPORTED: 'remoteDesktop.viewer.clipboardUnsupported',
+  CLIPBOARD_EMPTY: 'remoteDesktop.viewer.clipboardEmpty',
+  CLIPBOARD_TOO_LONG: 'remoteDesktop.viewer.clipboardTooLong',
+};
+
+/** Explains a failed manual clipboard transfer (decoded code); same wording as Mobile. */
+export function clipboardFailureKey(error: unknown, action: 'copy' | 'paste'): string {
+  return (
+    CLIPBOARD_FAILURE_KEYS[error instanceof Error ? error.message : ''] ??
+    (action === 'copy'
+      ? 'remoteDesktop.viewer.clipboardCopyFailed'
+      : 'remoteDesktop.viewer.clipboardPasteFailed')
   );
 }
 
@@ -366,7 +382,6 @@ export class DesktopViewerController {
       ready: false,
       transport: '',
       latency: null,
-      clipboardError: false,
       receiveRate: null,
       safety: { privacyActive: false, notice: null, clipboardProgress: null },
       fittedDisplay: null,
@@ -405,11 +420,7 @@ export class DesktopViewerController {
         fillHeight: false,
         trickleIce: caps.trickleIce === true,
         audio: caps.systemAudio && this.state.settings.audio,
-        clipboardShortcuts: caps.clipboardText === true || caps.clipboardContent === true,
-        clipboardModifier:
-          typeof window !== 'undefined' && window.electronAPI?.platform === 'darwin'
-            ? 'meta'
-            : 'control',
+        macKeyboard: typeof window !== 'undefined' && window.electronAPI?.platform === 'darwin',
       });
       this.runtime.receive({ type: 'mode', mode: 'pointer' });
       if (!caps.canControl) throw new Error('DESKTOP_INPUT_UNSUPPORTED');
@@ -693,7 +704,6 @@ export class DesktopViewerController {
     if (this.clipboardQueued === 0) this.clipboardQueue = Promise.resolve();
     this.clipboardQueued++;
     this.releaseInput();
-    this.publish({ clipboardError: false });
     const transfer = this.clipboardQueue.then(async () => {
       if (
         epoch !== this.epoch ||
@@ -702,7 +712,11 @@ export class DesktopViewerController {
         !this.state.controlling
       )
         throw new Error('DESKTOP_STOPPED');
-      await this.api.clipboard(generation, action);
+      try {
+        await this.api.clipboard(generation, action);
+      } catch (error) {
+        throw new Error(extractIpcError(error)?.message ?? 'DESKTOP_UNAVAILABLE');
+      }
     });
     this.clipboardQueue = transfer;
     try {
@@ -1016,19 +1030,6 @@ export class DesktopViewerController {
         if (message.mode === 'fit' || message.mode === 'actual' || message.mode === 'custom')
           this.publish({ scaleMode: message.mode });
         break;
-      case 'clipboard': {
-        if (
-          !this.state.controlling ||
-          !this.state.caps?.clipboardText ||
-          (message.action !== 'copy' && message.action !== 'paste')
-        )
-          break;
-        const epoch = this.epoch;
-        void this.clipboard(message.action).catch(() => {
-          if (epoch === this.epoch && !this.disposed) this.publish({ clipboardError: true });
-        });
-        break;
-      }
       case 'streaming':
         this.streaming = true;
         this.publish({ transport: 'video', latency: null });

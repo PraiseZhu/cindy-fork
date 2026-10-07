@@ -885,7 +885,11 @@ export interface MobileMakerTransport {
       relPath: string,
       signal?: AbortSignal,
       beforeInvoke?: () => Promise<unknown>,
-      options?: { stream?: boolean },
+      options?: {
+        stream?: boolean;
+        /** Upload progress while the computer stages the file in cloud storage. */
+        onProgress?: (uploaded: number, total: number) => void;
+      },
     ): Promise<MobileRemoteMediaFetchResult>;
     caps(workdir: string): Promise<FileBrowserCapsResult>;
     /** 返回裸 entries(unknown),消费方用 normalizeRemoteOpDirEntries 归一化。 */
@@ -1440,7 +1444,7 @@ export function createMobileMakerTransport({
         });
         assertFileReadActive(signal);
         const fallback = () =>
-          exportDeviceFile(retryOp, workdir, relPath, signal);
+          exportDeviceFile(retryOp, workdir, relPath, signal, options?.onProgress);
         if (!caps.fileRead) {
           mobileDebugLog("debug", "files", "file export without direct read", {
             reason: "host-lacks-file-read",

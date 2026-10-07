@@ -173,7 +173,8 @@ import {
 } from './deferredUiAssignment';
 import { CrossAgentConvertDialog } from '@/components/ui/cross-agent-convert-dialog';
 import type { MakerVendor } from '@/lib/ccAgent.types';
-import { ChevronDown, Cpu, MessageSquare, MonitorSmartphone } from 'lucide-react';
+import { ChevronDown, MessageSquare, MonitorSmartphone } from 'lucide-react';
+import { VendorIcon } from '@/components/sidebar/VendorIcon';
 import { HomeSuggestionList } from './HomeSuggestionList';
 import { type HomeSuggestionId, homeSuggestionPromptKey } from './homeSuggestions';
 import {
@@ -5775,7 +5776,13 @@ export function NewMakerDraftRoute() {
                     标识同位置、同样式,两者互斥。 */}
                 {isAgentDeviceDraft && (
                   <div className="mt-3 flex max-w-full items-center gap-2 self-center rounded-full border border-[var(--border-default)] bg-[var(--surface-chip)] px-3 py-1 text-12 text-[var(--text-secondary)]">
-                    <Cpu size={14} strokeWidth={2} className="shrink-0 text-[var(--folder-item-icon)]" />
+                    {/* 与侧栏同一标识:Agent 图标 + 右上信号波纹。 */}
+                    <VendorIcon
+                      vendor={persistedAgentKind}
+                      size={persistedAgentKind === 'cc' ? 14 : 13}
+                      remote
+                      colorClassName="text-[var(--folder-item-icon)]"
+                    />
                     <span className="min-w-0 truncate">
                       {t('ccAgent.draft.agentDeviceBanner', {
                         device: draft.agentDeviceName ?? effectiveAgentDeviceId ?? '',

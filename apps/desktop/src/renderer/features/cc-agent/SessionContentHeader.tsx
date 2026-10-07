@@ -68,6 +68,7 @@ import { SessionRenameInput } from './SessionRenameInput';
 import { useSessionBoundSchedules } from '@/features/scheduler/lib/scheduleSessionBinding';
 import { ScheduleBindingBadge } from './sidebar/ScheduleBindingBadge';
 import { RemoteProjectIcon } from './sidebar/RemoteProjectIcon';
+import { VendorIcon, agentKindToVendor } from '@/components/sidebar/VendorIcon';
 import { MENU_ITEM_CLASS, MENU_ROW_CLASS } from './sidebar/menuStyles';
 import { SessionProjectMoveSubmenu } from './sidebar/SessionProjectMoveSubmenu';
 import type { SessionMoveTarget } from './sidebar/sessionMoveTarget';
@@ -83,13 +84,21 @@ const log = createLogger('SessionContentHeader');
 
 /**
  * 任务在本机、Agent 在同账号另一台电脑上运行:标明那台电脑，离线时如实提示(不自动改在本机跑)。
+ * 图标与侧栏同款:Agent 图标 + 右上信号波纹。
  */
-function AgentDeviceIndicator({ deviceId }: { deviceId: string }) {
+function AgentDeviceIndicator({
+  deviceId,
+  agentKind,
+}: {
+  deviceId: string;
+  agentKind: Session['agentKind'];
+}) {
   const { t } = useTranslation();
   const devices = useDeviceLinkDeviceList();
   const device = devices?.find((item) => item.deviceId === deviceId);
   const name = device?.name || deviceId;
   const offline = device ? !device.online : false;
+  const vendor = agentKindToVendor(agentKind);
   return (
     <Tip
       text={t(
@@ -103,10 +112,13 @@ function AgentDeviceIndicator({ deviceId }: { deviceId: string }) {
         className="inline-flex"
         style={WINDOW_NO_DRAG_STYLE}
       >
-        <RemoteProjectIcon
-          kind="agent-device"
-          connectionStatus={offline ? 'disconnected' : 'connected'}
-          className="mr-1 text-[var(--cmd-palette-item-meta)]"
+        {/* 波纹向右上溢出约 3px,右边距比其它标题前缀图标多留一些。 */}
+        <VendorIcon
+          vendor={vendor}
+          size={vendor === 'cc' ? 14 : 13}
+          remote
+          colorClassName="text-[var(--cmd-palette-item-meta)]"
+          className={cn('mr-2', offline && 'opacity-75')}
         />
       </span>
     </Tip>
@@ -587,7 +599,7 @@ export function SessionContentHeader({
         </Tip>
       )}
       {!isEditing && !remoteIconKind && session.agentDeviceId && (
-        <AgentDeviceIndicator deviceId={session.agentDeviceId} />
+        <AgentDeviceIndicator deviceId={session.agentDeviceId} agentKind={session.agentKind} />
       )}
 
       {isEditing ? (

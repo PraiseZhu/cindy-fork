@@ -149,21 +149,6 @@
   font-size: var(--text-12);
   white-space: nowrap;
 }
-.remote-viewer-notice {
-  position: absolute;
-  bottom: var(--space-4);
-  left: 50%;
-  transform: translateX(-50%);
-  max-width: calc(100% - 32px);
-  border: 1px solid var(--border-default);
-  border-radius: var(--radius-xl);
-  padding: var(--space-3) var(--space-4);
-  background: var(--surface);
-  color: var(--text-primary);
-  font-size: var(--text-13);
-  pointer-events: none;
-  z-index: 4;
-}
 .remote-viewer-latency {
   color: var(--text-secondary);
   font-variant-numeric: tabular-nums;

@@ -2,13 +2,13 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { handleExecMcpRequest } from '../ccMcp';
 import { RemoteExecutor } from '../executor';
 import { EXECUTOR_APPROVAL_TTL_MS, ExecutorGate, executorGateModeFor } from '../gate';
 import type { PdfTextExtractor } from '../files';
-import { createExecutorEnv, findWindowsGitBash, truncateOutput } from '../shell';
+import { findWindowsGitBash, truncateOutput } from '../shell';
 import { ExecutorWorkspace } from '../workspace';
 
 const RG = path.resolve(__dirname, '../../../../../../ripgrep-bin', `${process.platform}-${process.arch}`, process.platform === 'win32' ? 'rg.exe' : 'rg');
@@ -59,36 +59,17 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.unstubAllEnvs();
   fs.rmSync(root, { recursive: true, force: true });
 });
 
 describe('workspace', () => {
-  it('filters credentials and real user directories from child environments while keeping PATH', () => {
-    const env = createExecutorEnv({
-      PATH: 'tool-path',
-      HOME: 'C:/Users/real',
-      USERPROFILE: 'C:/Users/real',
-      TEMP: 'C:/Users/real/AppData/Local/Temp',
-      OPENAI_API_KEY: 'secret',
-      SESSION_TOKEN: 'secret',
-      SAFE_FLAG: '1',
-    });
-    expect(env).toEqual({ PATH: 'tool-path', SAFE_FLAG: '1' });
-  });
-
-  it('gives hosted processes virtual home and temp paths without dropping command search', () => {
-    const workspace = new ExecutorWorkspace({ workingDir: project });
-    workspace.setVirtualRoot('/Users/agent');
-    const env = workspace.hostedProcessEnv(path.join(root, 'hosted-temp'));
-    expect(env.PATH).toBeTruthy();
-    expect(env.HOME).not.toBe(os.homedir());
-    expect(workspace.resolve('~/.config')).toBe(path.join(env.HOME!, '.config'));
-    expect(workspace.mapTextForAgent(env.HOME!)).not.toContain(os.homedir());
-    expect(workspace.mapTextForAgent(env.TMP!)).not.toContain(os.tmpdir());
-  });
-
-  it('passes the isolated environment to Claude shell commands', async () => {
-    const workspace = new ExecutorWorkspace({ workingDir: project });
+  it('runs shell commands with the Desktop environment, showing known directories as virtual paths', async () => {
+    const userConfig = path.join(root, 'user-config');
+    fs.mkdirSync(userConfig);
+    vi.stubEnv('CINDY_REMOTE_PROBE_TOKEN', 'from-desktop');
+    vi.stubEnv('CINDY_REMOTE_PROBE_DIR', userConfig);
+    const workspace = new ExecutorWorkspace({ workingDir: project, aliases: [{ from: '/Users/agent/config', to: userConfig }] });
     workspace.setVirtualRoot('/Users/agent');
     const executor = new RemoteExecutor({
       workspace,
@@ -96,15 +77,28 @@ describe('workspace', () => {
       rgPath: RG,
       tempDir: path.join(root, 'shell-temp'),
     });
-    const bash = process.platform === 'win32' && !findWindowsGitBash()
-      ? 'node -p "process.env.HOME"'
-      : "node -p 'process.env.HOME'";
-    const result = await executor.callTool('Bash', { command: bash });
+    const result = await executor.callTool('Bash', {
+      command: 'node -p "[process.env.CINDY_REMOTE_PROBE_TOKEN, process.env.CINDY_REMOTE_PROBE_DIR].join(\' \')"',
+    });
     const output = text(result);
     expect(result.isError).not.toBe(true);
-    expect(output).toContain('/Users/agent');
-    expect(output).not.toContain(os.homedir());
+    expect(output).toContain('from-desktop /Users/agent/config');
+    expect(output).not.toContain(userConfig);
     await executor.close();
+  });
+
+  it('virtualizes PATH directories not already covered by an alias and expands ~ to the real home', () => {
+    const covered = path.join(root, 'covered');
+    const tools = path.join(covered, 'tools');
+    const other = path.join(root, 'other-tools');
+    fs.mkdirSync(tools, { recursive: true });
+    fs.mkdirSync(other);
+    vi.stubEnv('PATH', [tools, other, path.join(root, 'missing')].join(path.delimiter));
+    const workspace = new ExecutorWorkspace({ workingDir: project, aliases: [{ from: '/Users/agent/covered', to: covered }] });
+    workspace.setVirtualRoot('/Users/agent');
+    expect(workspace.mapTextForAgent(tools)).toBe('/Users/agent/covered/tools');
+    expect(workspace.mapTextForAgent(other)).toMatch(/^\/Users\/agent\/additional\/runtime-\d+$/);
+    expect(workspace.resolve('~/.config')).toBe(path.join(os.homedir(), '.config'));
   });
 
   it('resolves relative paths against the working directory and maps shadow paths back', () => {

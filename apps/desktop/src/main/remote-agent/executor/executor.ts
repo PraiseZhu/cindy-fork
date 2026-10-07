@@ -7,7 +7,6 @@
  *    NotebookEdit(Claude Code 的自带文件与命令工具关掉后由它顶替)。
  * 写文件前通知「每轮改动对比」抓取改前内容；命令执行后登记一次无法预知范围的改动。
  */
-import os from 'node:os';
 import path from 'node:path';
 
 import {
@@ -108,17 +107,11 @@ export class RemoteExecutor {
   constructor(private readonly opts: RemoteExecutorOptions) {
     this.workspace = opts.workspace;
     this.gate = opts.gate;
-    const tempDir = opts.tempDir ?? path.join(os.tmpdir(), 'cindy-remote-agent');
-    // Initialize the task-local home before any Read/Write path is resolved; later calls refresh
-    // its virtual alias once the host mirror root is known.
-    opts.workspace.hostedProcessEnv(tempDir);
-    const rg = createRipgrepRunner(opts.rgPath);
-    this.rg = (args, cwd, runOptions) => rg(args, cwd, { ...runOptions, env: opts.workspace.hostedProcessEnv(tempDir) });
+    this.rg = createRipgrepRunner(opts.rgPath);
     this.shell = new ShellSession({
       workingDir: opts.workspace.workingDir,
       isAllowedCwd: (cwd) => opts.workspace.contains(cwd),
-      tempDir,
-      env: () => opts.workspace.hostedProcessEnv(tempDir),
+      tempDir: opts.tempDir,
     });
     this.writeHooks = {
       beforeWrite: async (absPath) => {
@@ -147,7 +140,6 @@ export class RemoteExecutor {
     if (this.closed) return;
     this.closed = true;
     await this.shell.close();
-    await this.workspace.cleanupHostedProcessEnv();
   }
 
   private ensureOpen(): void {
@@ -228,7 +220,7 @@ export class RemoteExecutor {
           if (typeof params.pattern !== 'string' || !params.pattern) throw new ExecutorRequestError('INVALID', 'pattern is required');
           const root = this.resolvePath(typeof params.path === 'string' && params.path ? params.path : '.');
           this.authorize({ kind: 'read', path: root, scope: 'tree' });
-          const result = await piGrep(this.opts.rgPath, root, params, signal, this.workspace.hostedProcessEnv(this.shell.getTempDir()));
+          const result = await piGrep(this.opts.rgPath, root, params, signal);
           return { ...result, text: this.workspace.mapTextForAgent(result.text) };
         }
         case 'exec.run': {
@@ -241,12 +233,7 @@ export class RemoteExecutor {
             ? Math.min(timeoutSeconds, PI_BASH_MAX_TIMEOUT_SECONDS) * 1000
             : undefined;
           try {
-            const result = await runOnce(command, {
-              cwd,
-              timeoutMs,
-              signal,
-              env: this.workspace.hostedProcessEnv(this.shell.getTempDir()),
-            });
+            const result = await runOnce(command, { cwd, timeoutMs, signal });
             return {
               output: this.workspace.mapOutputForAgent(result.output).toString('base64'),
               exitCode: result.exitCode,

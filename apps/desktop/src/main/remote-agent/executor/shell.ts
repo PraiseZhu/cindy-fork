@@ -17,26 +17,6 @@ import path from 'node:path';
 export const CC_BASH_DEFAULT_TIMEOUT_MS = 120_000;
 export const CC_BASH_MAX_TIMEOUT_MS = 600_000;
 export const CC_BASH_MAX_OUTPUT_CHARS = 30_000;
-
-const HIDDEN_EXECUTOR_ENV_NAMES = new Set([
-  'HOME', 'USERPROFILE', 'HOMEDRIVE', 'HOMEPATH', 'PWD', 'OLDPWD', 'TMP', 'TEMP', 'TMPDIR',
-  'APPDATA', 'LOCALAPPDATA', 'XDG_CONFIG_HOME', 'XDG_CACHE_HOME', 'XDG_DATA_HOME',
-  'CLAUDE_CONFIG_DIR', 'CODEX_HOME', 'CINDY_CONFIG_DIR', 'CLAUDE_CODE_GIT_BASH_PATH',
-  'SSH_AUTH_SOCK', 'GIT_CONFIG_GLOBAL', 'GIT_CONFIG_SYSTEM', 'NPM_CONFIG_USERCONFIG',
-]);
-const HIDDEN_EXECUTOR_ENV_KEYS = /(?:^|[_-])(API[_-]?KEY|KEY|TOKEN|SECRET|PASSWORD|PASSWD|AUTH|CREDENTIAL|COOKIE|PRIVATE)(?:$|[_-])/i;
-
-/** 给控制端子进程的最小环境：保留命令搜索与平台运行时，去掉凭证和真实用户目录。 */
-export function createExecutorEnv(input: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
-  const output: NodeJS.ProcessEnv = {};
-  for (const [key, value] of Object.entries(input)) {
-    if (value === undefined) continue;
-    const upper = key.toUpperCase();
-    if (HIDDEN_EXECUTOR_ENV_NAMES.has(upper) || HIDDEN_EXECUTOR_ENV_KEYS.test(upper)) continue;
-    output[key] = value;
-  }
-  return output;
-}
 /** 一次性执行的输出上限(超出部分丢弃头部，保留最新输出)。 */
 const RUN_MAX_OUTPUT_BYTES = 8 * 1024 * 1024;
 const KILL_GRACE_MS = 2_000;
@@ -228,7 +208,7 @@ export function runOnce(script: string, opts: RunOptions): Promise<RunResult> {
       try {
         child = spawn(shell.file, shell.args, {
           cwd: file.dir,
-          env: opts.env ?? createExecutorEnv(),
+          env: opts.env ?? process.env,
           stdio: ['ignore', 'pipe', 'pipe'],
           detached: process.platform !== 'win32',
           windowsHide: true,
@@ -314,8 +294,6 @@ export interface ShellSessionOptions {
   isAllowedCwd: (cwd: string) => boolean;
   /** 后台命令输出文件所在目录(本机)。 */
   tempDir?: string;
-  /** 每次启动子进程时生成隔离环境，避免复用启动时已过期的路径别名。 */
-  env?: () => NodeJS.ProcessEnv;
 }
 
 /** Git Bash 的 pwd 使用 MSYS 挂载路径，权限与后续文件工具必须回到 Windows 本机路径。 */
@@ -361,12 +339,7 @@ export class ShellSession {
     const started = Date.now();
     let result: RunResult;
     try {
-      result = await runOnce(script, {
-        cwd: startCwd,
-        timeoutMs: timeout,
-        signal,
-        env: this.opts.env?.() ?? createExecutorEnv(),
-      });
+      result = await runOnce(script, { cwd: startCwd, timeoutMs: timeout, signal });
     } catch (error) {
       await fsp.rm(cwdFile, { force: true });
       return { text: `Failed to run command: ${(error as Error).message}`, isError: true };
@@ -425,7 +398,7 @@ export class ShellSession {
     try {
       child = spawn(shell.file, shell.args, {
         cwd: file.dir,
-        env: this.opts.env?.() ?? createExecutorEnv(),
+        env: process.env,
         stdio: ['ignore', out, out],
         detached: process.platform !== 'win32',
         windowsHide: true,

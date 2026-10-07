@@ -4,7 +4,11 @@ import type {
   RemoteDesktopViewerApi,
   RemoteViewerChannelRequest,
 } from '../../../../shared/remoteDesktopViewer';
-import { DesktopViewerController, type ViewerSnapshot } from '../viewerController';
+import {
+  clipboardFailureKey,
+  DesktopViewerController,
+  type ViewerSnapshot,
+} from '../viewerController';
 
 const runtime = vi.hoisted(() => ({
   post: null as ((message: Record<string, unknown>) => void) | null,
@@ -197,51 +201,79 @@ it('changes portrait resolution using the same temporary screen lease', async ()
   expect(runtime.receive.mock.calls.filter(([m]) => m.type === 'init')).toHaveLength(1);
 });
 
-it('orders quick copy/paste shortcuts and reports transfer failure without reconnecting', async () => {
+it('orders manual copy/paste transfers and reports failure without reconnecting', async () => {
   const current = await fixture();
   present();
   const gate = deferred<void>();
   current.clipboard.mockImplementationOnce(() => gate.promise);
-  runtime.post?.({ type: 'clipboard', action: 'copy', epoch: 'lease' });
-  runtime.post?.({ type: 'clipboard', action: 'paste', epoch: 'lease' });
+  const copy = controller.clipboard('copy');
+  const paste = controller.clipboard('paste');
   await vi.advanceTimersByTimeAsync(0);
   expect(current.clipboard).toHaveBeenCalledExactlyOnceWith(1, 'copy');
   gate.resolve();
-  await vi.advanceTimersByTimeAsync(0);
+  await Promise.all([copy, paste]);
   expect(current.clipboard).toHaveBeenLastCalledWith(1, 'paste');
-  current.clipboard.mockRejectedValueOnce(new Error('CLIPBOARD_UNAVAILABLE'));
-  runtime.post?.({ type: 'clipboard', action: 'copy', epoch: 'lease' });
-  runtime.post?.({ type: 'clipboard', action: 'paste', epoch: 'lease' });
-  await vi.advanceTimersByTimeAsync(0);
-  expect(current.clipboard).toHaveBeenCalledTimes(3);
-  expect(snapshot).toMatchObject({
-    clipboardError: true,
-    controlling: true,
-    ready: true,
-    error: null,
-  });
-  runtime.post?.({ type: 'clipboard', action: 'copy', epoch: 'lease' });
-  await vi.advanceTimersByTimeAsync(0);
-  expect(snapshot.clipboardError).toBe(false);
+  // Electron rebuilds the IPC error; the controller decodes it to the stable code.
+  current.clipboard.mockRejectedValueOnce(
+    new Error(
+      "Error invoking remote method 'remote-viewer:clipboard': Error: [PRECONDITION_FAILED] CLIPBOARD_UNSUPPORTED",
+    ),
+  );
+  await expect(controller.clipboard('paste')).rejects.toThrow(/^CLIPBOARD_UNSUPPORTED$/);
+  expect(snapshot).toMatchObject({ controlling: true, ready: true, error: null });
+  await controller.clipboard('copy');
   expect(current.clipboard).toHaveBeenCalledTimes(4);
 });
 
-it('drops queued clipboard work after host control is lost and ignores stale shortcut epochs', async () => {
+it('ignores clipboard messages from the picture; shortcuts reach the host as keys', async () => {
+  const current = await fixture();
+  present();
+  runtime.post?.({ type: 'clipboard', action: 'copy', epoch: 'lease' });
+  runtime.post?.({ type: 'clipboard', action: 'paste', epoch: 'lease' });
+  await vi.advanceTimersByTimeAsync(0);
+  expect(current.clipboard).not.toHaveBeenCalled();
+  const init = runtime.receive.mock.calls.find(([m]) => m.type === 'init')?.[0];
+  expect(init).not.toHaveProperty('clipboardShortcuts');
+  expect(init).toMatchObject({ macKeyboard: false });
+});
+
+it('tells the picture when the controller keyboard follows macOS Command rules', async () => {
+  vi.stubGlobal('window', { electronAPI: { platform: 'darwin' } });
+  try {
+    await fixture();
+    expect(runtime.receive.mock.calls.find(([m]) => m.type === 'init')?.[0]).toMatchObject({
+      macKeyboard: true,
+    });
+  } finally {
+    vi.unstubAllGlobals();
+  }
+});
+
+it('drops queued clipboard work after host control is lost', async () => {
   const current = await fixture();
   present();
   const gate = deferred<void>();
   current.clipboard.mockImplementationOnce(() => gate.promise);
-  runtime.post?.({ type: 'clipboard', action: 'copy', epoch: 'old-lease' });
-  runtime.post?.({ type: 'clipboard', action: 'invalid', epoch: 'lease' });
-  expect(current.clipboard).not.toHaveBeenCalled();
-  runtime.post?.({ type: 'clipboard', action: 'copy', epoch: 'lease' });
-  runtime.post?.({ type: 'clipboard', action: 'paste', epoch: 'lease' });
+  const copy = controller.clipboard('copy');
+  const paste = controller.clipboard('paste').catch((error: Error) => error.message);
   await vi.advanceTimersByTimeAsync(0);
   current.heartbeat.mockResolvedValue({ controlling: false });
   await vi.advanceTimersByTimeAsync(3000);
   gate.resolve();
-  await vi.advanceTimersByTimeAsync(0);
+  await copy;
+  expect(await paste).toBe('DESKTOP_STOPPED');
   expect(current.clipboard).toHaveBeenCalledExactlyOnceWith(1, 'copy');
+});
+
+it.each([
+  ['DESKTOP_VIEW_ONLY', 'copy', 'remoteDesktop.viewer.controlRequired'],
+  ['CLIPBOARD_UNSUPPORTED', 'paste', 'remoteDesktop.viewer.clipboardUnsupported'],
+  ['CLIPBOARD_EMPTY', 'paste', 'remoteDesktop.viewer.clipboardEmpty'],
+  ['CLIPBOARD_TOO_LONG', 'copy', 'remoteDesktop.viewer.clipboardTooLong'],
+  ['DESKTOP_CLIPBOARD_COPY_FAILED', 'copy', 'remoteDesktop.viewer.clipboardCopyFailed'],
+  ['DESKTOP_CLIPBOARD_UNAVAILABLE', 'paste', 'remoteDesktop.viewer.clipboardPasteFailed'],
+] as const)('explains %s on %s', (code, action, key) => {
+  expect(clipboardFailureKey(new Error(code), action)).toBe(key);
 });
 
 it.each([true, false])(

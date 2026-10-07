@@ -815,19 +815,7 @@ export const SessionCard = withSidebarNavigation<SessionCardProps>(function Sess
                       }
                     />
                   )}
-                  {/* 任务在本机、Agent 在另一台电脑运行。 */}
-                  {!remoteIconKind && session.agentDeviceId && (
-                    <RemoteProjectIcon
-                      kind="agent-device"
-                      size={12}
-                      strokeWidth={1.8}
-                      className={
-                        isActive
-                          ? 'text-sidebar-item-active-foreground'
-                          : 'text-sidebar-action-icon'
-                      }
-                    />
-                  )}
+                  {/* Agent 在另一台电脑运行(任务在本机)的标识在 Agent 图标上(信号波纹)。 */}
                   {sourceLabel ? (
                     <span
                       title={sourceLabel}
@@ -1096,16 +1084,6 @@ export const SessionCard = withSidebarNavigation<SessionCardProps>(function Sess
                 size={11}
                 strokeWidth={1.8}
                 connectionStatus={remoteIconConnectionStatus}
-                className={
-                  isActive ? 'text-sidebar-item-active-foreground' : 'text-[var(--text-tertiary)]'
-                }
-              />
-            )}
-            {!remoteIconKind && session.agentDeviceId && (
-              <RemoteProjectIcon
-                kind="agent-device"
-                size={11}
-                strokeWidth={1.8}
                 className={
                   isActive ? 'text-sidebar-item-active-foreground' : 'text-[var(--text-tertiary)]'
                 }

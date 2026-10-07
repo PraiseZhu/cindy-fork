@@ -474,6 +474,13 @@ handler 无 sender 依赖；不加入共享任务访客白名单，不进入自�
   还原到 A 的真实路径，二进制内容保持原样。A 的真实目录继续用于权限 gate、执行与变更抓取，
   路径别名不增加授权。执行平台与 shell 保留 A 的实际值，以免跨 macOS / Windows / Linux 选错
   命令。此增量不修改 channel、relay、协议版本或服务器，也不是 OS 虚拟化。
+- **执行环境**(2026-10-07 裁决)：A 上的命令(Claude 的 Bash、Pi 的 `exec.run`、Codex exec-server、
+  搜索)沿用 A 的 Desktop 完整环境，与本机 Agent 一致：真实用户目录、临时目录、`SSH_AUTH_SOCK`、
+  git / gh / npm 配置与用户自己的环境变量照常可用，不另造假 HOME，也不剥离凭证类变量。任务由 A 的
+  用户发起，风险与本机 Agent 相同，由 A 的任务权限档与执行器 gate 把关；上面「凭证」一条只指模型
+  登录与供应商凭证，命令输出照常经事件流回到 B 上的 Agent，与本机 Agent 把输出交给模型相同。虚拟化
+  只作用于 Agent 看到的路径文本：用户目录、临时目录已有别名，PATH 里其余目录在设置虚拟根时登记
+  (`executor/workspace.ts` 的 `setVirtualRoot`，回归见 `executor/__tests__/executor.test.ts`)。
 - **回退**：`REMOTE_AGENT_METHODS` 含 `previewRewindFiles` / `commitRewindFiles`，B 在 `describeHandle`
   里声明支持后 A 才提供回退；文件按 A 本机的保存点链回退，对话由 B 截断。B 不支持时 A 关闭回退并提示
   升级那台的 Cindy。

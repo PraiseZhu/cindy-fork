@@ -127,12 +127,12 @@ export async function detectImageMime(absPath: string): Promise<string | null> {
 
 export interface RipgrepRunner {
   /** 返回 rg 的 stdout 行；达到 maxLines 时提前结束。退出码 1(无匹配)视为正常。 */
-  (args: string[], cwd: string, opts: { maxLines: number; signal?: AbortSignal; env?: NodeJS.ProcessEnv }): Promise<string[]>;
+  (args: string[], cwd: string, opts: { maxLines: number; signal?: AbortSignal }): Promise<string[]>;
 }
 
 export function createRipgrepRunner(rgPath: string): RipgrepRunner {
-  return (args, cwd, { maxLines, signal, env }) => new Promise((resolve, reject) => {
-    const child = spawn(rgPath, args, { cwd, env, stdio: ['ignore', 'pipe', 'pipe'], signal });
+  return (args, cwd, { maxLines, signal }) => new Promise((resolve, reject) => {
+    const child = spawn(rgPath, args, { cwd, stdio: ['ignore', 'pipe', 'pipe'], signal });
     const lines: string[] = [];
     let stderr = '';
     let stopped = false;

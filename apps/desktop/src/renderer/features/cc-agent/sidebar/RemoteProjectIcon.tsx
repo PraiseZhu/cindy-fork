@@ -1,10 +1,13 @@
-import { Cpu, Globe, MonitorOff, MonitorSmartphone } from 'lucide-react';
+import { Globe, MonitorOff, MonitorSmartphone } from 'lucide-react';
 
 import { cn } from '@/lib/utils';
 import type { DeviceLinkConnectionStatus } from '@/lib/ccAgent.types';
 
-/** agent-device:任务在本机、Agent 在同账号另一台电脑上运行。 */
-type RemoteProjectIconKind = 'device-link' | 'ssh' | 'agent-device';
+/**
+ * 整件任务在远端(device-link 设备 / SSH 主机)。任务在本机、只有 Agent 在另一台电脑
+ * 运行的不走这里:标识画在 Agent 图标上(VendorIcon remote 的信号波纹)。
+ */
+type RemoteProjectIconKind = 'device-link' | 'ssh';
 
 interface RemoteProjectIconProps {
   kind: RemoteProjectIconKind;
@@ -23,14 +26,7 @@ export function RemoteProjectIcon({
   className,
 }: RemoteProjectIconProps) {
   const disconnected = kind !== 'ssh' && connectionStatus === 'disconnected';
-  const Icon =
-    kind === 'agent-device'
-      ? Cpu
-      : disconnected
-        ? MonitorOff
-        : kind === 'device-link'
-          ? MonitorSmartphone
-          : Globe;
+  const Icon = disconnected ? MonitorOff : kind === 'device-link' ? MonitorSmartphone : Globe;
   return (
     <Icon
       size={size}

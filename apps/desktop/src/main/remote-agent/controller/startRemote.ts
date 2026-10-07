@@ -175,7 +175,6 @@ export async function startRemoteAgentSession(
         codexPath,
         cwd: workspace.workingDir,
         workspace,
-        env: () => workspace.hostedProcessEnv(path.join(os.tmpdir(), 'cindy-remote-agent')),
         authorize: (action) => executor.check(action),
         push: async (frames) => {
           await pushFrames?.(frames);

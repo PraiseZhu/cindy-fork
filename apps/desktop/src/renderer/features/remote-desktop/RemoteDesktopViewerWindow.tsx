@@ -18,7 +18,11 @@ import {
 import { WindowControls } from '@/components/title-bar/WindowControls';
 import { useMacFullscreen } from '@/hooks/useMacFullscreen';
 import i18n from '@/i18n';
-import { DesktopViewerController, type ViewerSnapshot } from './viewerController';
+import {
+  clipboardFailureKey,
+  DesktopViewerController,
+  type ViewerSnapshot,
+} from './viewerController';
 import { Select } from '@/components/ui/select';
 import { Button } from '@/components/ui/button';
 import { FormField } from '@/components/ui/form-field';
@@ -83,6 +87,8 @@ export function RemoteDesktopViewerWindow() {
   const generation = useRef(-1);
   const latestState = useRef<ViewerSnapshot | null>(null);
   const activePanel = useRef(settings);
+  // Only the latest clipboard click reports; queued earlier transfers stay silent.
+  const clipboardAttempt = useRef(0);
   activePanel.current = settings;
   const requestClose = useCallback(() => {
     controller.current?.releaseInput();
@@ -668,11 +674,18 @@ export function RemoteDesktopViewerWindow() {
                         key={action}
                         variant="secondary"
                         disabled={!state.controlling || state.closing}
-                        onClick={() =>
-                          void controller.current
-                            ?.clipboard(action)
-                            .catch(() => setNotice(t('remoteDesktop.viewer.clipboardFailed')))
-                        }
+                        onClick={() => {
+                          const attempt = ++clipboardAttempt.current;
+                          setNotice(null);
+                          void controller.current?.clipboard(action).catch((error) => {
+                            // A stopped connection already shows its own state.
+                            if (
+                              attempt === clipboardAttempt.current &&
+                              !(error instanceof Error && error.message === 'DESKTOP_STOPPED')
+                            )
+                              setNotice(t(clipboardFailureKey(error, action)));
+                          });
+                        }}
                       >
                         {t(`remoteDesktop.${action}`)}
                       </Button>
@@ -688,9 +701,7 @@ export function RemoteDesktopViewerWindow() {
                 )}
               </>
             )}
-            <p>
-              {t('remoteDesktop.viewer.clipboardShortcutHint', { modifier: isMac ? '⌘' : 'Ctrl' })}
-            </p>
+            <p>{t('remoteDesktop.viewer.clipboardShortcutHint')}</p>
           </ViewerPanel>
           <ViewerPanel
             label={t('remoteDesktop.viewer.securityPanel')}
@@ -860,11 +871,6 @@ export function RemoteDesktopViewerWindow() {
                 <X size={14} />
               </ViewerTool>
             )}
-          </div>
-        )}
-        {state?.clipboardError && (
-          <div className="remote-viewer-notice" role="status">
-            {t('remoteDesktop.viewer.clipboardFailed')}
           </div>
         )}
       </div>

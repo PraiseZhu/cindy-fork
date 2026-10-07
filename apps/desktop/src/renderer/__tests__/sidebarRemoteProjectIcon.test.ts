@@ -31,8 +31,13 @@ describe('sidebar remote project icon', () => {
     expect(remoteProjectIconSource).toMatch(
       /kind === 'device-link'\s+\?\s+MonitorSmartphone\s+:\s+Globe/,
     );
-    // Agent 在另一台电脑运行的本机任务有自己的标识,不冒充远程设备任务。
-    expect(remoteProjectIconSource).toMatch(/kind === 'agent-device'\s+\?\s+Cpu/);
+    // Agent 在另一台电脑运行的本机任务不冒充远程设备任务:标识画在左侧 Agent 图标上
+    // (信号波纹,见 remoteAgentVendorIcon.test.tsx),标题后不再另放芯片图标(2026-10-07)。
+    expect(remoteProjectIconSource).not.toContain('agent-device');
+    expect(remoteProjectIconSource).not.toContain('Cpu');
+    expect(sessionItemSource).not.toContain('kind="agent-device"');
+    expect(sessionCardSource).not.toContain('kind="agent-device"');
+    expect(sessionHeaderSource).not.toContain('kind="agent-device"');
     expect(sessionItemSource).toMatch(
       /const remoteIconKind = session\.deviceLinkDeviceId\s+\?\s+'device-link'\s+:\s+session\.remoteHostId\s+\?\s+'ssh'\s+:\s+null/,
     );

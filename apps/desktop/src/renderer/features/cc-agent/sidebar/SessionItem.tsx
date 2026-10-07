@@ -1083,17 +1083,7 @@ export const SessionItem = withSidebarNavigation<SessionItemProps>(function Sess
               )}
             />
           )}
-          {/* 任务在本机、Agent 在另一台电脑运行。 */}
-          {!remoteIconKind && session.agentDeviceId && (
-            <RemoteProjectIcon
-              kind="agent-device"
-              size={12}
-              strokeWidth={1.8}
-              className={cn(
-                isActive ? 'text-sidebar-item-active-foreground' : 'text-sidebar-action-icon',
-              )}
-            />
-          )}
+          {/* Agent 在另一台电脑运行(任务在本机)的标识在左侧 Agent 图标上(信号波纹)。 */}
           {sourceLabel ? (
             <span
               title={sourceLabel}

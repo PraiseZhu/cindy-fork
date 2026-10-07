@@ -6,7 +6,6 @@
  * 让 Agent 照常加载项目说明与 Skill)在这里映射回本机真实目录，模型即使用了影子路径也落在
  * 本机项目里。
  */
-import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -95,8 +94,6 @@ export class ExecutorWorkspace {
   private extraDirs: string[];
   private aliases: ExecutorPathAlias[];
   private virtualRoot?: string;
-  private hostedEnvRoot?: string;
-  private hostedHomeDir?: string;
 
   constructor(roots: ExecutorWorkspaceRoots) {
     if (!path.isAbsolute(roots.workingDir)) throw new ExecutorPathError('working directory must be absolute');
@@ -128,8 +125,26 @@ export class ExecutorWorkspace {
       .sort((a, b) => b.from.length - a.from.length);
   }
 
+  /**
+   * 命令沿用 Desktop 的完整环境(与本机 Agent 一致)，虚拟化只作用于 Agent 看到的路径文本。
+   * 用户目录与临时目录已有别名；PATH 里其余目录在这里登记，env / which 之类的输出也只露虚拟路径。
+   */
   setVirtualRoot(root?: string): void {
     this.virtualRoot = root;
+    if (root) this.virtualizeDirs(this.unaliasedSearchDirs());
+  }
+
+  private unaliasedSearchDirs(): string[] {
+    const dirs: string[] = [];
+    for (const entry of (process.env.PATH ?? '').split(path.delimiter)) {
+      if (!entry || !path.isAbsolute(entry) || this.toAgentPath(entry) !== entry) continue;
+      try {
+        if (fs.statSync(entry).isDirectory()) dirs.push(entry);
+      } catch {
+        // PATH 里不存在的目录不会出现在输出里，无需登记。
+      }
+    }
+    return dirs;
   }
 
   /** 运行中新增的目录分配新的 opaque 别名，撤销授权不撤销路径身份。 */
@@ -221,89 +236,6 @@ export class ExecutorWorkspace {
     return projected === text ? data : Buffer.from(projected, 'utf8');
   }
 
-  /**
-   * 为控制端执行器创建隔离环境。只保留运行 shell 所需的通用系统变量；用户目录、临时目录
-   * 和凭证类变量都不从 Desktop 进程继承。目录仍在控制端落地，但会注册成虚拟别名，命令的
-   * env / printenv 输出再经过 mapOutputForAgent 时只会看到 Agent 侧路径。
-   */
-  hostedProcessEnv(tempDir: string): NodeJS.ProcessEnv {
-    const root = this.hostedEnvRoot ?? path.join(tempDir, 'env', randomUUID());
-    if (this.hostedEnvRoot !== root) {
-      this.hostedEnvRoot = root;
-      fs.mkdirSync(path.join(root, 'home'), { recursive: true });
-      fs.mkdirSync(path.join(root, 'tmp'), { recursive: true });
-    }
-    const fakeHome = path.join(root, 'home');
-    const fakeTemp = path.join(root, 'tmp');
-    this.hostedHomeDir = fakeHome;
-    this.virtualizeDirs([fakeHome, fakeTemp]);
-    const env: NodeJS.ProcessEnv = {};
-    const allowed = [
-      'PATHEXT', 'SystemRoot', 'WINDIR', 'ComSpec', 'COMSPEC', 'SystemDrive', 'OS',
-      'PROCESSOR_ARCHITECTURE', 'PROCESSOR_IDENTIFIER', 'PROCESSOR_LEVEL', 'PROCESSOR_REVISION',
-      'NUMBER_OF_PROCESSORS', 'LANG', 'LC_ALL', 'LC_CTYPE', 'TERM', 'COLORTERM', 'CI',
-      'NODE_ENV', 'FORCE_COLOR', 'NO_COLOR',
-    ];
-    for (const key of allowed) {
-      const value = process.env[key];
-      if (value !== undefined) env[key] = value;
-    }
-    const pathValue = process.env.PATH ?? process.env.Path ?? '';
-    // PATH 仍保留完整命令搜索能力；每个目录都登记成虚拟别名，printenv/env 的输出会投影回
-    // Agent 侧路径。这样用户级 Node/pnpm、Git Bash 等不会因为隔离而失效。
-    const pathEntries = pathValue.split(path.delimiter).filter(Boolean);
-    if (pathEntries.length) {
-      const pathRoot = path.join(root, 'path');
-      fs.mkdirSync(pathRoot, { recursive: true });
-      const hostedPathEntries: string[] = [];
-      for (const [index, target] of pathEntries.entries()) {
-        let stat: fs.Stats;
-        try {
-          stat = fs.statSync(target);
-        } catch {
-          continue;
-        }
-        if (!stat.isDirectory()) continue;
-        const link = path.join(pathRoot, `entry-${index}`);
-        try {
-          if (!fs.existsSync(link)) {
-            fs.symlinkSync(target, link, process.platform === 'win32' ? 'junction' : 'dir');
-          }
-          hostedPathEntries.push(link);
-          // Keep both sides addressable: child env uses the temporary link, while diagnostics such
-          // as process.execPath may still report the linked target directory.
-          this.virtualizeDirs([target, link]);
-        } catch {
-          // A PATH entry that cannot be linked is omitted rather than reintroducing a real path.
-        }
-      }
-      if (hostedPathEntries.length) env.PATH = hostedPathEntries.join(path.delimiter);
-    }
-    env.HOME = fakeHome;
-    env.USERPROFILE = fakeHome;
-    env.TMP = fakeTemp;
-    env.TEMP = fakeTemp;
-    env.TMPDIR = fakeTemp;
-    env.XDG_CONFIG_HOME = path.join(fakeHome, '.config');
-    env.XDG_CACHE_HOME = path.join(fakeHome, '.cache');
-    env.APPDATA = path.join(fakeHome, 'AppData', 'Roaming');
-    env.LOCALAPPDATA = path.join(fakeHome, 'AppData', 'Local');
-    env.USERNAME = 'agent';
-    env.USER = 'agent';
-    env.LOGNAME = 'agent';
-    if (process.platform !== 'win32') env.SHELL = '/bin/bash';
-    return env;
-  }
-
-  /** 任务结束后移除 fake HOME/TMP 与 PATH 链接，避免临时目录残留。 */
-  async cleanupHostedProcessEnv(): Promise<void> {
-    const root = this.hostedEnvRoot;
-    this.hostedEnvRoot = undefined;
-    this.hostedHomeDir = undefined;
-    if (!root) return;
-    await fs.promises.rm(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 }).catch(() => undefined);
-  }
-
   /** 命令文本里出现的影子目录前缀替换成本机目录(按 shell 语法安全引用)。 */
   mapCommand(command: string, dialect: 'bash' | 'cmd' = 'bash'): string {
     const aliases = this.aliases.map((alias) => ({
@@ -357,7 +289,7 @@ export class ExecutorWorkspace {
     }
     const trimmed = input.startsWith('@') ? input.slice(1) : input;
     const expanded = trimmed === '~' || trimmed.startsWith('~/')
-      ? path.join(this.hostedHomeDir ?? process.env.HOME ?? '', trimmed.slice(1))
+      ? path.join(os.homedir(), trimmed.slice(1))
       : trimmed;
     return path.resolve(this.mapAlias(baseDir), this.mapAlias(expanded));
   }

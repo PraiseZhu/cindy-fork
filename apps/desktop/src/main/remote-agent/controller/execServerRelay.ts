@@ -21,7 +21,7 @@ import {
 } from '@cindy/device-link';
 
 import type { ExecutorAction, ExecutorGateDecision } from '../executor/gate';
-import { createExecutorEnv, resolveExecutorShell } from '../executor/shell';
+import { resolveExecutorShell } from '../executor/shell';
 import type { ExecutorWorkspace } from '../executor/workspace';
 
 export const EXEC_SERVER_WS_PATH = '/ws/exec-server';
@@ -36,7 +36,7 @@ export interface ExecServerRelayDeps {
   workspace: ExecutorWorkspace;
   authorize(action: ExecutorAction): ExecutorGateDecision;
   push(frames: RemoteAgentPushFrame[]): Promise<void>;
-  env?: NodeJS.ProcessEnv | (() => NodeJS.ProcessEnv);
+  env?: NodeJS.ProcessEnv;
   log?: { warn(message: string, meta?: Record<string, unknown>): void };
 }
 
@@ -184,9 +184,7 @@ export class ExecServerRelay {
     try {
       child = spawn(this.deps.codexPath, ['exec-server', '--listen', 'stdio://'], {
         cwd: this.deps.cwd,
-        env: typeof this.deps.env === 'function'
-          ? this.deps.env()
-          : createExecutorEnv(this.deps.env ?? process.env),
+        env: this.deps.env ?? process.env,
         stdio: ['pipe', 'pipe', 'pipe'],
         windowsHide: true,
       });

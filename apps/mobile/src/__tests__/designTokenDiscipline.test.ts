@@ -30,8 +30,8 @@ const EXEMPT = [
   /^src\/debug\//,
   /richContentAssets\.generated\.ts$/,
 ];
-/** 颜色规则额外豁免:WebView HTML 生成器(CSS 模板)与 lightbox 黑白语境。 */
-const COLOR_EXEMPT = [/Html\.ts$/i, /src\/session\/ImageLightbox\.tsx$/];
+/** 颜色规则额外豁免:WebView HTML 生成器(CSS 模板)与 lightbox / 视频画布的恒深黑白语境。 */
+const COLOR_EXEMPT = [/Html\.ts$/i, /src\/session\/ImageLightbox\.tsx$/, /src\/session\/NativeVideoPlayer\.tsx$/];
 
 /** 组件几何 / 特殊语义的登记豁免:file 后缀匹配 + 行内容包含 snippet 即放行。 */
 const ALLOWLIST: Array<{ file: string; snippet: string; reason: string }> = [
