@@ -453,8 +453,7 @@ export class SchedulerScriptCapabilityBroker implements ScriptCapabilityBroker {
           const durable = new AutomationDispatchService(createAutomationDispatchStore(snapshot.client), assertCurrent);
           const sent = await durable.execute({ scope: { kind: 'schedule', id: schedule.id },
             key: requireString(params, 'request_key'), operation: 'session_dispatch', targetSessionId: target,
-            payload: { ...dispatchParams, ifIdle: params.if_idle === true,
-              expectedGeneration: params.expected_generation, expectedTurnGeneration: params.expected_turn_generation } }, row => service.sendAutomationInput({ ...dispatchParams,
+            payload: dispatchParams }, row => service.sendAutomationInput({ ...dispatchParams,
               clientId: row.inputId, reservedSessionId: target ? undefined : row.sessionId,
               scheduleOrigin: { kind: 'scheduler', scheduleId: schedule.id, scheduleName: schedule.name, runId },
               ifIdle: params.if_idle === true,
