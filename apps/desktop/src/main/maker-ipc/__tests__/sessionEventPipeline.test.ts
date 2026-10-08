@@ -724,6 +724,7 @@ describe('production Session event pipeline', () => {
     expect(effects.fn('markAssistantTurnFailed')).toHaveBeenCalledOnce();
     expect(effects.fn('markAssistantTurnCompleted')).not.toHaveBeenCalled();
     expect(h.deps.autoResumeBookkeeping.stashOrcaSuppressedTerminal).toHaveBeenCalledOnce();
+    expect(h.deps.autoResumeBookkeeping.stashOrcaSuppressedTerminal).toHaveBeenCalledWith('task', expect.objectContaining({ capture: { owner: 'old-turn' } }));
     expect(h.deps.orcaTeamServiceForEvents.handleWorkerTerminalTurn).not.toHaveBeenCalled();
     expect(h.deps.onUnsuccessfulProductTurn).not.toHaveBeenCalled();
     await h.dispose();
@@ -898,7 +899,10 @@ describe('production Session event pipeline', () => {
     h.deps.orcaTeamServiceForEvents.handleWorkerTurnStarted.mockReturnValue(start.promise);
     h.emit(event('status', { isRunning: true }));
     effects.calls.length = 0;
-    expect(h.emit(event('done'))).toBeUndefined();
+    expect(h.emit(event('done', {}, { sessionInstanceId: 'original-event-instance', sessionTurnGeneration: 7 }))).toBeUndefined();
+    expect(h.deps.orcaTeamServiceForEvents.captureWorkerTerminalTurn).toHaveBeenCalledWith('task', {
+      sessionInstanceId: 'original-event-instance', turnGeneration: 7,
+    });
     ordered(
       'broadcast',
       'island',

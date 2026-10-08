@@ -1,3 +1,6 @@
+import { readFileSync } from 'node:fs';
+import ts from 'typescript';
+import { createOrcaTeamService, type OrcaTeamServiceDeps } from '../orcaTeamService.js';
 import Database from 'better-sqlite3';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
 import { fileURLToPath } from 'node:url';
@@ -47,6 +50,74 @@ describe('automation persistence boundaries', () => {
       { event_kind: 'progress' }, { event_kind: 'decision_required' }, { event_kind: 'handed_off' },
     ]);
   });
+  it.each(['done', 'error'] as const)('binds delayed %s terminal persistence to the original manual report turn', async status => {
+    const source = readFileSync(new URL('../register.ts', import.meta.url), 'utf8');
+    const from = source.indexOf('    persistAutoReport: async (');
+    const to = source.indexOf('    sendAutoBridgeToLead:', from);
+    expect(from).toBeGreaterThan(0);
+    expect(to).toBeGreaterThan(from);
+    let instanceId = input.sessionInstanceId, generation = input.turnGeneration;
+    const live = () => ({ instanceId, getTurnGeneration: () => generation, isTurnRunning: () => false });
+    const persistAutoReport = new Function('maker', 'submitOrcaWorkerReport', 'autoReport', ts.transpileModule(
+      `return ({${source.slice(from, to)}}).persistAutoReport;`,
+      { compilerOptions: { target: ts.ScriptTarget.ES2022 } },
+    ).outputText)({ getSession: live }, submitOrcaWorkerReport, JSON.parse);
+    let release!: () => void, entered!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const reached = new Promise<void>(resolve => { entered = resolve; });
+    const service = createOrcaTeamService({
+      getLiveSession: live,
+      getManualInterrupt: () => null,
+      getWorkerLinkBySessionId: async () => ({ workerId: 'worker-id', teamId: 'team', leadSessionId: 'lead', workerSessionId: 'worker' }),
+      listWorkersByLead: async () => [{ id: 'worker-id', status: 'running' }],
+      updateWorkerStatus: async () => { entered(); await gate; },
+      broadcastOrcaWorkerChanged: () => {},
+      persistAutoReport,
+      sendAutoBridgeToLead: async () => { throw Error('must not wake lead'); },
+    } as unknown as OrcaTeamServiceDeps);
+    const manual = await submitOrcaWorkerReport({ ...input, source: 'manual', report: report('handed_off') });
+    const capture = service.captureWorkerTerminalTurn('worker');
+    const terminal = service.handleWorkerTerminalTurn({ sessionId: 'worker', status, finalText: JSON.stringify(report('handed_off')), capture });
+    await reached;
+    instanceId = 'replacement-instance'; generation = 2;
+    release();
+    await terminal;
+    const rows = sqlite.prepare('SELECT event_id,logical_report_id,turn_generation,event_kind,report FROM orca_worker_events ORDER BY seq').all() as Array<Record<string, unknown>>;
+    expect(rows).toHaveLength(status === 'done' ? 1 : 2);
+    expect(rows[0]!.event_id).toBe(manual.event_id);
+    expect(rows.every(row => row.turn_generation === 1 && row.logical_report_id === rows[0]!.logical_report_id)).toBe(true);
+    if (status === 'error') {
+      expect(rows[1]!.event_kind).toBe('failed');
+      expect(JSON.parse(String(rows[1]!.report)).reasonCode).toBe('WORKER_TURN_FAILED');
+    }
+  });
+
+  it('keeps a durable enqueue snapshot failure unknown and never repeats the same keyed input', async () => {
+    const source = readFileSync(new URL('../register.ts', import.meta.url), 'utf8');
+    const from = source.indexOf('    enqueueQueuedMessage: async (');
+    const to = source.indexOf('    reserveNextQueuedMessage:', from);
+    expect(from).toBeGreaterThan(0);
+    expect(to).toBeGreaterThan(from);
+    const accepted: string[] = [];
+    const enqueue = new Function('inputCoordinator', 'awaitAgentInputQueueSnapshotPersistence', ts.transpileModule(
+      `return ({${source.slice(from, to)}}).enqueueQueuedMessage;`,
+      { compilerOptions: { target: ts.ScriptTarget.ES2022 } },
+    ).outputText)({ ensureQueueRestored: async () => {}, enqueue: (_id: string, item: { clientId: string }) => accepted.push(item.clientId) },
+      async () => { throw Error('snapshot write rejected'); });
+    const store = createAutomationDispatchStore(client), service = new AutomationDispatchService(store, () => {});
+    const args = { scope: { kind: 'schedule' as const, id: 'schedule-a' }, key: 'durable-queue', operation: 'session_dispatch' as const,
+      targetSessionId: 'worker', payload: { message: 'task' } };
+    const send = async (row: { inputId: string }) => {
+      await enqueue('worker', { clientId: row.inputId, origin: { kind: 'scheduler', durableAutomation: true } });
+      return { ok: true };
+    };
+    await expect(service.execute(args, send)).rejects.toMatchObject({ code: 'DISPATCH_UNKNOWN' });
+    const receipt = (await store.find(args.scope, args.key))!;
+    expect(receipt.status).toBe('unknown');
+    await expect(service.execute(args, send)).rejects.toMatchObject({ code: 'DISPATCH_UNKNOWN' });
+    expect(accepted).toEqual([receipt.inputId]);
+  });
+
   it('rejects changed content under a reused report identity instead of silently losing a decision', async () => {
     await submitOrcaWorkerReport({ ...input, source: 'manual', report: report('decision_required') });
     await expect(submitOrcaWorkerReport({ ...input, source: 'manual', report: {

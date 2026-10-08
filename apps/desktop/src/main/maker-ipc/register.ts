@@ -11836,7 +11836,11 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       await inputCoordinator.ensureQueueRestored(sessionId);
       beforeEnqueue?.();
       inputCoordinator.enqueue(sessionId, item);
-      await awaitAgentInputQueueSnapshotPersistence(sessionId);
+      // Ordinary Orca queued replies acknowledge in-memory ownership. A background
+      // snapshot failure must not tell the caller to retry an already executable input.
+      if (item.origin?.kind === 'scheduler' && item.origin.durableAutomation === true) {
+        await awaitAgentInputQueueSnapshotPersistence(sessionId);
+      }
     },
     reserveNextQueuedMessage: async (sessionId, item, onReserved, beforeReserve) => {
       await inputCoordinator.ensureQueueRestored(sessionId);
@@ -12502,8 +12506,8 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     moveQueuedMessage: moveStoredControlMessage,
     persistAutoReport: async (sessionId, turn) => {
       const result = await submitOrcaWorkerReport({ workerSessionId: sessionId,
-        turnGeneration: maker.getSession(sessionId)?.getTurnGeneration() ?? 0,
-        sessionInstanceId: maker.getSession(sessionId)?.instanceId ?? '',
+        turnGeneration: turn.capture.reportIdentity?.turnGeneration ?? 0,
+        sessionInstanceId: turn.capture.reportIdentity?.sessionInstanceId ?? '',
         source: 'auto', report: autoReport(turn.finalText), failed: turn.status === 'error' });
       return result.handled;
     },

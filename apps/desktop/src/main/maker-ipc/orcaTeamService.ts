@@ -245,7 +245,13 @@ export interface OrcaManualInterruptSnapshot {
   reason: string;
 }
 
+export interface WorkerTerminalReportIdentity {
+  readonly sessionInstanceId: string;
+  readonly turnGeneration: number;
+}
+
 export interface WorkerTerminalTurnCapture {
+  readonly reportIdentity?: WorkerTerminalReportIdentity;
   sessionId: string;
   manualInterrupt: OrcaManualInterruptSnapshot | null;
   /** Opaque identity of the auto-bridge state that belongs to the ending turn. */
@@ -254,12 +260,12 @@ export interface WorkerTerminalTurnCapture {
 
 /** service 的 I/O 边界。register.ts 只负责把 DB、Maker、IPC broadcast 作为依赖组合进来。 */
 export interface OrcaTeamServiceDeps {
-  persistAutoReport?(sessionId: string, turn: { status: 'done' | 'error'; finalText: string }): Promise<boolean>;
+  persistAutoReport?(sessionId: string, turn: { status: 'done' | 'error'; finalText: string; capture: WorkerTerminalTurnCapture }): Promise<boolean>;
   captureControlAuthority?(leadSessionId: string): Promise<() => Promise<void>>;
   getWorkerLinkBySessionId(workerSessionId: string): Promise<OrcaWorkerLinkSnapshot | null>;
   getWorkerLinkByWorkerId(workerId: string): Promise<OrcaWorkerLinkSnapshot | null>;
   listWorkersByLead(leadSessionId: string): Promise<OrcaWorkerRecordSnapshot[]>;
-  getLiveSession(sessionId: string): { isTurnRunning(): boolean } | null;
+  getLiveSession(sessionId: string): { isTurnRunning(): boolean; instanceId?: string; getTurnGeneration?(): number } | null;
   resumeWorkerSession(
     worker: OrcaWorkerRecordSnapshot,
     link: OrcaWorkerLinkSnapshot,
@@ -426,7 +432,7 @@ export interface OrcaTeamService {
   /** True while an accepted worker task still owes this Lead its report. */
   hasPendingWorkerReports(leadSessionId: string): boolean;
   handleWorkerTurnStarted(sessionId: string): Promise<void>;
-  captureWorkerTerminalTurn(sessionId: string): WorkerTerminalTurnCapture;
+  captureWorkerTerminalTurn(sessionId: string, reportIdentity?: WorkerTerminalReportIdentity): WorkerTerminalTurnCapture;
   handleWorkerTerminalTurn(params: WorkerTerminalTurnParams): Promise<void>;
 }
 
@@ -444,6 +450,7 @@ interface AutoBridgeState {
     status: 'done' | 'error';
     finalText: string;
     diagnostic?: string;
+    capture: WorkerTerminalTurnCapture;
   };
 }
 
@@ -625,16 +632,33 @@ export function createOrcaTeamService(deps: OrcaTeamServiceDeps): OrcaTeamServic
     }
   }
 
+  function captureWorkerTerminalTurn(
+    sessionId: string,
+    reportIdentity?: WorkerTerminalReportIdentity,
+  ): WorkerTerminalTurnCapture {
+    const live = reportIdentity ? null : deps.getLiveSession(sessionId);
+    const identity = reportIdentity ?? (live?.instanceId && live.getTurnGeneration
+      ? { sessionInstanceId: live.instanceId, turnGeneration: live.getTurnGeneration() }
+      : undefined);
+    return {
+      sessionId,
+      reportIdentity: identity ? Object.freeze({ ...identity }) : undefined,
+      manualInterrupt: deps.getManualInterrupt(sessionId),
+      autoBridgeIdentity: autoBridge.get(sessionId) ?? null,
+    };
+  }
+
   async function bridgeWorkerCompletion(
     sessionId: string,
-    turn: { status: 'done' | 'error'; finalText: string; diagnostic?: string },
+    turn: { status: 'done' | 'error'; finalText: string; diagnostic?: string; capture: WorkerTerminalTurnCapture },
   ): Promise<'accepted' | 'deferred' | 'rejected' | 'skipped'> {
     if (await deps.persistAutoReport?.(sessionId, turn)) {
-      deletePendingReport(sessionId);
+      // A persisted historical event does not own a newer pending input.
+      if (autoBridge.get(sessionId) === turn.capture.autoBridgeIdentity) deletePendingReport(sessionId);
       return 'accepted';
     }
     const state = autoBridge.get(sessionId);
-    if (!state) return 'skipped';
+    if (!state || state !== turn.capture.autoBridgeIdentity) return 'skipped';
     if (!state.ready) {
       state.deferred = turn;
       return 'deferred';
@@ -1763,13 +1787,7 @@ export function createOrcaTeamService(deps: OrcaTeamServiceDeps): OrcaTeamServic
       clearRuntimeState(sessionId);
     },
     hasPendingWorkerReports,
-    captureWorkerTerminalTurn(sessionId) {
-      return {
-        sessionId,
-        manualInterrupt: deps.getManualInterrupt(sessionId),
-        autoBridgeIdentity: autoBridge.get(sessionId) ?? null,
-      };
-    },
+    captureWorkerTerminalTurn,
     async handleWorkerTurnStarted(sessionId) {
       const link = await deps.getWorkerLinkBySessionId(sessionId);
       if (!link) return;
@@ -1797,11 +1815,7 @@ export function createOrcaTeamService(deps: OrcaTeamServiceDeps): OrcaTeamServic
       const capture =
         params.capture?.sessionId === params.sessionId
           ? params.capture
-          : {
-              sessionId: params.sessionId,
-              manualInterrupt: deps.getManualInterrupt(params.sessionId),
-              autoBridgeIdentity: autoBridge.get(params.sessionId) ?? null,
-            };
+          : captureWorkerTerminalTurn(params.sessionId);
       let manualInterruptOwnership = capture.manualInterrupt;
       const autoBridgeAtEntry = capture.autoBridgeIdentity;
       const link = await deps.getWorkerLinkBySessionId(params.sessionId);
@@ -1849,9 +1863,16 @@ export function createOrcaTeamService(deps: OrcaTeamServiceDeps): OrcaTeamServic
 
           // Every terminal branch is scoped to the identities captured before queue drain. A
           // committed newer turn replaces either the auto-bridge object, the manual mark, or both.
+          const live = deps.getLiveSession(params.sessionId);
+          const reportIdentity = capture.reportIdentity;
+          const reportTurnChanged = reportIdentity && live?.instanceId && live.getTurnGeneration && (
+            live.instanceId !== reportIdentity.sessionInstanceId ||
+            live.getTurnGeneration() !== reportIdentity.turnGeneration
+          );
           if (
             currentAutoBridge !== autoBridgeAtEntry ||
-            currentManualInterrupt !== manualInterruptOwnership
+            currentManualInterrupt !== manualInterruptOwnership ||
+            reportTurnChanged
           ) {
             staleTerminal = true;
             return;
@@ -1869,8 +1890,12 @@ export function createOrcaTeamService(deps: OrcaTeamServiceDeps): OrcaTeamServic
                 status: params.status,
                 finalText: params.finalText,
                 diagnostic: params.diagnostic,
+                capture,
               });
               return;
+            }
+            if (!manualInterruptOwnership) {
+              await deps.persistAutoReport?.(params.sessionId, { ...params, capture });
             }
             // (#3153) done 的回报 settle 会先于本 turn 终止落库,renderer「看到 done
             // 即 ack」在 active-turn 守卫处被拒后没有重试闭环,worker 会永久停在 done
@@ -1897,6 +1922,7 @@ export function createOrcaTeamService(deps: OrcaTeamServiceDeps): OrcaTeamServic
             status: params.status,
             finalText: params.finalText,
             diagnostic: params.diagnostic,
+            capture,
           });
         });
 
@@ -1917,9 +1943,13 @@ export function createOrcaTeamService(deps: OrcaTeamServiceDeps): OrcaTeamServic
           ) {
             continue;
           }
+          staleTerminal = true;
+        }
+        if (staleTerminal) {
+          // Keep historical event-only reports; never revive the ordinary bridge or mutate new UI ownership.
+          if (!capture.manualInterrupt) await deps.persistAutoReport?.(params.sessionId, { ...params, capture });
           return;
         }
-        if (staleTerminal) return;
         break;
       }
 

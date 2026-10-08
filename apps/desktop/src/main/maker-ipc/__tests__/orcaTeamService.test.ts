@@ -1,3 +1,4 @@
+import { createOrcaInterAgentDispatcher, type OrcaInterAgentDispatcherDeps } from '../orcaInterAgentDispatcher';
 import { hasAcceptedUserTaskInput } from '../pluginTaskInput.js';
 import { describe, expect, it, vi } from 'vitest';
 import {readFileSync} from 'node:fs';
@@ -388,6 +389,178 @@ function createDeps(overrides: Partial<OrcaTeamServiceDeps> = {}) {
     service: createOrcaTeamService(deps),
   };
 }
+
+describe('Orca terminal and queue persistence boundaries', () => {
+  const source = readFileSync(new URL('../register.ts', import.meta.url), 'utf8');
+  function adapter(name: string, end: string, bindings: Record<string, unknown>) {
+    const from = source.indexOf(`    ${name}: async (`);
+    const to = source.indexOf(`    ${end}:`, from);
+    expect(from).toBeGreaterThan(0);
+    expect(to).toBeGreaterThan(from);
+    return new Function(...Object.keys(bindings), ts.transpileModule(
+      `return ({${source.slice(from, to)}}).${name};`,
+      { compilerOptions: { target: ts.ScriptTarget.ES2022 } },
+    ).outputText)(...Object.values(bindings));
+  }
+
+  it('ordinary send succeeds once when background snapshot persistence fails', async () => {
+    const items: AgentInputQueuedMessage[] = [];
+    const snapshot = vi.fn(async () => { throw Error('snapshot write rejected'); });
+    const enqueue = adapter('enqueueQueuedMessage', 'reserveNextQueuedMessage', {
+      inputCoordinator: { ensureQueueRestored: async () => {}, enqueue: (_id: string, item: AgentInputQueuedMessage) => items.push(item) },
+      awaitAgentInputQueueSnapshotPersistence: snapshot,
+    });
+    let seq = 0;
+    const dispatcher = createOrcaInterAgentDispatcher({
+      createId: () => `input-${++seq}`,
+      getSessionMeta: async () => ({ agentKind: 'codex', model: 'fixture', workDir: '/fixture' }),
+      getSessionRowSnapshot: async () => ({ title: 'Worker', status: 'active', userSendAt: null }),
+      getLiveSession: () => null,
+      shouldQueueNewTurn: () => true,
+      hasSendToSessionLock: () => false,
+      buildCreateOptsForQueuedSession: async () => ({ agentKind: 'codex', model: 'fixture', workingDir: '/fixture' }),
+      enqueueQueuedMessage: enqueue,
+      log: { info: vi.fn(), warn: vi.fn() },
+    } as unknown as OrcaInterAgentDispatcherDeps<unknown>);
+    const h = createDeps({ dispatchWorkerMessage: async params => {
+      const result = await dispatcher.dispatchOrEnqueueOrcaInterAgentMessage({
+        ...params, rawContent: params.message, source: 'lead', senderLabel: 'Lead', meta: params.dispatchMeta,
+      });
+      return result.ok ? { ...result, targetTitle: result.targetTitle ?? null, targetLastUserSendAt: result.targetLastUserSendAt ?? null } : result;
+    } });
+    const request = { callerLeadSessionId: 'lead-1', targetSessionId: 'worker-session-1', message: 'side effect task' };
+    const result = await h.service.sendToWorker(request);
+    // A caller retries only failures. A queued item must not also receive a failure reply.
+    if (!result.ok) await h.service.sendToWorker(request);
+    expect(result.ok).toBe(true);
+    expect(items).toHaveLength(1);
+    await dispatcher.runQueuedOrcaInterAgentAcceptedCallback('worker-session-1', items[0]!);
+    expect(h.getWorker().status).toBe('running');
+    expect(snapshot).not.toHaveBeenCalled();
+  });
+
+  it.each(['restore', 'admission', 'durable'])('preserves %s failures at the queue boundary', async phase => {
+    const enqueueItem = vi.fn();
+    const snapshot = vi.fn(async () => { throw Error('snapshot write rejected'); });
+    const enqueue = adapter('enqueueQueuedMessage', 'reserveNextQueuedMessage', {
+      inputCoordinator: { ensureQueueRestored: async () => { if (phase === 'restore') throw Error('restore failed'); }, enqueue: enqueueItem },
+      awaitAgentInputQueueSnapshotPersistence: snapshot,
+    });
+    await expect(enqueue('session', { origin: { kind: 'scheduler', durableAutomation: true } }, () => {
+      if (phase === 'admission') throw Error('STATE_CHANGED');
+    })).rejects.toThrow(phase === 'restore' ? 'restore failed' : phase === 'admission' ? 'STATE_CHANGED' : 'snapshot write rejected');
+    expect(enqueueItem).toHaveBeenCalledTimes(phase === 'durable' ? 1 : 0);
+    expect(snapshot).toHaveBeenCalledTimes(phase === 'durable' ? 1 : 0);
+  });
+
+  it('retains manual-stop suppression for the event-only sink', async () => {
+    const sink = vi.fn(async () => true);
+    const h = createDeps({ persistAutoReport: sink });
+    h.setWorker(createWorker({ status: 'running' }));
+    h.setManualInterrupt('user_stop');
+    await h.service.handleWorkerTerminalTurn({ sessionId: 'worker-session-1', status: 'error', finalText: 'cancelled' });
+    expect(sink).not.toHaveBeenCalled();
+    expect(h.deps.sendAutoBridgeToLead).not.toHaveBeenCalled();
+    expect(h.getWorker().status).toBe('idle');
+  });
+
+  it.each(['new-pending', 'already-done'])('persists old event-only reports without changing %s ownership', async phase => {
+    const sink = vi.fn(async () => true);
+    const h = createDeps({ persistAutoReport: sink });
+    await h.service.sendToWorker({ callerLeadSessionId: 'lead-1', targetSessionId: 'worker-session-1', message: 'old task' });
+    const capture = h.service.captureWorkerTerminalTurn('worker-session-1');
+    if (phase === 'new-pending') {
+      await h.service.sendToWorker({ callerLeadSessionId: 'lead-1', targetSessionId: 'worker-session-1', message: 'new task' });
+    } else h.setWorker(createWorker({ status: 'done' }));
+    await h.service.handleWorkerTerminalTurn({ sessionId: 'worker-session-1', status: 'error', finalText: 'old terminal', capture });
+    expect(sink).toHaveBeenCalledOnce();
+    expect(h.getWorker().status).toBe(phase === 'new-pending' ? 'running' : 'done');
+    expect(h.service.hasPendingWorkerReports('lead-1')).toBe(phase === 'new-pending');
+    expect(h.deps.sendAutoBridgeToLead).not.toHaveBeenCalled();
+  });
+
+  it('does not delete the newer pending owner when an old terminal arrives', async () => {
+    const h = createDeps({ persistAutoReport: async () => true });
+    await h.service.sendToWorker({ callerLeadSessionId: 'lead-1', targetSessionId: 'worker-session-1', message: 'old task' });
+    const capture = h.service.captureWorkerTerminalTurn('worker-session-1');
+    await h.service.sendToWorker({ callerLeadSessionId: 'lead-1', targetSessionId: 'worker-session-1', message: 'new task' });
+    const newer = h.service.captureWorkerTerminalTurn('worker-session-1');
+    await h.service.handleWorkerTerminalTurn({ sessionId: 'worker-session-1', status: 'done', finalText: 'old terminal', capture });
+    expect(h.service.captureWorkerTerminalTurn('worker-session-1').autoBridgeIdentity).toBe(newer.autoBridgeIdentity);
+    expect(h.service.hasPendingWorkerReports('lead-1')).toBe(true);
+  });
+
+  it('records the old terminal after a provisional replacement commits without settling the replacement', async () => {
+    let generation = 1;
+    let replacementAccepted: (() => void | Promise<void>) | undefined;
+    let replacementCommitted: (() => void | Promise<void>) | undefined;
+    const sink = vi.fn(async () => true);
+    const h = createDeps({
+      getLiveSession: () => ({ instanceId: 'instance', getTurnGeneration: () => generation, isTurnRunning: () => false }),
+      persistAutoReport: sink,
+      reserveWorkerMessage: vi.fn(async params => {
+        replacementAccepted = params.onAccepted; replacementCommitted = params.onAcceptedCommit;
+        params.onReserved?.();
+        return { ok: true, mode: 'queued', clientId: 'replacement', targetTitle: 'Worker', targetLastUserSendAt: null,
+          dispatchOutcome: { kind: 'session-dispatch', source: 'test', dispatched: true, wakeKind: 'queued' } } satisfies DispatchWorkerMessageResult;
+      }),
+    });
+    await h.service.sendToWorker({ callerLeadSessionId: 'lead-1', targetSessionId: 'worker-session-1', message: 'old task' });
+    const capture = h.service.captureWorkerTerminalTurn('worker-session-1');
+    await h.service.interruptWorker({ callerLeadSessionId: 'lead-1', targetSessionId: 'worker-session-1', message: 'replacement' });
+    await replacementAccepted!();
+    generation = 2;
+    let settled = false;
+    const ending = h.service.handleWorkerTerminalTurn({ sessionId: 'worker-session-1', status: 'done', finalText: 'old final', capture }).then(() => { settled = true; });
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(settled).toBe(false);
+    expect(sink).not.toHaveBeenCalled();
+    await replacementCommitted!();
+    await ending;
+    expect(sink).toHaveBeenCalledWith('worker-session-1', expect.objectContaining({ capture: expect.objectContaining({
+      reportIdentity: { sessionInstanceId: 'instance', turnGeneration: 1 },
+    }) }));
+    expect(h.getWorker().status).toBe('running');
+    expect(h.service.hasPendingWorkerReports('lead-1')).toBe(true);
+    expect(h.deps.sendAutoBridgeToLead).not.toHaveBeenCalled();
+  });
+
+  it.each(['next-turn', 'replacement-instance'])('does not settle new live state with a delayed captured terminal: %s', async mode => {
+    let instanceId = 'original', generation = 1;
+    const sink = vi.fn(async () => true);
+    const h = createDeps({ getLiveSession: () => ({ instanceId, getTurnGeneration: () => generation, isTurnRunning: () => true }), persistAutoReport: sink });
+    h.setWorker(createWorker({ status: 'running' }));
+    const capture = h.service.captureWorkerTerminalTurn('worker-session-1');
+    if (mode === 'next-turn') generation++;
+    else instanceId = 'replacement';
+    await h.service.handleWorkerTerminalTurn({ sessionId: 'worker-session-1', status: 'done', finalText: 'old final', capture });
+    expect(sink).toHaveBeenCalledOnce();
+    expect(h.getWorker().status).toBe('running');
+    expect(h.deps.updateWorkerStatus).not.toHaveBeenCalled();
+  });
+
+  it.each(['next-turn', 'replacement-instance'])('keeps terminal report identity through delayed status persistence: %s', async mode => {
+    let instanceId = 'old-instance', generation = 1;
+    const live = () => ({ instanceId, getTurnGeneration: () => generation, isTurnRunning: () => false });
+    const reports: Array<{ sessionInstanceId: string; turnGeneration: number }> = [];
+    const persistAutoReport = adapter('persistAutoReport', 'sendAutoBridgeToLead', {
+      maker: { getSession: live }, autoReport: JSON.parse,
+      submitOrcaWorkerReport: async (report: typeof reports[number]) => { reports.push(report); return { handled: true }; },
+    });
+    const h = createDeps({ getLiveSession: live, persistAutoReport });
+    h.setWorker(createWorker({ status: 'running' }));
+    const capture = h.service.captureWorkerTerminalTurn('worker-session-1');
+    const update = h.deps.updateWorkerStatus;
+    h.deps.updateWorkerStatus = async (...args) => {
+      await update(...args);
+      if (mode === 'next-turn') generation++;
+      else instanceId = 'new-instance';
+    };
+    await h.service.handleWorkerTerminalTurn({ sessionId: 'worker-session-1', status: 'done', finalText: '{}', capture });
+    expect(reports).toEqual([expect.objectContaining({ sessionInstanceId: 'old-instance', turnGeneration: 1 })]);
+    expect(h.deps.sendAutoBridgeToLead).not.toHaveBeenCalled();
+  });
+});
 
 describe('OrcaTeamService', () => {
   it.each(['send', 'interrupt'].flatMap(action => ['initial', 'lookup', 'restore', 'accept', 'queued', 'healthy'].map(phase => ({action,phase}))))(

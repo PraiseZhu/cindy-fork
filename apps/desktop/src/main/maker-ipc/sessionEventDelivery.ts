@@ -83,7 +83,10 @@ export function deliverSessionEvent(
   // terminal event or lose the lead_interrupt marker before it is observed.
   const workerTerminalCapture =
     !isContinuationBoundary && (event.type === 'done' || isTerminalTurnErrorEvent(event))
-      ? deps.orcaTeamServiceForEvents?.captureWorkerTerminalTurn(session.id)
+      ? deps.orcaTeamServiceForEvents?.captureWorkerTerminalTurn(session.id, {
+          sessionInstanceId: event.sessionInstanceId ?? session.instanceId,
+          turnGeneration: event.sessionTurnGeneration ?? session.getTurnGeneration(),
+        })
       : undefined;
   // Reserve against the current recovery owner. Terminal persistence reads
   // again after delivery and idle callbacks, which may change that owner.
