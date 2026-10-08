@@ -45,7 +45,6 @@ import { ComposerSheet } from "./ComposerSheet";
 import { ComposerNativeSection as Section } from "./ComposerNativeSection";
 import { ComposerNativeRow } from "./ComposerNativeRow";
 import { MobileModelIconMark, MobileProviderMark } from "./MobileProviderMark";
-import { RemoteSourceMark } from "./RemoteSourceMark";
 import { groupSourceFilters } from "./remoteSourceFilters";
 import { mobileAgentLabel } from "./sessionAgentSwitch";
 import type { UnifiedMobilePickerViewProps } from "./UnifiedModelPickerSheet";
@@ -74,16 +73,12 @@ function ProviderSourceMark({
 }: {
   filter: UnifiedMobilePickerViewProps["filters"][number] | undefined;
 }) {
-  const mark = (
+  return (
     <MobileProviderMark
       {...filter?.providerMark}
       name={filter?.providerMark?.name ?? ""}
+      remote={filter?.remote != null}
     />
-  );
-  return filter?.remote ? (
-    <RemoteSourceMark size={iconSize.action}>{mark}</RemoteSourceMark>
-  ) : (
-    mark
   );
 }
 
@@ -254,21 +249,12 @@ export function UnifiedModelPickerView(p: UnifiedMobilePickerViewProps) {
                       justifyContent: "center",
                     }}
                   >
-                    {row.remoteDevice ? (
-                      <RemoteSourceMark size={iconSize.action}>
-                        <MobileModelIconMark
-                          icon={row.entry.icon}
-                          {...row.providerMark}
-                          color={colors.textSecondary}
-                        />
-                      </RemoteSourceMark>
-                    ) : (
-                      <MobileModelIconMark
-                        icon={row.entry.icon}
-                        {...row.providerMark}
-                        color={colors.textSecondary}
-                      />
-                    )}
+                    <MobileModelIconMark
+                      icon={row.entry.icon}
+                      {...row.providerMark}
+                      color={colors.textSecondary}
+                      remote={row.remoteDevice != null}
+                    />
                   </View>
                 </RNHostView>
               }

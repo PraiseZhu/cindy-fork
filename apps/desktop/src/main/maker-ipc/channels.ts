@@ -45,6 +45,8 @@ export const MAKER_INVOKE = {
   INPUT_RESUME: 'maker:input:resume',
   INPUT_RETRY_LAST_ERROR: 'maker:input:retry-last-error',
   INPUT_CLEAR_ERROR: 'maker:input:clear-error',
+  /** 取消账号限额重置后的自动继续(只撤等待,错误与手动重试保留)。 */
+  INPUT_CANCEL_USAGE_LIMIT_WAIT: 'maker:input:cancel-usage-limit-wait',
   /**
    * Renderer 侧 auth-retry 放弃（catch 或 guard fall-through）时调用，告知 main 补落持久化。
    * main 侧在相同 isRemoteAuthRetry 条件下跳过了 onTurnErrorEvent；此 IPC 覆盖"未重试/重试失败"两路。

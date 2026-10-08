@@ -214,7 +214,7 @@ export const SessionCard = withSidebarNavigation<SessionCardProps>(function Sess
   );
   const remoteWritesBlocked = isRemoteSessionWriteBlocked(session);
   const isAutomationGenerated = isAutomationGeneratedSession(session);
-  const boundSchedules = useSessionBoundSchedules(session.id);
+  const boundSchedules = useSessionBoundSchedules(session.id, session.deviceLinkDeviceId);
   const showScheduleBindingBadge = boundSchedules.length > 0;
   const showAutomationTimer = !showScheduleBindingBadge && isAutomationGenerated;
   const displayTitle = getSessionDisplayTitle(
@@ -594,6 +594,7 @@ export const SessionCard = withSidebarNavigation<SessionCardProps>(function Sess
     showScheduleBindingBadge ? (
       <ScheduleBindingBadge
         schedules={boundSchedules}
+        deviceLinkDeviceId={session.deviceLinkDeviceId}
         size={iconSize}
         activeForeground={isActive}
       />

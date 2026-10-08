@@ -73,8 +73,11 @@ vi.mock('@/session/ComposerNativeSection', () => ({ ComposerNativeSection: ({ ch
 vi.mock('@/session/ComposerNativeRow', () => ({ ComposerNativeRow: ({ leading, title }: any) => createElement('div', null, leading, title) }));
 vi.mock('@/platform/chrome', () => ({ NativePullDownMenu: ({ children }: any) => children, NativeSwitch: () => null, usesNativePullDownMenu: () => true }));
 vi.mock('@/components/MobileAgentMark', () => ({ MobileAgentMark: () => null }));
-vi.mock('@/session/MobileProviderMark', () => ({ MobileModelIconMark: () => null, MobileProviderMark: () => null }));
-vi.mock('@/session/RemoteSourceMark', () => ({ RemoteSourceMark: ({ children }: any) => createElement('span', { 'data-remote-mark': '' }, children) }));
+// 远程标记由 mark 自己按 remote 画(字形不缩放不移位),桩里只留一个可数的记号。
+vi.mock('@/session/MobileProviderMark', () => {
+  const stub = ({ remote }: any) => (remote ? createElement('span', { 'data-remote-mark': '' }) : null);
+  return { MobileModelIconMark: stub, MobileProviderMark: stub };
+});
 vi.mock('@/session/SheetModal', () => ({ SheetModal: ({ children }: any) => children }));
 vi.mock('@/session/SheetSurface', () => ({ SheetSurface: ({ children, pinnedTop, onBack, backAccessibilityLabel, testID, renderScrollContent }: any) => createElement('section', null,
   onBack ? createElement('button', {onClick:onBack, 'aria-label':backAccessibilityLabel ?? 'shared.back'}, 'Back') : null,

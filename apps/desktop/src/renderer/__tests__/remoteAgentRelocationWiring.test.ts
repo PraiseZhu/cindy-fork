@@ -61,7 +61,9 @@ describe('ChatInput:换位置进切换事务', () => {
     expect(chatInputSource).toContain(
       '...(relocateTo !== undefined ? { agentDeviceId: relocateTo } : {}),',
     );
-    expect(chatInputSource).toContain('if (relocateTo === undefined) syncSessionDraftModelPrefs(');
+    // 换电脑只把档位记进目标目录的记忆,不走写新建任务记忆的 syncSessionDraftModelPrefs。
+    expect(chatInputSource.split('if (relocateTo !== undefined) {').length - 1).toBe(2);
+    expect(chatInputSource).not.toContain('if (relocateTo === undefined) syncSessionDraftModelPrefs(');
   });
 
   it('意图期内目录跟随意图里的电脑', () => {

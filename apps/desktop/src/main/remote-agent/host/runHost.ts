@@ -6,8 +6,10 @@
  * 请求经本次任务的隧道变成反向请求，等控制端在它那台电脑上执行后回包。
  *
  * 不变量：
- *  - 只为通过准入的同账号控制端服务(远程控制打开、未撤销、账号未切换)，关闭或撤销后最迟一个
+ *  - 只为通过准入的控制端服务(远程控制打开、未撤销、账号未切换)，关闭或撤销后最迟一个
  *    巡检周期内结束全部任务；
+ *  - 其他账号的控制端(供应商分享的受邀者，deps.controllerTrust 判定)不可信：载荷按白名单复核
+ *    (guestIsolation.ts)，只开放已隔离的 Agent，只能恢复自己建立的会话；
  *  - 本机从不主动向控制端发起请求，一切经控制端拉取的事件流交付；控制端长时间不拉取视为离开；
  *  - 本机的地址、凭证与供应商配置不进事件流：事件只含 Agent 输出与反向请求；
  *  - open / call / reply / push / close 都按各自的 id 去重，poll 按游标幂等；
@@ -40,12 +42,14 @@ import {
   type RemoteAgentReverseRequest,
   type RemoteAgentTeardownReason,
 } from '@cindy/device-link';
-import type { AgentSessionHandle, InteractionRequest } from '@cindy/maker-core';
+import type { AgentEvent, AgentSessionHandle, InteractionRequest } from '@cindy/maker-core';
 
 import { EventLog, waitForAny } from '../eventLog';
+import { createGuestUsageMeter, type GuestUsageSample } from './guestUsage';
 import { projectPathText } from '../executor/workspace';
 import {
   MAX_ANCESTOR_LEVELS,
+  PROJECT_INSTRUCTION_FILES,
   decodeOpenPayload,
   decodeSendOptions,
   decodeUserMessage,
@@ -53,6 +57,14 @@ import {
   type RemoteAgentWireStartOptions,
   type RemoteAgentWireWorkspace,
 } from '../wire';
+import {
+  GUEST_SUPPORTED_AGENTS,
+  confineGuestDirs,
+  neutralizeExternalImports,
+  sanitizeGuestOpenPayload,
+  sanitizeGuestVendorOptions,
+  type RemoteAgentControllerTrust,
+} from './guestIsolation';
 import { createRunTunnel, type RunTunnel, type TunnelHttpRequest, type TunnelHttpResponse } from './tunnel';
 
 const gunzipAsync = promisify(gunzip);
@@ -90,6 +102,25 @@ export interface HostedStartInput {
   tunnel: { url: string; token: string };
   mcpServers: string[];
   onInvalidResumeSession?: (expectedSdkSessionId: string) => Promise<boolean>;
+  /** 控制端是其他账号(供应商分享的受邀者)：Agent 不加载本机的个人化配置与可执行配置。 */
+  guest?: boolean;
+  /**
+   * 受邀者专用目录(按控制端分开，跨任务保留)：Codex 的 CODEX_HOME 与 Pi 的会话文件放在这里，
+   * 分享删除时整体清理。只对受邀者提供。
+   */
+  guestHome?: string;
+  /**
+   * 受邀者任务的供应商边界(只对受邀者提供)：任务只能经这个供应商出站。routeToken 是本机 proxy
+   * 认出这条任务请求的令牌，modelIds 是该供应商为本 Agent 提供的模型。
+   */
+  guestProvider?: { providerId: string; modelIds: string[]; routeToken: string };
+}
+
+/** 一次受邀者任务的出站登记(见 RemoteAgentHostDeps.bindGuestProviderRoute)。 */
+export interface GuestProviderRouteBinding {
+  routeToken: string;
+  modelIds: string[];
+  release(): void;
 }
 
 export interface RemoteAgentHostDeps {
@@ -98,15 +129,40 @@ export interface RemoteAgentHostDeps {
   /** 本机仍允许该控制端远程控制(总开关打开且未撤销)。 */
   isControllerAuthorized(controller: string): boolean;
   /**
+   * 控制端是否是本机同账号的设备。不提供 = 全部按同账号处理(现有接线)。返回 guest 时：
+   * 载荷按白名单复核、只开放已隔离的 Agent、只能恢复自己建立的会话。
+   */
+  controllerTrust?(controller: string): RemoteAgentControllerTrust;
+  /**
+   * 清理指定本机侧任务留在本机 Agent 目录里的会话记录(受邀者的分享删除时调用)。nativeIds 是
+   * 这些任务用过的 Agent 会话 id(按 id 存放的附属记录据此精确删除)。
+   */
+  purgeHostedTranscripts?(hostSessionIds: readonly string[], nativeIds: readonly string[]): Promise<void>;
+  /** 记录受邀者每一轮的用量(分享者的管理页按人、按模型展示)。只对 guest 调用。 */
+  recordGuestUsage?(controller: string, usage: { kind: RemoteAgentKind; providerId: string | null; samples: GuestUsageSample[] }): void;
+  /**
    * 「允许被远程调用」(供应商级授权，默认关)。不提供 = 不做供应商级限制(测试 / 旧接线)。
    *  - resolve：把对方要用的来源落到本机已开放的供应商上。providerId 是字符串时只核对它是否开放；
    *    null / 缺省时在已开放的供应商里按本机默认规则挑一个。返回 null = 没有开放的供应商可用。
    *  - isAllowed：进行中的任务每次发消息前复核(用户可能刚把它关掉)。
+   * 两者都带上控制端：供应商分享的受邀者只能用分享给它的那个供应商。
    */
   providerAccess?: {
-    resolve(kind: RemoteAgentKind, model: string, providerId: string | null | undefined): Promise<string | null>;
-    isAllowed(providerId: string): boolean;
+    resolve(kind: RemoteAgentKind, model: string, providerId: string | null | undefined, controller: string): Promise<string | null>;
+    isAllowed(providerId: string, controller: string): boolean;
   };
+  /**
+   * 受邀者任务的出站边界(只对 guest 调用；不提供 = 不接受受邀者)。启动前登记任务用的供应商：本机
+   * proxy 只让这条任务的请求经这个供应商、用它提供的模型。release 在任务结束时调用。
+   * 登记前 `isCurrent()` 为 false(这次启动已被同一任务的新实例取代或已关闭)时不登记、返回 null：
+   * 迟到的旧登记会顶掉新实例的登记，旧实例随后撤销时把新实例的出站边界也清掉。
+   */
+  bindGuestProviderRoute?(input: {
+    kind: RemoteAgentKind;
+    hostSessionId: string;
+    providerId: string;
+    isCurrent(): boolean;
+  }): Promise<GuestProviderRouteBinding | null>;
   captureOwner(): unknown;
   isOwnerCurrent(owner: unknown): boolean;
   /** 本机存放影子目录与附件的根目录。 */
@@ -133,6 +189,7 @@ interface PendingReverse {
 interface Run {
   id: string;
   controller: string;
+  trust: RemoteAgentControllerTrust;
   /** 本机侧任务 id：影子目录按它存放，同一任务多次打开共用。 */
   hostSessionId?: string;
   owner: unknown;
@@ -154,6 +211,9 @@ interface Run {
   pushParts: Map<string, string>;
   /** 这个任务正在用的本机供应商(已核对开放)；没接供应商授权时为空。 */
   providerId?: string;
+  /** 受邀者任务的出站登记，任务结束时撤销。 */
+  guestRoute?: GuestProviderRouteBinding;
+  usageMeter?: ReturnType<typeof createGuestUsageMeter>;
   lastState?: string;
   stateTimer?: ReturnType<typeof setInterval>;
 }
@@ -282,6 +342,79 @@ export function createRemoteAgentHost(deps: RemoteAgentHostDeps) {
   const shadowLocks = new Map<string, Promise<unknown>>();
   let sweepTimer: ReturnType<typeof setInterval> | null = null;
   const key = (controller: string, id: string) => `${controller}\0${id}`;
+  const trustOf = (controller: string): RemoteAgentControllerTrust => deps.controllerTrust?.(controller) ?? 'owner';
+  /** 按控制端分开存放的目录名(影子工作区、附件与受邀者目录)。 */
+  const controllerDir = (controller: string) => createHash('sha256').update(controller).digest('hex').slice(0, 16);
+  /** 受邀者目录：Codex / Pi 的会话历史与 Codex 的运行目录，按控制端跨任务保留，清理时整体删除。 */
+  const guestHomeFor = (controller: string) => path.join(deps.runsRoot, 'guest-homes', controllerDir(controller));
+
+  /**
+   * 受邀者在本机建立过的会话：恢复与分叉只能接回自己的会话(不能凭 id 接上本机用户自己的
+   * 会话)；分享删除时据此清理本机留下的会话记录。落盘，重启后仍然有效。
+   */
+  interface GuestSessionRecord {
+    /** 控制端 key(供应商分享的本地 peer key，含分享与成员，不是秘密)，按成员清理时据此匹配。 */
+    controller: string;
+    hostSessionIds: string[];
+    nativeIds: string[];
+  }
+  const guestIndexFile = path.join(deps.runsRoot, 'guest-sessions.json');
+  const guestDigest = (controller: string) => createHash('sha256').update(controller).digest('hex').slice(0, 32);
+  let guestIndex: Promise<Map<string, GuestSessionRecord>> | null = null;
+  let guestIndexWrite: Promise<void> = Promise.resolve();
+
+  function loadGuestIndex(): Promise<Map<string, GuestSessionRecord>> {
+    guestIndex ??= fsp.readFile(guestIndexFile, 'utf8')
+      .then((raw) => {
+        const parsed = JSON.parse(raw) as Record<string, Partial<GuestSessionRecord>>;
+        const map = new Map<string, GuestSessionRecord>();
+        for (const [digest, record] of Object.entries(parsed)) {
+          const list = (value: unknown) => (Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : []);
+          if (typeof record?.controller !== 'string') continue;
+          map.set(digest, { controller: record.controller, hostSessionIds: list(record?.hostSessionIds), nativeIds: list(record?.nativeIds) });
+        }
+        return map;
+      })
+      .catch(() => new Map<string, GuestSessionRecord>());
+    return guestIndex;
+  }
+
+  function persistGuestIndex(map: Map<string, GuestSessionRecord>): Promise<void> {
+    guestIndexWrite = guestIndexWrite.then(async () => {
+      await fsp.mkdir(deps.runsRoot, { recursive: true });
+      const tmp = `${guestIndexFile}.${randomUUID()}.tmp`;
+      await fsp.writeFile(tmp, JSON.stringify(Object.fromEntries(map)));
+      await fsp.rename(tmp, guestIndexFile);
+    }).catch((error) => {
+      deps.log?.warn('remote agent guest session index write failed', { error: String(error) });
+    });
+    return guestIndexWrite;
+  }
+
+  async function recordGuestSession(controller: string, hostSessionId: string, nativeIds: ReadonlyArray<string | undefined>): Promise<void> {
+    const map = await loadGuestIndex();
+    const digest = guestDigest(controller);
+    const record = map.get(digest) ?? { controller, hostSessionIds: [], nativeIds: [] };
+    let changed = !map.has(digest);
+    if (!record.hostSessionIds.includes(hostSessionId)) {
+      record.hostSessionIds.push(hostSessionId);
+      changed = true;
+    }
+    for (const id of nativeIds) {
+      if (id && !record.nativeIds.includes(id)) {
+        record.nativeIds.push(id);
+        changed = true;
+      }
+    }
+    if (!changed) return;
+    map.set(digest, record);
+    await persistGuestIndex(map);
+  }
+
+  async function guestOwnsSession(controller: string, nativeId: string): Promise<boolean> {
+    const map = await loadGuestIndex();
+    return map.get(guestDigest(controller))?.nativeIds.includes(nativeId) ?? false;
+  }
 
   function withShadowLock<T>(hostSessionId: string, fn: () => Promise<T>): Promise<T> {
     const prev = shadowLocks.get(hostSessionId) ?? Promise.resolve();
@@ -370,6 +503,13 @@ export function createRemoteAgentHost(deps: RemoteAgentHostDeps) {
     if (serialized === run.lastState) return;
     run.lastState = serialized;
     append(run, { t: 'state', state });
+    // 会话 id 可能在任务中途换新(清空上下文等)，受邀者能恢复的会话随之登记。
+    if (run.trust === 'guest' && run.hostSessionId) {
+      void recordGuestSession(run.controller, run.hostSessionId, [
+        typeof state.id === 'string' ? state.id : undefined,
+        typeof state.requestSessionId === 'string' ? state.requestSessionId : undefined,
+      ]);
+    }
   }
 
   /** 经事件流向控制端发一个反向请求，等它回包；signal 中止时通知控制端放弃执行。 */
@@ -432,8 +572,7 @@ export function createRemoteAgentHost(deps: RemoteAgentHostDeps) {
 
   /** 影子工作目录根：`<会话根>/fs/<控制端镜像>` 的上级，按控制端 + 本机侧任务 id 定址。 */
   function shadowSessionRoot(controller: string, hostSessionId: string): string {
-    const controllerDir = createHash('sha256').update(controller).digest('hex').slice(0, 16);
-    return path.join(deps.runsRoot, 'workspaces', controllerDir, hostSessionId);
+    return path.join(deps.runsRoot, 'workspaces', controllerDir(controller), hostSessionId);
   }
 
   /**
@@ -445,8 +584,15 @@ export function createRemoteAgentHost(deps: RemoteAgentHostDeps) {
     controller: string,
     payload: RemoteAgentOpenPayload,
     hostSessionId: string,
+    trust: RemoteAgentControllerTrust,
   ): Promise<{ shadowDir: string; mirrorRoot: string; sessionRoot: string; extraDirs: string[]; writableDirs: string[]; projectText(text: string): string }> {
     const sessionRoot = shadowSessionRoot(controller, hostSessionId);
+    /** 受邀者的说明文件：指向会话目录之外的 `@` 引用不再被当作导入(否则会在本机读文件)。 */
+    const instructionBytes = (data: Buffer, fileDir: string): Buffer => (
+      trust === 'guest'
+        ? Buffer.from(neutralizeExternalImports(data.toString('utf8'), fileDir, sessionRoot), 'utf8')
+        : data
+    );
     const mirrorRoot = path.join(sessionRoot, 'fs');
     // 固定短层级承载最多 MAX_ANCESTOR_LEVELS 个上级说明文件，不带控制端目录名。
     const segments = payload.virtualWorkspace
@@ -512,17 +658,21 @@ export function createRemoteAgentHost(deps: RemoteAgentHostDeps) {
       const target = path.join(shadowDir, ...file.path.split('/'));
       if (!inside(target, shadowDir)) continue;
       await fsp.mkdir(path.dirname(target), { recursive: true });
-      await fsp.writeFile(target, projectBytes(Buffer.from(file.data, 'base64')));
+      const data = projectBytes(Buffer.from(file.data, 'base64'));
+      const isInstruction = (PROJECT_INSTRUCTION_FILES as readonly string[]).includes(file.path);
+      await fsp.writeFile(target, isInstruction ? instructionBytes(data, path.dirname(target)) : data);
     }
     for (const file of payload.ancestorFiles) {
       if (file.up > segments.length - 1) continue;
       let dir = shadowDir;
       for (let level = 0; level < file.up; level += 1) dir = path.dirname(dir);
       if (!inside(dir, mirrorRoot)) continue;
-      await writeNew(path.join(dir, file.name), projectBytes(Buffer.from(file.data, 'base64')));
+      await writeNew(path.join(dir, file.name), instructionBytes(projectBytes(Buffer.from(file.data, 'base64')), dir));
     }
     const { personal } = payload;
-    if (personal.memory) await writeNew(path.join(sessionRoot, 'CLAUDE.md'), Buffer.from(projectText(personal.memory), 'utf8'));
+    if (personal.memory) {
+      await writeNew(path.join(sessionRoot, 'CLAUDE.md'), instructionBytes(Buffer.from(projectText(personal.memory), 'utf8'), sessionRoot));
+    }
     // 项目里已有同名文件时以项目为准(只写不存在的)。
     for (const file of personal.files) {
       const target = path.join(shadowDir, ...file.path.split('/'));
@@ -537,6 +687,13 @@ export function createRemoteAgentHost(deps: RemoteAgentHostDeps) {
     try {
       const hostSessionId = hostSessionIdFor(run.controller, payload.sessionId);
       run.hostSessionId = hostSessionId;
+      let guestHome: string | undefined;
+      if (run.trust === 'guest') {
+        // 先登记再启动：启动中途失败时，受邀者目录与会话记录也能在分享删除时被找到并清理。
+        await recordGuestSession(run.controller, hostSessionId, []);
+        guestHome = guestHomeFor(run.controller);
+        await fsp.mkdir(guestHome, { recursive: true, mode: 0o700 });
+      }
       const { shadowDir, mirrorRoot, sessionRoot, extraDirs, writableDirs, projectText } = await withShadowLock(hostSessionId, async () => {
         // 断线后旧实例还没清理就重新打开同一任务时，新旧实例共用同一个影子目录：
         // 先结束旧实例再重建，避免删掉旧 Agent 还在使用的目录，或两个实例争用重建后的目录。
@@ -545,7 +702,7 @@ export function createRemoteAgentHost(deps: RemoteAgentHostDeps) {
             await finishRun(other, 'superseded', 'navigation');
           }
         }
-        return prepareShadow(run.controller, payload, hostSessionId);
+        return prepareShadow(run.controller, payload, hostSessionId, run.trust);
       });
       run.workspaceDir = sessionRoot;
       run.virtualRoot = payload.virtualWorkspace ? mirrorRoot : undefined;
@@ -561,6 +718,27 @@ export function createRemoteAgentHost(deps: RemoteAgentHostDeps) {
       if (payload.virtualWorkspace) append(run, { t: 'state', state: {
         workspaceProjection: { shadowDir, mirrorRoot, extraDirs, writableDirs, virtualWorkspace: true },
       } });
+      // 受邀者：先登记出站边界(本机 proxy 只让这条任务经分享的供应商出站)，再启动 Agent。
+      let guestProvider: HostedStartInput['guestProvider'];
+      if (run.trust === 'guest') {
+        if (!deps.bindGuestProviderRoute || !run.providerId) failProviderNotAllowed();
+        const binding = await deps.bindGuestProviderRoute({
+          kind: run.kind,
+          hostSessionId,
+          providerId: run.providerId,
+          isCurrent: () => !run.closing,
+        });
+        if (!binding) {
+          if (!run.closing) failProviderNotAllowed();
+          return;
+        }
+        run.guestRoute = binding;
+        if (run.closing) {
+          binding.release();
+          return;
+        }
+        guestProvider = { providerId: run.providerId, modelIds: [...binding.modelIds], routeToken: binding.routeToken };
+      }
       const handle = await deps.startHosted({
         kind: run.kind,
         hostSessionId,
@@ -574,6 +752,7 @@ export function createRemoteAgentHost(deps: RemoteAgentHostDeps) {
         workspace: payload.workspace,
         tunnel: { url: tunnel.url, token: tunnel.token },
         mcpServers: payload.mcpServers,
+        ...(run.trust === 'guest' ? { guest: true, ...(guestHome ? { guestHome } : {}), ...(guestProvider ? { guestProvider } : {}) } : {}),
         ...(payload.options.invalidResumeCallback
           ? {
               onInvalidResumeSession: async (expected: string) => {
@@ -588,6 +767,7 @@ export function createRemoteAgentHost(deps: RemoteAgentHostDeps) {
         return;
       }
       run.handle = handle;
+      if (run.trust === 'guest') await recordGuestSession(run.controller, hostSessionId, [handle.id, handle.requestSessionId]);
       handle.setInteractionResolver(async (request: InteractionRequest) => {
         const reply = await reverse(run, { type: 'interaction', request });
         if (reply.type === 'interaction') return reply.result as Awaited<ReturnType<Parameters<AgentSessionHandle['setInteractionResolver']>[0]>>;
@@ -608,6 +788,7 @@ export function createRemoteAgentHost(deps: RemoteAgentHostDeps) {
     try {
       for await (const event of handle.events()) {
         if (run.closing) break;
+        if (run.trust === 'guest') meterGuestUsage(run, handle, event);
         append(run, { t: 'event', event });
         emitState(run);
       }
@@ -615,6 +796,17 @@ export function createRemoteAgentHost(deps: RemoteAgentHostDeps) {
     } catch (error) {
       append(run, { t: 'closed', reason: 'error', error: remoteAgentErrorInfo(error) });
       await finishRun(run, 'error', 'navigation', false, true);
+    }
+  }
+
+  function meterGuestUsage(run: Run, handle: AgentSessionHandle, event: AgentEvent): void {
+    if (!deps.recordGuestUsage || event.type !== 'done') return;
+    run.usageMeter ??= createGuestUsageMeter(run.kind);
+    try {
+      const samples = run.usageMeter.observe(event, handle.model);
+      if (samples.length > 0) deps.recordGuestUsage(run.controller, { kind: run.kind, providerId: run.providerId ?? null, samples });
+    } catch (error) {
+      deps.log?.warn('remote agent guest usage record failed', { runId: run.id, error: String(error) });
     }
   }
 
@@ -640,6 +832,9 @@ export function createRemoteAgentHost(deps: RemoteAgentHostDeps) {
         deps.log?.warn('remote agent close failed', { runId: run.id, error: String(error) });
       }
     }
+    // Agent 已关：撤销受邀者的出站登记，之后这条任务的请求一律被本机 proxy 拒绝。
+    run.guestRoute?.release();
+    run.guestRoute = undefined;
     await run.tunnel?.close().catch(() => undefined);
     // 收尾事件绕过 closing 判断直接写入。
     if (!skipClosedEvent) run.log.append({ t: 'closed', reason });
@@ -690,8 +885,17 @@ export function createRemoteAgentHost(deps: RemoteAgentHostDeps) {
       const target = (handle as unknown as Record<string, unknown>)[method];
       if (typeof target !== 'function') fail('REMOTE_AGENT_UNSUPPORTED', `${method} is not supported by this agent`);
       let callArgs: unknown[] = args;
+      if (run.trust === 'guest') {
+        // 受邀者：协同 / 定时任务以外的 vendorOptions 丢弃；附加 / 可写目录只能落在虚拟工作区内。
+        if (method === 'setVendorOptions') callArgs = [sanitizeGuestVendorOptions(args[0])];
+        if (method === 'setExtraDirs') {
+          const library = confineGuestDirs([args[1]], run.virtualRoot)[0] ?? null;
+          callArgs = [confineGuestDirs(args[0], run.virtualRoot), library];
+        }
+        if (method === 'setWritableDirs') callArgs = [confineGuestDirs(args[0], run.virtualRoot)];
+      }
       if (run.virtualRoot && (method === 'setExtraDirs' || method === 'setWritableDirs')) {
-        const dirs = Array.isArray(args[0]) ? args[0] : [];
+        const dirs = Array.isArray(callArgs[0]) ? callArgs[0] : [];
         await Promise.all(dirs.filter((dir): dir is string => typeof dir === 'string').map(async (dir) => {
           const relative = path.relative(run.virtualRoot!, dir);
           if (!relative.startsWith('..') && !path.isAbsolute(relative)) await fsp.mkdir(dir, { recursive: true });
@@ -699,23 +903,27 @@ export function createRemoteAgentHost(deps: RemoteAgentHostDeps) {
       }
       // 供应商授权：新一轮对话前复核(关掉后不再开始新的一轮，进行中的这一轮照常结束)；
       // 换模型时显式换来源(含 null = 默认)要落到开放的供应商上，只换模型则沿用当前来源。
+      // 受邀者每次换模型都复核：来源钉在分享的供应商上(没带来源也显式带上)，且它要提供这个模型。
       let nextProviderId: string | undefined;
       const access = deps.providerAccess;
-      if (access && method === 'send' && run.providerId && !access.isAllowed(run.providerId)) {
+      if (access && method === 'send' && run.providerId && !access.isAllowed(run.providerId, run.controller)) {
         failProviderNotAllowed();
       }
       if (access && method === 'setModel') {
         const opts = args[1];
-        if (opts && typeof opts === 'object' && !Array.isArray(opts) && 'providerId' in opts) {
-          const requested = (opts as { providerId?: unknown }).providerId;
+        const optsObject = opts && typeof opts === 'object' && !Array.isArray(opts) ? opts : undefined;
+        const explicitProvider = optsObject !== undefined && 'providerId' in optsObject;
+        if (explicitProvider || run.trust === 'guest') {
+          const requested = explicitProvider ? (optsObject as { providerId?: unknown }).providerId : run.providerId;
           const resolved = await access.resolve(
             run.kind,
             typeof args[0] === 'string' ? args[0] : '',
             typeof requested === 'string' ? requested : null,
+            run.controller,
           );
           if (!resolved) failProviderNotAllowed();
           nextProviderId = resolved;
-          callArgs = [args[0], { ...opts, providerId: resolved }, ...args.slice(2)];
+          callArgs = [args[0], { ...(optsObject ?? {}), providerId: resolved }, ...args.slice(2)];
         }
       }
       if (method === 'send' || method === 'steer') {
@@ -803,9 +1011,13 @@ export function createRemoteAgentHost(deps: RemoteAgentHostDeps) {
     if (!deps.isControllerAuthorized(controller)) fail('REMOTE_AGENT_UNAVAILABLE', 'remote control is not allowed');
     switch (request.op) {
       case 'caps': {
+        const guest = trustOf(controller) === 'guest';
         const caps: RemoteAgentCaps = {
           version: REMOTE_AGENT_VERSION,
-          agents: (['claude-code', 'codex', 'pi'] as const).map((kind) => ({ kind, available: deps.isAgentAvailable(kind) })),
+          agents: (['claude-code', 'codex', 'pi'] as const).map((kind) => ({
+            kind,
+            available: deps.isAgentAvailable(kind) && (!guest || GUEST_SUPPORTED_AGENTS.has(kind)),
+          })),
           maxRuns: REMOTE_AGENT_MAX_RUNS_PER_CONTROLLER,
           uploadChunkBytes: REMOTE_AGENT_UPLOAD_CHUNK_BYTES,
           maxPayloadBytes: REMOTE_AGENT_MAX_PAYLOAD_BYTES,
@@ -841,9 +1053,26 @@ export function createRemoteAgentHost(deps: RemoteAgentHostDeps) {
           return {};
         }
         if (!deps.isAgentAvailable(request.agentKind)) fail('REMOTE_AGENT_UNSUPPORTED', `${request.agentKind} is not available on this computer`);
+        const trust = trustOf(controller);
+        if (trust === 'guest' && (!GUEST_SUPPORTED_AGENTS.has(request.agentKind) || !deps.providerAccess || !deps.bindGuestProviderRoute)) {
+          discardPayload(controller, request.payload);
+          fail('REMOTE_AGENT_UNSUPPORTED', `${request.agentKind} is not available to shared users on this computer`);
+        }
         const active = [...runs.values()].filter((run) => run.controller === controller && run.closedAt === undefined).length;
         if (active >= REMOTE_AGENT_MAX_RUNS_PER_CONTROLLER) fail('REMOTE_AGENT_BUSY', 'too many tasks are running from this computer');
         let payload = decodeOpenPayload(await resolvePayload(controller, request.payload));
+        if (trust === 'guest') {
+          // 受邀者必须用虚拟工作区：本机 Agent 只看到会话目录内的路径，附加目录也映射在其中。
+          if (payload.virtualWorkspace !== true) {
+            fail('REMOTE_AGENT_UNSUPPORTED', 'shared users need the virtual workspace; update Cindy on the other computer');
+          }
+          payload = sanitizeGuestOpenPayload(payload);
+          // 只能接回自己在本机建立过的会话：会话 id 不能用来接上本机用户自己的会话。
+          const resumeId = payload.options.resumeSessionId;
+          if (resumeId && !(await guestOwnsSession(controller, resumeId))) {
+            fail('REMOTE_AGENT_INVALID', 'this conversation cannot be resumed on this computer');
+          }
+        }
         // 供应商授权：来源落到本机已开放的供应商上，并以显式来源启动(核对的就是实际用的)。
         let providerId: string | undefined;
         if (deps.providerAccess) {
@@ -851,6 +1080,7 @@ export function createRemoteAgentHost(deps: RemoteAgentHostDeps) {
             request.agentKind,
             payload.options.model,
             payload.options.providerId,
+            controller,
           );
           if (!resolved) failProviderNotAllowed();
           providerId = resolved;
@@ -861,12 +1091,14 @@ export function createRemoteAgentHost(deps: RemoteAgentHostDeps) {
         const run: Run = {
           id: request.runId,
           controller,
+          trust,
           owner: deps.captureOwner(),
           kind: request.agentKind,
           log: new EventLog(REMOTE_AGENT_HOST_UNREAD_BYTES),
           lastReadAt: now(),
           closing: false,
-          attachmentsDir: path.join(deps.runsRoot, 'attachments', request.runId),
+          // runId 由控制端取，按控制端分目录：不同控制端的同名 runId 不会共用、互删附件。
+          attachmentsDir: path.join(deps.runsRoot, 'attachments', controllerDir(controller), request.runId),
           pending: new Map(),
           calls: new Map(),
           pushSeq: new Set(),
@@ -944,6 +1176,49 @@ export function createRemoteAgentHost(deps: RemoteAgentHostDeps) {
     /** 远程控制关闭 / 退出时结束全部任务。 */
     async abortAll(reason: RemoteAgentTeardownReason = 'navigation'): Promise<void> {
       await Promise.all([...runs.values()].map((run) => finishRun(run, 'aborted', reason)));
+    },
+    /** 立即结束某个控制端的全部任务(例如分享被关闭)，不等巡检周期。 */
+    async abortControllers(match: (controller: string) => boolean): Promise<void> {
+      await Promise.all([...runs.values()]
+        .filter((run) => match(run.controller))
+        .map((run) => finishRun(run, 'access-revoked', 'navigation')));
+    },
+    /**
+     * 受邀者的分享删除后：结束匹配控制端(同一成员的每台设备)的任务，删除它们的影子工作区与
+     * 附件，以及本机 Agent 目录里它们的会话记录。
+     */
+    async purgeControllers(match: (controller: string) => boolean): Promise<void> {
+      const owned = [...runs.values()].filter((run) => match(run.controller));
+      await Promise.all(owned.map((run) => finishRun(run, 'access-revoked', 'navigation')));
+      await Promise.all(owned.map((run) => disposeRun(run)));
+      const map = await loadGuestIndex();
+      const controllers = new Set([
+        ...owned.map((run) => run.controller),
+        ...[...map.values()].map((record) => record.controller).filter(match),
+      ]);
+      // 受邀者目录里是它的 Codex / Pi 会话历史；Windows 上刚退出的 Agent 可能还占着文件，重试几次。
+      await Promise.all([...controllers].flatMap((controller) => ['workspaces', 'attachments', 'guest-homes'].map((dir) => (
+        fsp.rm(path.join(deps.runsRoot, dir, controllerDir(controller)), { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
+          .catch(() => undefined)
+      ))));
+      const records = [...map.entries()].filter(([, record]) => match(record.controller));
+      if (!records.length) return;
+      try {
+        await deps.purgeHostedTranscripts?.(
+          records.flatMap(([, record]) => record.hostSessionIds),
+          records.flatMap(([, record]) => record.nativeIds),
+        );
+      } catch (error) {
+        // 留着登记，下次清理重试。
+        deps.log?.warn('remote agent transcript purge failed', { error: String(error) });
+        return;
+      }
+      for (const [digest] of records) map.delete(digest);
+      await persistGuestIndex(map);
+    },
+    /** 有进行中任务的控制端(分享管理页显示「几个任务运行中」)。 */
+    activeControllers(): string[] {
+      return [...runs.values()].filter((run) => run.closedAt === undefined && !run.closing).map((run) => run.controller);
     },
     /** 测试与诊断用。 */
     runCount(): number {

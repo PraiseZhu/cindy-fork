@@ -5,7 +5,8 @@
  * 证明)，不能原样过设备互联。这里把它们换成可序列化的描述：
  *  - 回调 → 标记位，被控端调用时作为反向请求回到控制端执行；
  *  - Symbol 键 → `cindy` 子对象，被控端解码后重新附到 Symbol 键上(请求来自已鉴权的同账号
- *    控制端主进程，与本机主进程附上这些证明的前提一致)；
+ *    控制端主进程，与本机主进程附上这些证明的前提一致。供应商分享的受邀者同样还原：这些证明
+ *    只影响受邀者自己电脑上的权限判断与确认，工具执行仍经它自己电脑的执行器把关)；
  *  - 每轮权限策略 → 已知策略按名字还原(两端同一份代码)，认不出的一律按「全部确认」还原；
  *  - 消息里的图片 → 字节随载荷带过去，被控端写到本次任务的附件目录再引用。
  * 被控端解码时按最小合同校验类型，不认识的字段丢弃。
@@ -155,6 +156,21 @@ export interface RemoteAgentOpenPayload {
 /** 上级目录说明文件只认这几个名字，最多向上这么多级。 */
 export const ANCESTOR_INSTRUCTION_FILES = ['CLAUDE.md', 'CLAUDE.local.md', 'AGENTS.md', 'AGENTS.override.md'] as const;
 export const MAX_ANCESTOR_LEVELS = 24;
+/**
+ * 同步到影子目录的项目文件白名单(控制端按它收集；被控端对不受信任的控制端按它复核)：
+ * 工作目录根上的说明文件、Claude Code 项目设置(只保留权限规则)，以及这些目录下的
+ * Skill / 子代理 / 命令 / 提示词模板。
+ */
+export const PROJECT_INSTRUCTION_FILES = ['CLAUDE.md', 'CLAUDE.local.md', 'AGENTS.md', 'AGENTS.override.md'] as const;
+export const PROJECT_SETTINGS_FILES = ['.claude/settings.json', '.claude/settings.local.json'] as const;
+export const PROJECT_INSTRUCTION_DIRECTORIES = [
+  '.claude/skills',
+  '.claude/agents',
+  '.claude/commands',
+  '.agents/skills',
+  '.pi/skills',
+  '.pi/prompts',
+] as const;
 /** 个人配置只能落在这些子目录下。 */
 const PERSONAL_PREFIXES = ['.claude/skills/', '.claude/agents/', '.claude/commands/'];
 

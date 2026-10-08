@@ -367,7 +367,6 @@ import {
   type MobileSessionAgentKind,
 } from '@/session/sessionAgentSwitch';
 import { useRemoteAgentCatalogs } from '@/session/useRemoteAgentCatalogs';
-import { RemoteSourceMark } from '@/session/RemoteSourceMark';
 import {
   drainComposerAnnotationSubmissions,
   drainComposerAttachments,
@@ -6956,26 +6955,22 @@ export default function SessionScreen() {
                 color={colors.textSecondary}
                 size={iconSize.sm}
               />
-            ) : composerPillSourceId ? (() => {
+            ) : composerPillSourceId ? (
               // 正常态显示真正生效来源；断开态显示 DB 中的真实来源并使用状态色，
               // 不静默换成 activeSourceId 的默认回退 Logo。
-              const sourceMark = (
-                <MobileModelIconMark
-                  color={composerSelectedSourceDisconnected ? colors.statusError : undefined}
-                  icon={composerDisplaySession && composerPillSourceProvider
-                    ? getModel(composerPillSourceProvider, composerDisplaySession.model, composerDisplayAgentKind)?.icon
-                    : undefined}
-                  name={composerPillSourceProvider?.name ?? composerPillSourceId}
-                  providerId={composerPillSourceId}
-                  routing={composerPillSourceProvider?.routing}
-                  logoKind={composerPillSourceProvider?.logoKind}
-                />
-              );
               // Agent(下一条消息起)在另一台电脑运行:与桌面 trigger 同一个远程标记。
-              return nextAgentDeviceId
-                ? <RemoteSourceMark size={iconSize.lg}>{sourceMark}</RemoteSourceMark>
-                : sourceMark;
-            })() : null}
+              <MobileModelIconMark
+                color={composerSelectedSourceDisconnected ? colors.statusError : undefined}
+                icon={composerDisplaySession && composerPillSourceProvider
+                  ? getModel(composerPillSourceProvider, composerDisplaySession.model, composerDisplayAgentKind)?.icon
+                  : undefined}
+                name={composerPillSourceProvider?.name ?? composerPillSourceId}
+                providerId={composerPillSourceId}
+                routing={composerPillSourceProvider?.routing}
+                logoKind={composerPillSourceProvider?.logoKind}
+                remote={Boolean(nextAgentDeviceId)}
+              />
+            ) : null}
             onPress={toggleComposerModelPicker}
             testID="session.composerModelButton"
           />
@@ -7529,6 +7524,11 @@ export default function SessionScreen() {
     void runQueueAction(() => maker.input.clearError(sessionId));
   };
 
+  const cancelUsageLimitWait = () => {
+    if (queueAvailabilityReason) return;
+    void runQueueAction(() => maker.input.cancelUsageLimitWait(sessionId));
+  };
+
   // --- session-tail-banner:error-tail / interrupted 收尾提示(对齐桌面两套 banner)---
   // dismissedTailErrorClientIds 声明在上方 renderItems 区(errorTailClientId 过滤要用);
   // acked = interrupted 已操作或本窗口内会话跑起来过(对齐桌面「跑起来即熄灭」锁存)。
@@ -7977,10 +7977,11 @@ export default function SessionScreen() {
     }
   }, [contextSheetMediaLibraryEnabled]);
 
-  // 目标模式:面板打开时拉一次快照(push 只送变更);动作后再拉一次收敛,避免依赖单一 push。
+  // 进入聊天、回前台或连接恢复时读取目标快照，菜单关闭时也能显示状态。
+  // push 继续负责增量；打开菜单与动作结束时再读取权威状态。
   const goalStatus = useSessionGoalStatus(sessionId);
-  useEffect(() => {
-    if (!contextSheetOpen || !deviceId) return;
+  useFocusEffect(useCallback(() => {
+    if (!appStateActive || !remoteHistoryAvailable || !deviceId || !sessionId || isSharedTaskPeer(deviceId)) return;
     let cancelled = false;
     void (async () => {
       try {
@@ -7993,7 +7994,7 @@ export default function SessionScreen() {
     return () => {
       cancelled = true;
     };
-  }, [contextSheetOpen, deviceId, maker, sessionId]);
+  }, [appStateActive, connectionEpoch, contextSheetOpen, deviceId, maker, remoteHistoryAvailable, sessionId]));
   // 暂停 / 继续 / 结束目标:先乐观切本地状态镜像(面板当帧反馈,不等往返),
   // RPC 后台;成功回读权威收敛(既有语义)。失败时报错并还原:优先回读权威状态,
   // 回读也失败(离线 / 超时,与 action 同因高概率连败)则还原到乐观前的快照——
@@ -9495,32 +9496,20 @@ export default function SessionScreen() {
                 <ContextSheetRow
                   icon={<Target color={colors.textPrimary} size={iconSize.lg} strokeWidth={iconStroke.regular} />}
                   label={t('session.common.goalMode')}
+                  detail={goalStatus ? goalStatusLabel(goalStatus.status, goalStatus.lastReason) : undefined}
                   onPress={() => setContextSheetView('goal')}
                   testID="session.contextSheetGoalRow"
-                  trailing={goalStatus ? (
-                    <>
-                      <Text style={{ color: colors.textTertiary, fontSize: typeScale.footnote, lineHeight: lineHeight.caption }}>
-                        {goalStatusLabel(goalStatus.status, goalStatus.lastReason)}
-                      </Text>
-                      <ChevronRight color={colors.textTertiary} size={iconSize.md} strokeWidth={iconStroke.regular} />
-                    </>
-                  ) : 'chevron'}
+                  trailing="chevron"
                 />
                 {collab.eligible ? (
                   <ContextSheetRow
                     accessibilityHint={collab.entryHint ?? undefined}
                     icon={<UsersRound color={colors.textPrimary} size={iconSize.lg} strokeWidth={iconStroke.regular} />}
                     label={t('session.collab.modeLabel')}
+                    detail={collab.isLead ? t('session.collab.enabled') : undefined}
                     onPress={collab.openFromMain}
                     testID="session.contextSheetCollabRow"
-                    trailing={collab.isLead ? (
-                      <>
-                        <Text style={{ color: colors.textTertiary, fontSize: typeScale.footnote, lineHeight: lineHeight.caption }}>
-                          {t('session.collab.enabled')}
-                        </Text>
-                        <ChevronRight color={colors.textTertiary} size={iconSize.md} strokeWidth={iconStroke.regular} />
-                      </>
-                    ) : 'chevron'}
+                    trailing="chevron"
                   />
                 ) : null}
               </ContextSheetGroup> : null}
@@ -9856,6 +9845,7 @@ export default function SessionScreen() {
                           busy={queueBusy}
                           sessionSource={currentSession?.source}
                           onClearError={clearQueueError}
+                          onCancelUsageLimitWait={cancelUsageLimitWait}
                           onResume={resumeQueue}
                           onRetryError={retryQueueError}
                           projection={inputProjection}
@@ -9993,6 +9983,29 @@ export default function SessionScreen() {
             selectSlashCommand={selectSlashCommand}
             selectAtResource={selectAtResource}
           />
+          {!shareSelectionActive && !isSharedTaskPeer(deviceId) && !sessionManagedByHost && goalStatus ? (
+            <Pressable
+              accessibilityLabel={`${t('session.common.goalMode')} · ${goalStatusLabel(goalStatus.status, goalStatus.lastReason)}`}
+              accessibilityRole="button"
+              onPress={() => {
+                setModelSheetOpen(false);
+                setContextSheetView('goal');
+                setContextSheetOpen(true);
+              }}
+              style={({ pressed }) => [
+                styles.queueEditBar,
+                { minHeight: 44, marginHorizontal: composerTouchLayout.composerPaddingHorizontal },
+                pressed && styles.collabBarPressed,
+              ]}
+              testID="session.goalStatusBar"
+            >
+              <Target color={goalStatus.status === 'active' ? colors.statusAccent : colors.textSecondary} size={iconSize.sm} strokeWidth={iconStroke.regular} />
+              <Text numberOfLines={2} style={styles.queueEditBarText}>
+                {t('session.common.goalMode')} · {goalStatusLabel(goalStatus.status, goalStatus.lastReason)}
+              </Text>
+              <ChevronRight color={colors.textTertiary} size={iconSize.sm} strokeWidth={iconStroke.regular} />
+            </Pressable>
+          ) : null}
           {/*
             手机端终结不了的请求(plugin_setup 等)只贴在输入框上方:能看清电脑端
             在等什么、能取消,但不吃掉 composer —— 否则用户既处理不了这张卡又发不

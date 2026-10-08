@@ -39,6 +39,10 @@ export * from "./sharedTask.js";
 export * from "./sharedTaskApi.js";
 export * from "./sharedTaskInvitation.js";
 export * from "./sharedTaskProbe.js";
+export * from "./providerShareApi.js";
+export * from "./providerShareInvitation.js";
+export * from "./providerShareCatalog.js";
+export * from "./providerShareEnvelope.js";
 export * from "./modelFavorites.js";
 export * from "./sessionListTransport.js";
 

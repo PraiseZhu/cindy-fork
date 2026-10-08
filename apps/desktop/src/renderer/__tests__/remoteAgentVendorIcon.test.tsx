@@ -32,6 +32,7 @@ vi.mock('@/features/device-link/useDeviceLinkDeviceList', () => ({
   useDeviceLinkDeviceList: () => devices.list,
 }));
 
+import { RemoteSourceMark } from '@/components/icons/RemoteSourceMark';
 import { VendorIcon } from '@/components/sidebar/VendorIcon';
 import { SessionStatusIcon } from '@/features/cc-agent/sidebar/SessionStatusIcon';
 
@@ -90,6 +91,31 @@ describe('VendorIcon remote signal', () => {
     expect(wrapper.className).toContain('text-[var(--warning-accent)]');
     expect(wrapper.className).toContain('session-status-breathing');
     expect(wrapper.contains(signal(container))).toBe(true);
+  });
+});
+
+describe('RemoteSourceMark', () => {
+  // 2026-10-08 用户裁决:远程供应商 Logo 与远程 Agent 图标同一种做法 —— 早先把品牌缩进方框
+  // 左下的做法让模型选择器里的 Logo 比文字低。
+  it('keeps the provider logo at its own size and spot, with the signal outside its top-right', () => {
+    const { container } = render(
+      <RemoteSourceMark>
+        <svg data-brand width={13} height={13} />
+      </RemoteSourceMark>,
+    );
+    const wrapper = container.firstElementChild as HTMLElement;
+    const brand = container.querySelector('[data-brand]') as SVGElement;
+    // 品牌直接放在外层里:没有缩放 / 定位层，外层也不定宽高(大小跟着品牌走)。
+    expect(brand.parentElement).toBe(wrapper);
+    expect(wrapper.style.width).toBe('');
+    expect(wrapper.style.height).toBe('');
+    expect(wrapper.querySelector('[style*="scale"]')).toBeNull();
+
+    const arc = signal(container)?.closest('svg') as SVGElement;
+    expect(arc.getAttribute('class')).toContain('absolute');
+    // 波纹按 13px 品牌的比例画在右上角外侧(16 单位画布里品牌区外的 3.5 单位带)。
+    expect(parseFloat(arc.style.right)).toBeCloseTo(-3.64, 2);
+    expect(parseFloat(arc.style.top)).toBeCloseTo(-3.64, 2);
   });
 });
 

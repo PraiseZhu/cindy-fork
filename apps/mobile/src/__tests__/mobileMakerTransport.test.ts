@@ -393,6 +393,7 @@ describe("mobile maker transport", () => {
       "maker:input:resume",
       "maker:input:retry-last-error",
       "maker:input:clear-error",
+      "maker:input:cancel-usage-limit-wait",
       "maker:input:remove",
       "maker:input:update-text",
       "maker:input:update-content",
@@ -768,6 +769,7 @@ describe("mobile maker transport", () => {
     await maker.compactSession("s1", "focus on API design");
     await maker.input.retryLastError("s1");
     await maker.input.clearError("s1");
+    await maker.input.cancelUsageLimitWait("s1");
     await maker.input.updateText("s1", "queued-1", "updated");
     await maker.input.updateContent("s1", "queued-1", {
       clientId: "queued-1",
@@ -845,6 +847,7 @@ describe("mobile maker transport", () => {
       ["maker:compact-session", ["s1", "focus on API design"]],
       ["maker:input:retry-last-error", ["s1"]],
       ["maker:input:clear-error", ["s1"]],
+      ["maker:input:cancel-usage-limit-wait", ["s1"]],
       ["maker:input:update-text", ["s1", "queued-1", "updated"]],
       [
         "maker:input:update-content",

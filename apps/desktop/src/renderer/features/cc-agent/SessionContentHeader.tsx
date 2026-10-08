@@ -79,6 +79,7 @@ import { Tip } from '@/components/ui/tooltip';
 import { TaskTagDots, TaskTagMenuSection, TaskTagEditor } from '@/features/task-tags/TaskTags';
 import { isSharedTaskPeer } from '@cindy/device-link';
 import { useDeviceLinkDeviceList } from '@/features/device-link/useDeviceLinkDeviceList';
+import { useProviderShareAgentDevices } from '@/features/provider-share/useProviderShareAgentDevices';
 
 const log = createLogger('SessionContentHeader');
 
@@ -95,8 +96,10 @@ function AgentDeviceIndicator({
 }) {
   const { t } = useTranslation();
   const devices = useDeviceLinkDeviceList();
+  // 分享来的供应商(`share:<id>`)不在同账号设备列表里，名字取自已收到的分享。
+  const { nameFor: providerShareDeviceName } = useProviderShareAgentDevices();
   const device = devices?.find((item) => item.deviceId === deviceId);
-  const name = device?.name || deviceId;
+  const name = device?.name || providerShareDeviceName(deviceId) || deviceId;
   const offline = device ? !device.online : false;
   const vendor = agentKindToVendor(agentKind);
   return (
@@ -207,7 +210,7 @@ export function SessionContentHeader({
     !session.deviceLinkDeviceId;
   const projectOptions = useProjectPickerOptions();
   // heartbeat schedule 绑定标识,与 SessionItem 同源数据;删除/过期后自动消失。
-  const boundSchedules = useSessionBoundSchedules(session.id);
+  const boundSchedules = useSessionBoundSchedules(session.id, session.deviceLinkDeviceId);
   const displayTitle =
     getSessionDisplayTitle(session, t('ccAgent.common.unnamedSession'), t)?.trim() ||
     t('ccAgent.sessionHeader.untitled');
@@ -582,7 +585,12 @@ export function SessionContentHeader({
       )}
       {boundSchedules.length > 0 && (
         <span style={WINDOW_NO_DRAG_STYLE}>
-          <ScheduleBindingBadge schedules={boundSchedules} size={13} className="mr-1 size-4" />
+          <ScheduleBindingBadge
+            schedules={boundSchedules}
+            deviceLinkDeviceId={session.deviceLinkDeviceId}
+            size={13}
+            className="mr-1 size-4"
+          />
         </span>
       )}
       {!isEditing && remoteIconKind && (

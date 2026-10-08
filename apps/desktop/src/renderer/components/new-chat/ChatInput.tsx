@@ -350,6 +350,10 @@ import {
   useProviderModelMemoryVersion,
 } from '@/state/providerModelMemory';
 import {
+  agentDeviceModelMemoryAccessors,
+  useAgentDeviceModelMemoryVersion,
+} from '@/state/agentDeviceModelMemory';
+import {
   setSessionFavoriteAnchor as setSessionFavoriteAnchorMemory,
   useSessionFavoriteAnchor,
   type SessionFavoriteAnchor,
@@ -886,6 +890,23 @@ const LOCAL_MODEL_MEMORY: ModelMemoryAccessors = {
   clearEffort: clearProviderModelEffort,
   clearFast: clearProviderModelFast,
 };
+
+/**
+ * 把已有任务里选定的档位 / Fast 记进**这个模型所在目录**的那份记忆:deviceId = null 写本机预设,
+ * 否则写本机为那台电脑单独记的一份。只写模型档位,不碰新建任务记忆。来源缺失时不写。
+ */
+function rememberCatalogModelPrefs(
+  deviceId: string | null,
+  agent: AgentKind,
+  providerId: string | null | undefined,
+  modelId: string,
+  patch: { effort?: Effort; fast?: boolean },
+): void {
+  if (!providerId || !modelId) return;
+  const memory = deviceId ? agentDeviceModelMemoryAccessors(deviceId) : LOCAL_MODEL_MEMORY;
+  if (patch.effort !== undefined) memory.setEffort(agent, providerId, modelId, patch.effort);
+  if (patch.fast !== undefined) memory.setFast(agent, providerId, modelId, patch.fast);
+}
 
 /** 统一模型选择器联合列表的候选引擎全集(与 SELECTABLE_VENDORS 同一顺序)。 */
 const UNIFIED_AGENT_KINDS: readonly AgentKind[] = ['claude-code', 'codex', 'pi'];
@@ -2035,15 +2056,19 @@ export function ChatInput({
   //     该会话切走后再切回此模型,才会采用最新全局预设。
   //   - 首页草稿无 live 会话,NewMakerDraftRoute 会把当前显示模型的 props 也从全局预设派生。
   //   - device-link 必须使用被控端镜像 override;旧被控端拿不到镜像时宁可无记忆,也不掺控制端本机。
+  //   - 远程 Agent(Agent 在另一台电脑,任务在本机)用本机为那台电脑单独记的一份(按电脑分开,
+  //     跨重启保留),不掺本机目录的记忆。
   useProviderModelMemoryVersion();
+  useAgentDeviceModelMemoryVersion();
   const modelMemory = useMemo<ModelMemoryAccessors | undefined>(() => {
     if (sshCodexHostId) return undefined;
     // device-link 远程草稿 / 会话:用纯显示镜像 override(读被控端全局预设、写穿被控端)。
     if (modelMemoryOverride) return modelMemoryOverride;
     // 模型目录在另一台电脑时不掺本机记忆(那台的来源 id 与本机的不是一回事)。
-    if (catalogDeviceId) return undefined;
+    if (deviceLinkDeviceId) return undefined;
+    if (catalogDeviceId) return agentDeviceModelMemoryAccessors(catalogDeviceId);
     return LOCAL_MODEL_MEMORY;
-  }, [catalogDeviceId, modelMemoryOverride, sshCodexHostId]);
+  }, [catalogDeviceId, deviceLinkDeviceId, modelMemoryOverride, sshCodexHostId]);
 
   // 远程 Agent(仅本机新任务草稿):模型面板左侧栏同时列出其他电脑上的供应商。
   const remoteAgentOptions = useMemo<RemoteAgentSelectorOptions | undefined>(
@@ -2053,6 +2078,7 @@ export function ChatInput({
             devices: remoteAgentDevices,
             selectedDeviceId: agentDeviceId,
             localModelMemory: LOCAL_MODEL_MEMORY,
+            deviceModelMemory: agentDeviceModelMemoryAccessors,
           }
         : undefined,
     [sessionId, deviceLinkDeviceId, remoteHostId, remoteAgentDevices, agentDeviceId],
@@ -6220,12 +6246,17 @@ export function ChatInput({
       } = {},
     ) => {
       const agentKind = opts.agentKind ?? currentModelAgentKind;
-      // Agent 在另一台电脑运行的任务:模型属于那台的目录,不写回本机的新建任务记忆。
-      if (!sessionId || !agentKind || !modelId || sshCodexHostId || agentDeviceId) return;
+      if (!sessionId || !agentKind || !modelId || sshCodexHostId) return;
       const activeProviderId =
         opts.activeProviderId !== undefined ? opts.activeProviderId : selectedProviderId;
       const memoryProviderId =
         opts.memoryProviderId !== undefined ? opts.memoryProviderId : effectiveSourceId;
+      // Agent 在另一台电脑运行的任务:模型属于那台的目录,不写回本机的新建任务记忆;
+      // 档位与 Fast 只记进本机为那台电脑单独记的一份(换模后意图期调档也走这里)。
+      if (agentDeviceId) {
+        rememberCatalogModelPrefs(agentDeviceId, agentKind, memoryProviderId, modelId, patch);
+        return;
+      }
       const remoteDeviceId =
         opts.remoteDeviceId ?? getSessionDeviceId(sessionId) ?? deviceLinkDeviceId;
       const markModelChoice = opts.markModelChoice === true;
@@ -6821,21 +6852,29 @@ export function ChatInput({
           const syncedEffort = authoritative ? authoritative.effort : newEffort;
           const syncedFast = authoritative ? authoritative.fastMode : targetFast;
           const syncedProviderId = authoritative ? authoritative.providerId : providerId;
-          // 换电脑的选择属于目标电脑的目录,不写进本机的新建任务记忆。
-          if (relocateTo === undefined) syncSessionDraftModelPrefs(
-            newModelId,
-            {
-              ...(syncedEffort ? { effort: syncedEffort } : {}),
-              ...(syncedFast !== undefined ? { fast: syncedFast } : {}),
-            },
-            {
+          const syncedPatch = {
+            ...(syncedEffort ? { effort: syncedEffort } : {}),
+            ...(syncedFast !== undefined ? { fast: syncedFast } : {}),
+          };
+          // 换电脑的选择属于目标电脑的目录:不写进本机的新建任务记忆,档位与 Fast 记进目标
+          // 那份目录的记忆(意图期再调档同样落在这里)。
+          if (relocateTo !== undefined) {
+            rememberCatalogModelPrefs(
+              relocateTo,
+              targetAgentKind,
+              syncedProviderId,
+              newModelId,
+              syncedPatch,
+            );
+          } else {
+            syncSessionDraftModelPrefs(newModelId, syncedPatch, {
               activeProviderId: syncedProviderId,
               memoryProviderId: syncedProviderId,
               remoteDeviceId: deviceLinkDeviceId ?? undefined,
               agentKind: targetAgentKind,
               markModelChoice: true,
-            },
-          );
+            });
+          }
           if (makerChatStore.getSnapshot(sourceSessionId).agentStatus.isRunning) {
             toast.success(
               t('newChat.chatInput.agentSwitch.deferred', {
@@ -6890,17 +6929,24 @@ export function ChatInput({
         }
         // 立即切换路径(harness / registry 缺省兜底,生产不走):维持旧收敛语义。
         makerChatStore.noteAgentSwitched(sourceSessionId, targetAgentKind);
-        if (relocateTo === undefined) syncSessionDraftModelPrefs(
-          newModelId,
-          { effort: newEffort, fast: targetFast },
-          {
-            activeProviderId: providerId,
-            memoryProviderId: providerId,
-            remoteDeviceId: deviceLinkDeviceId ?? undefined,
-            agentKind: targetAgentKind,
-            markModelChoice: true,
-          },
-        );
+        if (relocateTo !== undefined) {
+          rememberCatalogModelPrefs(relocateTo, targetAgentKind, providerId, newModelId, {
+            effort: newEffort,
+            fast: targetFast,
+          });
+        } else {
+          syncSessionDraftModelPrefs(
+            newModelId,
+            { effort: newEffort, fast: targetFast },
+            {
+              activeProviderId: providerId,
+              memoryProviderId: providerId,
+              remoteDeviceId: deviceLinkDeviceId ?? undefined,
+              agentKind: targetAgentKind,
+              markModelChoice: true,
+            },
+          );
+        }
         if (!result.engineReady) {
           toast.error(t('newChat.chatInput.agentSwitch.engineNotReady'), { duration: 4000 });
         }
@@ -7084,6 +7130,7 @@ export function ChatInput({
       devices: remoteAgentDevices,
       selectedDeviceId: effectiveAgentDeviceId,
       localModelMemory: LOCAL_MODEL_MEMORY,
+      deviceModelMemory: agentDeviceModelMemoryAccessors,
       onRelocate: async (selection) => {
         if (!(await confirmAgentRelocation(selection.agentDevice))) return false;
         return performAgentSwitchRef.current(selection.agent, selection.modelId, selection.providerId, {
@@ -7188,15 +7235,15 @@ export function ChatInput({
       if (sessionId || settingsLocked) return;
       const targetKind = vendorKeyToAgentKind(selection.engine);
       // 这一行与当前目录不在同一台电脑(远程 Agent 换落点):记忆按目标目录写 —— 落到本机就写
-      // 本机预设;落到另一台电脑就不写(那台的记忆由它自己的草稿播种接管)。
+      // 本机预设;落到另一台电脑就写本机为那台记的那一份。
       const crossDevice =
         selection.agentDevice !== undefined &&
         (selection.agentDevice?.deviceId ?? null) !== agentDeviceId;
-      const targetMemory = crossDevice
-        ? selection.agentDevice === null
-          ? LOCAL_MODEL_MEMORY
-          : undefined
-        : modelMemory;
+      const targetMemory = !crossDevice
+        ? modelMemory
+        : selection.agentDevice
+          ? agentDeviceModelMemoryAccessors(selection.agentDevice.deviceId)
+          : LOCAL_MODEL_MEMORY;
       if (targetKind && selection.providerId && !selection.resetToRecommended) {
         if (selection.effort) {
           targetMemory?.setEffort(

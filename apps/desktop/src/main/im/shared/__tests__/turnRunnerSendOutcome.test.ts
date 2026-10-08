@@ -66,6 +66,12 @@ const mocks = vi.hoisted(() => ({
   clearPendingTurnChangeSets: vi.fn(),
   noteSilentStopUserSend: vi.fn(),
   noteSilentStopSessionReset: vi.fn(),
+  // 与生产同语义的最小替身: 统一停止按 id 取**当前** runtime 并中止(唯一的一次 abort)。
+  stopSessionTurnExplicitly: vi.fn(async (sessionId: string): Promise<void> => {
+    await (mocks.getMaker() as { getSession(id: string): { abort(): Promise<void> } | undefined })
+      .getSession(sessionId)
+      ?.abort();
+  }),
   onSilentStopSettled: vi.fn(() => vi.fn()),
   installDesktopInteractionListener: vi.fn(),
   takePendingInteractionsForSession: vi.fn(),
@@ -157,6 +163,7 @@ vi.mock('../../../maker-ipc/register', () => ({
   takePendingInteractionsForSession: mocks.takePendingInteractionsForSession,
   noteSilentStopUserSend: mocks.noteSilentStopUserSend,
   noteSilentStopSessionReset: mocks.noteSilentStopSessionReset,
+  stopSessionTurnExplicitly: mocks.stopSessionTurnExplicitly,
   onSilentStopSettled: mocks.onSilentStopSettled,
 }));
 
@@ -590,6 +597,37 @@ describe('turnRunner send outcome policy (feishu adapter characterization)', () 
   afterEach(async () => {
     await runner?.disposeAllSessions();
     runner = null;
+  });
+
+  it('keeps child events out of personal IM streaming, attachments and completion', async () => {
+    const handle = { messageId: 'stream-parent', append: vi.fn(), replace: vi.fn(), finalize: vi.fn(), close: vi.fn() };
+    mocks.feishuIm.startStreamingText.mockResolvedValue(handle);
+    const h = setupSession(async () => ({ accepted: true }));
+    const complete = vi.fn();
+    await runDefaultTurn(complete);
+    h.emit({ type: 'text', data: { text: '主代理前半', isFinal: false } });
+    await flushMicrotasks();
+    handle.replace.mockClear();
+    const events: AgentEvent[] = [
+      { type: 'text', data: { text: '内部增量', isFinal: false } },
+      { type: 'text', data: { text: '内部报告', isFinal: true } },
+      { type: 'tool_use', data: { toolName: 'Bash', toolUseId: 'child-tool', input: { command: 'private' } } },
+      { type: 'tool_result_full', data: { fullText: '{"xdt_image_url":"xdt-image://private"}' } },
+      { type: 'error', data: { message: 'child failed', isTerminal: true } },
+      { type: 'done', data: {} },
+    ];
+    for (const event of events) h.emit({ ...event, agentMeta: { parentUuid: 'toolu_child' } });
+    await flushMicrotasks();
+    expect(handle.replace).not.toHaveBeenCalled();
+    expect(handle.finalize).not.toHaveBeenCalled();
+    expect(complete).not.toHaveBeenCalled();
+    expect(mocks.resolveXdtImageUrl).not.toHaveBeenCalled();
+    h.emit({ type: 'text', data: { text: '和最终结论', isFinal: false } });
+    await flushMicrotasks();
+    expect(handle.replace).toHaveBeenLastCalledWith('主代理前半和最终结论');
+    h.emit({ type: 'done', data: {} });
+    await waitForAssertion(() => expect(handle.finalize).toHaveBeenCalledWith('主代理前半和最终结论'));
+    expect(complete).toHaveBeenCalledTimes(1);
   });
 
   it('keeps IM persistence, ack, card, and completion exactly-once when Maker recovery is transparent', async () => {
@@ -3212,7 +3250,10 @@ describe('turnRunner send outcome policy (feishu adapter characterization)', () 
       userId: 'ou_user',
     });
     expect(result.stopped).toBe(true);
-    expect(mocks.noteSilentStopSessionReset).toHaveBeenCalledWith('feishu-session');
+    // 与桌面 Stop 同一套清理: 统一停止入口负责撤续跑守卫与唯一的一次 abort,
+    // turnRunner 自己不再直接 abort(重复中止会向 vendor 发两次 interrupt)。
+    expect(mocks.noteSilentStopSessionReset).not.toHaveBeenCalled();
+    expect(mocks.stopSessionTurnExplicitly).toHaveBeenCalledWith('feishu-session');
     expect(h.abort).toHaveBeenCalledTimes(1);
 
     const settleCb = (mocks.onSilentStopSettled.mock.calls[0] as unknown[])[1] as (

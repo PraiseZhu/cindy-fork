@@ -340,9 +340,11 @@ import {
 } from './codex-custom-provider-route.js';
 import {
   buildCodexSubagentSpawnArgs,
+  codexHostUsesSmartSubagentRouting,
   resolveCodexSubagentRoutingProfile,
   type CodexSmartSubagentConfig,
 } from './codex-subagent-config.js';
+import { restrictCodexRoutesToGuestProvider } from './guest-provider-route-store.js';
 import {
   codexSmartSubagentRoutingSignature,
   prepareCodexSmartSubagentConfig,
@@ -1549,13 +1551,10 @@ export function getMaker(): Maker {
       providerId?: string;
       credentialMode?: 'oauth-bearer' | 'gateway-key' | 'provider-oauth';
       hostPurpose?: 'control-plane' | 'review' | 'custom-context';
+      deviceHostedGuestProviderId?: string;
     }): Promise<string> => {
       const settings = readSubagentModelSettings();
-      if (
-        ctx.hostPurpose === 'control-plane'
-        || ctx.hostPurpose === 'review'
-        || !settings.codexSmartSubagentRouting
-      ) return 'default';
+      if (!codexHostUsesSmartSubagentRouting(settings, ctx)) return 'default';
       const providerViews: ProviderView[] =
         await getDesktopProviderService().listProviders({ allowSideEffects: false });
       const candidates = selectCodexSmartSubagentCandidates(providerViews, {
@@ -1741,6 +1740,14 @@ export function getMaker(): Maker {
         const usesScopedProxy = needsContextScope || !!accountProxyKey;
         const scopedProxyKey = accountProxyKey || customContextHostKey;
         const usesIsolatedProxy = isControlPlane || isReview || usesScopedProxy;
+        // 供应商分享受邀者的任务：独占的 proxy 只登记分享的那个供应商的路由并过受邀者守门，
+        // 不开智能子代理调配。没有独占 proxy 就不能安全地收窄，直接失败。
+        const guestProviderId = ctx.deviceHostedGuestProviderId?.trim() || undefined;
+        if (ctx.deviceHostedGuestProviderId !== undefined && (!guestProviderId || !usesScopedProxy)) {
+          const error = new Error('shared-provider Codex host requires its own scoped proxy');
+          (error as { codexSpawnConfigFatal?: boolean }).codexSpawnConfigFatal = true;
+          throw error;
+        }
         const effectiveCodexHome = ctx.codexHome ?? getCodexHome();
         let mcpExtraArgs: string[] = [];
         let mcpExtraEnv: Record<string, string> = {};
@@ -1814,7 +1821,7 @@ export function getMaker(): Maker {
         setCodexSubagentOAuthReader(getChatgptBridgeAuthForDispatch);
 
         const customContextProviderRoutes = usesScopedProxy
-          ? deriveCodexCustomProviderRoutes(getActiveCatalog())
+          ? restrictCodexRoutesToGuestProvider(deriveCodexCustomProviderRoutes(getActiveCatalog()), guestProviderId)
           : [];
 
         // 这个点在 CodexAgent.createHost() 内。返回的 codexProxyActive 会被冻到 AppServerHost 实例上,
@@ -1824,7 +1831,15 @@ export function getMaker(): Maker {
             scopedProxyKey,
             authInjection,
             customContextProviderRoutes,
+            guestProviderId,
           );
+          // 受邀者不走「proxy 不可用时直连网关」的退路：那条路不经受邀者守门。
+          if (guestProviderId && !isCodexCustomContextProxyHandleReady(scopedProxyKey)) {
+            await releaseCodexCustomContextProxy(scopedProxyKey);
+            const error = new Error('shared-provider Codex host requires the local proxy, but the proxy is not ready');
+            (error as { codexSpawnConfigFatal?: boolean }).codexSpawnConfigFatal = true;
+            throw error;
+          }
         } else if (usesIsolatedProxy) {
           await ensureCodexControlPlaneProxyReady(authInjection);
         } else {
@@ -1872,12 +1887,7 @@ export function getMaker(): Maker {
         );
         const storedSubagentModelSettings = readSubagentModelSettings();
         let smartSubagentConfig: CodexSmartSubagentConfig | undefined;
-        if (
-          !isControlPlane
-          && !isReview
-          && ready
-          && storedSubagentModelSettings.codexSmartSubagentRouting
-        ) {
+        if (ready && codexHostUsesSmartSubagentRouting(storedSubagentModelSettings, ctx)) {
           try {
             const providerViews: ProviderView[] =
               await getDesktopProviderService().listProviders({ allowSideEffects: false });

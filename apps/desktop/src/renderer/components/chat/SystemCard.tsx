@@ -944,7 +944,11 @@ function AutoResumeActionRow({
 }) {
   const { t } = useTranslation();
   const [expanded, setExpanded] = useState(false);
-  const hasProgress = info.attempt !== undefined && info.maxAttempts !== undefined;
+  // 用量上限重置后的自动继续不是重连：不展示「第几次重试 / 累计重连」。
+  const usageLimitReset = info.usageLimitReset === true;
+  const hasProgress =
+    !usageLimitReset && info.attempt !== undefined && info.maxAttempts !== undefined;
+  const showSessionTotal = !usageLimitReset && info.sessionTotal !== undefined;
   // **转圈的判据是"此刻真的有 turn 在跑",不是"是不是 ephemeral 行"。**
   //
   // 一次中断的进行中状态跨两种载体:退避那 3–20 秒是 ephemeral 行(state='live'),续跑
@@ -959,7 +963,9 @@ function AutoResumeActionRow({
   //   - 已回填          → ✓ / ✗ 定格,`inFlight` 不参与(终态优先)
   const live = state === 'live' || (inFlight === true && info.outcome === undefined);
   const outcome = live ? undefined : info.outcome;
-  const label = live
+  const label = usageLimitReset
+    ? t('chat.systemCard.autoResume.labelUsageReset')
+    : live
     ? hasProgress
       ? t('chat.systemCard.autoResumePending.labelWithProgress', {
           attempt: info.attempt,
@@ -972,7 +978,7 @@ function AutoResumeActionRow({
         ? t('chat.systemCard.autoResume.labelFailed')
         : t('chat.systemCard.autoResume.labelNeutral');
   const summary = summarizeInterruption(info.error);
-  const canExpand = Boolean(info.error) || hasProgress || info.sessionTotal !== undefined;
+  const canExpand = Boolean(info.error) || hasProgress || showSessionTotal;
   return (
     <div className="flex flex-col">
       <button
@@ -1050,7 +1056,7 @@ function AutoResumeActionRow({
               </pre>
             </>
           )}
-          {(hasProgress || info.sessionTotal !== undefined) && (
+          {(hasProgress || showSessionTotal) && (
             <div className={cn('flex flex-wrap gap-x-4 gap-y-[2px] text-12', info.error && 'mt-2')}>
               {hasProgress && (
                 <span>
@@ -1060,7 +1066,7 @@ function AutoResumeActionRow({
                   })}
                 </span>
               )}
-              {info.sessionTotal !== undefined && (
+              {showSessionTotal && (
                 <span>
                   {t('chat.systemCard.autoResume.detail.sessionTotal', {
                     count: info.sessionTotal,

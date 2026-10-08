@@ -87,6 +87,30 @@ const h = vi.hoisted(() => {
   };
 });
 
+// 账号快照: 同一引用 = 账号没变(新任务从入口起按它复核账号代次)。测试可换引用模拟换账号。
+const dbAccount = vi.hoisted(() => ({ current: {} as object }));
+vi.mock('../../localDb/client/current', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../localDb/client/current')>()),
+  getCurrentDbClientSnapshot: () => dbAccount.current,
+}));
+
+// 新任务经公共入口 openSession(模型准入)—— 准入本身由 sessionOpening 的测试覆盖, 这里
+// 只把准入前的路由原样透传给建行回调。
+vi.mock('../../localDb/sessionOpening.js', () => ({
+  openSession: vi.fn(
+    async (
+      input: { body: Record<string, unknown> },
+      commit?: (row: Record<string, unknown>, assertCurrent: () => void) => Promise<unknown>,
+    ) => {
+      const row = {
+        ...input.body,
+        providerId: input.body.providerId ?? null,
+        fastMode: !!input.body.fastMode,
+      };
+      return { row, value: commit ? await commit(row, () => undefined) : undefined };
+    },
+  ),
+}));
 vi.mock('electron', () => ({
   BrowserWindow: { getAllWindows: () => [] },
 }));
@@ -603,6 +627,50 @@ describe('hook session-runner 的 userSendAt 时序(未分类误判回归)', () 
     expect(h.touchUserSendInDb).toHaveBeenCalledTimes(1);
   });
 
+  it('createOnly 建行后换了账号: 报失败, 不把补写落进新账号的库、不广播', async () => {
+    h.createSessionRow.mockImplementationOnce(async () => {
+      dbAccount.current = {};
+    });
+    const runner = createMakerHookSessionRunner({ log });
+
+    const outcome = await runner.run(baseReq({ createOnly: true }));
+
+    expect(outcome.status).toBe('error');
+    expect(h.touchUserSendInDb).not.toHaveBeenCalled();
+    expect(h.calls).not.toContain('created:sess-new');
+  });
+
+  it('新任务经 openSession 准入: 首条消息与 /new 都用准入后的路由建任务', async () => {
+    const { openSession } = await import('../../localDb/sessionOpening.js');
+    const admit = async (input: { body: Record<string, unknown> }, commit?: (row: Record<string, unknown>, assertCurrent: () => void) => Promise<unknown>) => {
+      const row = { ...input.body, model: 'admitted-model', providerId: 'admitted-provider', fastMode: false };
+      return { row, value: commit ? await commit(row, () => undefined) : undefined };
+    };
+    vi.mocked(openSession).mockImplementationOnce(admit as never).mockImplementationOnce(admit as never);
+    const runner = createMakerHookSessionRunner({ log });
+
+    await runner.run(baseReq({}));
+    expect(vi.mocked(openSession).mock.calls.at(-1)?.[0]).toMatchObject({ id: 'sess-new', body: { model: 'test-model' } });
+    // 账号代次在读配置之前捕获, 一路带进准入(openSession 前后与写库前都复核)。
+    expect(vi.mocked(openSession).mock.calls.at(-1)?.[0]).toMatchObject({ assertCurrent: expect.any(Function) });
+    expect(fakeMaker.createSession).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'sess-new', model: 'admitted-model', providerId: 'admitted-provider' }),
+    );
+
+    await runner.run(baseReq({ createOnly: true }));
+    expect(h.createSessionRow).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'sess-new', model: 'admitted-model' }),
+    );
+  });
+
+  it('复用既有任务不经过准入(冷 resume 按库里的路由)', async () => {
+    const { openSession } = await import('../../localDb/sessionOpening.js');
+    vi.mocked(openSession).mockClear();
+    const runner = createMakerHookSessionRunner({ log });
+    await runner.run(baseReq({ isNew: false }));
+    expect(openSession).not.toHaveBeenCalled();
+  });
+
   it('createOnly keeps the durable task when userSendAt enrichment fails', async () => {
     h.touchUserSendInDb.mockRejectedValueOnce(new Error('db busy'));
     const runner = createMakerHookSessionRunner({ log });
@@ -828,6 +896,21 @@ describe('hook session-runner 的 userSendAt 时序(未分类误判回归)', () 
       [string, { content: unknown }]
     >;
     expect(createCalls[0][1].content).toBe('hello');
+  });
+
+  it('普通新任务补写期间换了账号: 不再补写、不广播, 并在发送前终止这次派发', async () => {
+    h.touchUserSendInDb.mockImplementationOnce(async () => {
+      dbAccount.current = {};
+    });
+    const runner = createMakerHookSessionRunner({ log });
+    const outcome = await runner.run(
+      baseReq({ source: { im: 'telegram', channelName: 'Release topic', userText: 'hello' } }),
+    );
+    expect(outcome.status).toBe('error');
+    expect(h.setSessionSourceInDb).not.toHaveBeenCalled();
+    expect(h.calls).not.toContain('created:sess-new');
+    const session = await fakeMaker.createSession.mock.results[0].value;
+    expect(session.send).not.toHaveBeenCalled();
   });
 
   it('官方 Telegram 新会话保留 provider 标记并把包命令留给 Desktop 确认', async () => {
@@ -3150,6 +3233,42 @@ describe('watchContinuation: 观察桌面端续跑并回流', () => {
   async function flush(times = 30): Promise<void> {
     for (let i = 0; i < times; i++) await Promise.resolve();
   }
+
+  it.each([false, true])('isolates child events before root completion (isFinal=%s)', async (isFinal) => {
+    const session = makeManualSession('sess-subagent-output');
+    const onProgress = vi.fn();
+    const onToolResult = vi.fn();
+    const onTurnTerminal = vi.fn();
+    const observer = observeHookTurn(session as never, {
+      onProgress, onToolResult, onTurnTerminal,
+      onSilentStopSettled: () => () => {},
+      log,
+    });
+    const emit = h.eventCbs.get('sess-subagent-output')!;
+    emit({ type: 'text', source: 'claude-code', data: { text: '主代理前半', isFinal: false } });
+    onProgress.mockClear();
+    const child = { parentUuid: 'toolu_child', uuid: 'child-message' };
+    const events: AgentEvent[] = [
+      { type: 'text', data: { text: '内部增量', isFinal: false } },
+      { type: 'text', data: { text: '内部调查报告'.repeat(1000), isFinal: true } },
+      { type: 'tool_use', data: { toolName: 'Bash', toolUseId: 'child-tool', input: { command: 'private' } } },
+      { type: 'thinking', data: { text: '内部思考', stage: 'delta', blockId: 'child-thinking' } },
+      { type: 'tool_result_full', data: { fullText: '内部媒体结果' } },
+      { type: 'error', data: { message: 'child failed', isTerminal: true } },
+      { type: 'done', data: {} },
+    ];
+    for (const event of events) emit({ ...event, source: 'claude-code', agentMeta: child });
+    expect(onProgress).not.toHaveBeenCalled();
+    expect(onToolResult).not.toHaveBeenCalled();
+    expect(onTurnTerminal).not.toHaveBeenCalled();
+    expect(observer.text()).toBe('主代理前半');
+    // A recovered result tail is an unanchored delta, not a final envelope.
+    emit({ type: 'text', source: 'claude-code', ...(isFinal ? { agentMeta: { uuid: 'main-message' } } : {}), data: { text: isFinal ? '主代理前半和最终结论' : '和最终结论', isFinal } });
+    emit({ type: 'done', data: {} });
+    await observer.finished;
+    expect(observer.finalText()).toBe('主代理前半和最终结论');
+    expect(onTurnTerminal).toHaveBeenCalledTimes(1);
+  });
 
   it('终态回调抛错时仍拆监听并 settle finished', async () => {
     const session = makeManualSession('sess-terminal-callback');

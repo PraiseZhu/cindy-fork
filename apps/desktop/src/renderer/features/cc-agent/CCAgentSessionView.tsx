@@ -166,6 +166,7 @@ import { isDeviceLinkRemotePushCurrent } from '@/lib/remoteDataOwnerPushFence';
 import { canAccessBillingSettings } from '@/components/settings/billingVisibility';
 import { useDeviceProviders } from '@/hooks/useDeviceProviders';
 import { useSelectableDevices } from '@/hooks/useControllableDevices';
+import { useProviderShareAgentDevices } from '@/features/provider-share/useProviderShareAgentDevices';
 import {
   canExposeWritableDirsChange,
   resolveManualCompactChannel,
@@ -335,7 +336,6 @@ import {
   shouldRevealOrcaWorkersBeforeFirstPaint,
 } from './lib/orcaPassiveReveal';
 import { didOpenOrcaWorkersTab, revealOrcaWorkersWithRetry } from './lib/orcaWorkersRevealRetry';
-import { usageLimitScheduleNavigationState } from '@/features/scheduler/lib/usageLimitScheduleCreateIntent';
 import {
   closeOrcaWorkersTabAfterTeamEnd,
   ensureOrcaWorkersTab,
@@ -1771,6 +1771,8 @@ export function CCAgentSessionView({
     updateSystemCardData,
     error,
     usageLimitRecovery,
+    usageLimitWait,
+    cancelUsageLimitWait,
     errorIsRecoverable,
     errorRetryText,
     disposedErrorPersistId,
@@ -2096,22 +2098,37 @@ export function CCAgentSessionView({
   // 生效)。Agent 当前所在电脑与挂着的换位置目标即使掉线也保留,让用户看得到、换得回来。
   const { devices: selectableDevices } = useSelectableDevices();
   const pendingAgentDeviceId = agentSwitchIntent?.agentDeviceId;
+  // 供应商分享：别人分享给我的供应商也是远程 Agent 的落点(`share:<id>`)，只并进这里，
+  // 不进设备切换器。已暂停 / 已不在的分享只在它正是当前或即将使用的位置时保留。
+  const { devices: providerShareDevices, nameFor: providerShareDeviceName } =
+    useProviderShareAgentDevices([agentDeviceId, pendingAgentDeviceId]);
   const remoteAgentDevices = useMemo(
     () =>
       remoteDeviceId || session?.remoteHostId
         ? undefined
-        : selectableDevices
-            .filter(
-              (device) =>
-                device.online ||
-                device.deviceId === agentDeviceId ||
-                device.deviceId === pendingAgentDeviceId,
-            )
-            .map(({ deviceId, name }) => ({ deviceId, name })),
-    [selectableDevices, remoteDeviceId, session?.remoteHostId, agentDeviceId, pendingAgentDeviceId],
+        : [
+            ...selectableDevices
+              .filter(
+                (device) =>
+                  device.online ||
+                  device.deviceId === agentDeviceId ||
+                  device.deviceId === pendingAgentDeviceId,
+              )
+              .map(({ deviceId, name }) => ({ deviceId, name })),
+            ...providerShareDevices,
+          ],
+    [
+      selectableDevices,
+      providerShareDevices,
+      remoteDeviceId,
+      session?.remoteHostId,
+      agentDeviceId,
+      pendingAgentDeviceId,
+    ],
   );
   const agentDeviceName = agentDeviceId
-    ? (selectableDevices.find((device) => device.deviceId === agentDeviceId)?.name ?? null)
+    ? (selectableDevices.find((device) => device.deviceId === agentDeviceId)?.name ??
+      providerShareDeviceName(agentDeviceId))
     : null;
   const catalogDeviceId = remoteDeviceId ?? agentDeviceId;
   const { providers: deviceProviders } = useDeviceProviders(catalogDeviceId);
@@ -4231,26 +4248,6 @@ export function CCAgentSessionView({
     continueAfterSilentStop();
   }, [continueAfterSilentStop]);
 
-  const handleContinueAfterUsageReset = useCallback(() => {
-    if (!sessionId || !usageLimitRecovery || remoteDeviceId) return;
-    const requestId =
-      typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
-        ? crypto.randomUUID()
-        : `${sessionId}:${Date.now()}`;
-    navigate('/cc-agent/scheduled', {
-      state: usageLimitScheduleNavigationState({
-        kind: 'usage-limit-recovery',
-        requestId,
-        sessionId,
-        agentKind:
-          session?.agentKind === 'codex' || session?.agentKind === 'pi'
-            ? session.agentKind
-            : 'claude-code',
-        resetAtMs: usageLimitRecovery.resetAtMs,
-      }),
-    });
-  }, [navigate, remoteDeviceId, session?.agentKind, sessionId, usageLimitRecovery]);
-
   // 点击 Cancel 关闭报错 banner 同样是处置(用户选择不管它了)。
   const handleDismissError = useCallback(() => {
     if (sessionId) ackErrorAlertHandled(sessionId);
@@ -5299,9 +5296,8 @@ export function CCAgentSessionView({
                 retryText={errorRetryText}
                 onRetry={handleRetry}
                 onSilentStopContinue={handleSilentStopContinue}
-                onContinueAfterUsageReset={
-                  usageLimitRecovery && !remoteDeviceId ? handleContinueAfterUsageReset : undefined
-                }
+                usageLimitWait={usageLimitWait}
+                onCancelUsageLimitWait={cancelUsageLimitWait}
                 usageLimitRecovery={usageLimitRecovery}
                 onCancel={handleDismissError}
                 agentKind={session?.agentKind}

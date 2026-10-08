@@ -299,6 +299,31 @@ review 按此检查：功能类 PR 缺这段说明 = P1。
 触及 device-link 重试／超时／断链恢复路径的 PR，Description 还必须写明「故障半径
 三问」的结论（故障层级、动作层级、多 peer 用例）。缺失同样 = P1。
 
+## 桌面远程文件获取的进度
+
+- 直传进度来自接收端每次成功写入的字节数，经 `device-link/fileAccess.ts` 的
+  `onProgress` 交给调用方；工作目录内的大文件与目录外的媒体取件都必须接入。
+  日志采样不是 UI 进度源，不能等整份文件返回后才上报 100%。
+- 聊天打开／定位／复制、下载到本地和侧栏大文件预览，共用
+  `file-browser/transfer-progress.ts` 推送到发起窗口。用本机 IPC 的 `requestId`
+  关联消费者，不按路径判断归属；它不进入跨设备协议，旧调用可省略。
+- 提示、文本预览与侧栏预览共用 `renderer/lib/fileTransferProgress.ts` 的订阅或采样。
+  订阅先于请求，完成、失败、卸载时释放；同一路径跨设备、并发获取与下载互不影响。
+  阶段切换、回退重置和完成不被限频丢弃；字节回退重置速度，总量未知不显示百分比。
+- 文件夹下载仍使用既有打包／发送／下载／解包进度。SSH 使用分片字节或 tar 流字节；
+  不将播放中的 Range 缓冲当作整文件下载，也不为媒体协议后台预取弹出下载 Toast。
+- 目录外媒体回退旧 `media:fetch` 上传接口时，该接口没有上传字节回调；准备期间不编造
+  上传百分比，开始本机下载后再显示真实进度。手机版有独立接收与播放器缓冲链路，
+  不消费桌面本机 IPC；相关界面进度由 [PR #5542](https://github.com/makecindy/cindy/pull/5542)
+  跟进，桌面修复不代表手机已覆盖。
+
+回归入口：`device-link/__tests__/filePeer.test.ts`（分块、观察者异常、取消与账号失效）、
+`device-link/__tests__/fileAccess.test.ts`（两类入口及回退）、
+`file-browser/__tests__/chatFile.test.ts`、`file-browser/__tests__/transferProgress.test.ts`，
+以及 `renderer/__tests__/remoteFileProgress.test.ts`
+（并发隔离、释放、百分比和速度）。源码路径均相对 `apps/desktop/src/main/`，
+最后一项相对 `apps/desktop/src/`。
+
 ## Review 清单
 
 1. 涉及 workdir／agent／会话数据的功能，在 SSH 远程下是否走远程通道而非本机 `fs`？

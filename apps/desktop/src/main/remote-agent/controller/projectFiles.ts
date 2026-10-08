@@ -19,22 +19,14 @@ import type { RemoteAgentKind } from '@cindy/device-link';
 import {
   ANCESTOR_INSTRUCTION_FILES,
   MAX_ANCESTOR_LEVELS,
+  PROJECT_INSTRUCTION_DIRECTORIES as DIRECTORIES,
+  PROJECT_INSTRUCTION_FILES as TOP_LEVEL_FILES,
+  PROJECT_SETTINGS_FILES as SETTINGS_FILES,
   isSafeProjectFilePath,
   type RemoteAgentWireAncestorFile,
   type RemoteAgentWireFile,
   type RemoteAgentWirePersonal,
 } from '../wire';
-
-const TOP_LEVEL_FILES = ['CLAUDE.md', 'CLAUDE.local.md', 'AGENTS.md', 'AGENTS.override.md'];
-const DIRECTORIES = [
-  '.claude/skills',
-  '.claude/agents',
-  '.claude/commands',
-  '.agents/skills',
-  '.pi/skills',
-  '.pi/prompts',
-];
-const SETTINGS_FILES = ['.claude/settings.json', '.claude/settings.local.json'];
 const MAX_FILES = 512;
 const MAX_FILE_BYTES = 512 * 1024;
 const MAX_TOTAL_BYTES = 4 * 1024 * 1024;

@@ -225,16 +225,10 @@ vi.mock("@/components/MobileAgentMark", async () => {
 vi.mock("@/session/MobileProviderMark", async () => {
   const { createElement: el } = await import("react");
   return {
-    MobileProviderMark: ({ providerId }: AnyProps) =>
-      el("i", { "data-provider-mark": providerId }),
-    MobileModelIconMark: ({ providerId }: AnyProps) =>
-      el("i", { "data-model-mark": providerId }),
-  };
-});
-vi.mock("@/session/RemoteSourceMark", async () => {
-  const { createElement: el } = await import("react");
-  return {
-    RemoteSourceMark: ({ children }: AnyProps) => el("span", { "data-remote-mark": "" }, children),
+    MobileProviderMark: ({ providerId, remote }: AnyProps) =>
+      el("i", { "data-provider-mark": providerId, ...(remote ? { "data-remote-mark": "" } : {}) }),
+    MobileModelIconMark: ({ providerId, remote }: AnyProps) =>
+      el("i", { "data-model-mark": providerId, ...(remote ? { "data-remote-mark": "" } : {}) }),
   };
 });
 vi.mock("@/session/sessionAgentSwitch", () => ({

@@ -1041,6 +1041,11 @@ export interface AgentDeps {
       customContextWindow?: number;
       /** Unique app-server Host-generation identity used to scope custom-context resources. */
       customContextHostKey?: string;
+      /**
+       * 受邀者(供应商分享)任务的 app-server，值是分享给它的供应商。host 不开智能 Subagent
+       * 调配、不暴露 spawn 的模型覆写，自定义供应商路由与按模型分流也只保留这个供应商。
+       */
+      deviceHostedGuestProviderId?: string;
     },
   ) => Promise<CodexExtraSpawnConfig>;
 
@@ -1051,6 +1056,8 @@ export interface AgentDeps {
       providerId?: string;
       credentialMode?: AgentCredentialMode;
       hostPurpose?: 'control-plane' | 'review' | 'custom-context';
+      /** 受邀者任务的 app-server 不开智能 Subagent 调配(见 prepareCodexExtraSpawnConfig)。 */
+      deviceHostedGuestProviderId?: string;
     },
   ) => Promise<string>;
 
@@ -1757,7 +1764,36 @@ export interface DeviceHostedSession {
   mirrorRoot?: string;
   /** 任务所在电脑上用户的个人说明(该 Agent 的用户级说明文件)，写进给模型的环境说明。 */
   personalInstructions?: string;
+  /**
+   * 任务属于另一个账号(供应商分享的受邀者)。Agent 不加载本机的 hooks、托管技能，也不读取
+   * 会话目录之外的说明文件；本机用户自己的配置与可执行配置不进入这个会话。
+   */
+  guest?: boolean;
+  /**
+   * 受邀者专用的本机目录(远程 Agent 运行根下按控制端分开，跨任务保留，分享删除时整体清理)。
+   * Codex 的 CODEX_HOME 与 Pi 的会话目录放在这里，不与本机用户自己的历史、配置混在一起。
+   * 只在 guest 时使用；缺省时 Codex 受邀者会话按本机全局说明 fail-closed。
+   */
+  guestHome?: string;
+  /**
+   * 受邀者会话的供应商边界(只在 guest 时提供)：会话只能经分享给受邀者的这一个供应商出站。
+   *  - providerId：分享的供应商(启动与切模都钉在它上面)；
+   *  - modelIds：它为本 Agent 提供的模型(Claude Code 的可选模型只列这些)；
+   *  - routeToken：本机 proxy 认出这条会话请求的令牌(Claude Code 经请求头带上，Pi / Codex 按会话登记)。
+   * Pi / Codex 子代理与按模型分流的路由也只保留这个供应商。
+   */
+  guestProvider?: DeviceHostedGuestProvider;
 }
+
+/** 受邀者会话的供应商边界，见 DeviceHostedSession.guestProvider。 */
+export interface DeviceHostedGuestProvider {
+  providerId: string;
+  modelIds: readonly string[];
+  routeToken: string;
+}
+
+/** 受邀者会话的 Claude Code 请求带上的路由令牌请求头(本机 proxy 据此只走分享的供应商)。 */
+export const DEVICE_HOSTED_GUEST_ROUTE_HEADER = 'x-cindy-guest-route';
 
 export interface StartSessionOptions {
   /**

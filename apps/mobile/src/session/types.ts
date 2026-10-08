@@ -290,6 +290,11 @@ export interface InputProjection {
    * 却无任何解释(2026-07 排查发现)。
    */
   credentialSwitchWait: { clientId?: string; blockedBySessionIds: string[] } | null;
+  /**
+   * 账号限额等待(对齐桌面 AgentInputProjection.usageLimitWait):错误照常显示,到 `resumeAt`
+   * 无人处理时桌面端自动继续。老被控端缺省 = 无等待。
+   */
+  usageLimitWait?: { resumeAt: number } | null;
 }
 
 export interface PendingInteraction {

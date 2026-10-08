@@ -35,6 +35,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { isImAccountScopeClosedError } from '../accountBoundary';
 import { bindRuntimeRecoveryNotice } from './runtimeRecoveryNotice';
+import { isImSubagentEvent } from './agentEventScope';
 import { isExpiredPermissionDecision, type SharedPermission } from '../../maker-ipc/sharedPermission';
 import { presentSharedPermissionCard } from './permissionPresentation';
 import { describeInteractionSource } from './interactionSource';
@@ -105,7 +106,7 @@ import {
   wireSessionToIpcExternal,
   takePendingInteractionsForSession,
   noteSilentStopUserSend,
-  noteSilentStopSessionReset,
+  stopSessionTurnExplicitly,
   onSilentStopSettled,
 } from '../../maker-ipc/register';
 import { clearPendingTurnChangeSets } from '../../turn-change-set/store';
@@ -2366,6 +2367,7 @@ export function createTurnRunner(
 
   function handleEventFor(localSessionId: string, userId: string) {
     return (event: AgentEvent) => {
+      if (isImSubagentEvent(event)) return;
       const state = sessionStates.get(localSessionId);
       if (!state) return;
       const turn = state.queue[0];
@@ -3907,9 +3909,9 @@ export function createTurnRunner(
       }
       const active = state.queue[0];
       if (!active || !matches(active)) return { stopped: removed.length > 0, droppedQueued: removed.length };
-      noteSilentStopSessionReset(state.makerSession.id);
       active.terminalKind = 'aborted';
-      await current?.abort();
+      // 与桌面 Stop 同一套清理(撤续跑 / 取消恢复 / 暂停 Goal / 停输入队列并中止当前一轮)。
+      await stopSessionTurnExplicitly(state.makerSession.id);
       return { stopped: true, droppedQueued: removed.length };
     }
     const running =
@@ -3919,13 +3921,12 @@ export function createTurnRunner(
     // 先清排队再 abort — abort 触发的 done/error 会走 maybeDispatchNextQueued,
     // 队列不清空的话下一条排队消息会在中止后立刻自动派发。
     clearPendingSends(state);
-    // 重置 silent-stop 守卫(与 desktop ABORT_SESSION handler 同源): turn 若正
-    // 挂在 silentStop 的 1.5s 决策窗里, abort 对早已收尾的 SDK turn 是 no-op、
-    // 不产生任何事件,不重置的话守卫照样自动续跑,用户喊停后 agent 原地复活。
-    // 重置后守卫判 superseded → settle('skip') → 挂起 turn 经现有订阅按 done 收口。
-    noteSilentStopSessionReset(state.makerSession.id);
     if (state.queue[0]) state.queue[0].terminalKind = 'aborted';
-    await current?.abort();
+    // 与桌面 Stop 同一套清理(docs/dev-rules/im-turn-flow.md 不变量 9): 撤 silent-stop /
+    // 中断续跑守卫(turn 若正挂在 silentStop 的决策窗里, abort 对早已收尾的 SDK turn 是
+    // no-op, 不重置的话守卫照样自动续跑, 用户喊停后 agent 原地复活)、取消上下文溢出恢复、
+    // 暂停 Goal、停输入队列并中止当前一轮(唯一的一次 abort)。
+    await stopSessionTurnExplicitly(state.makerSession.id);
     log.info(
       `!stop aborted turn for session=...${state.makerSession.id.slice(-8)} droppedQueued=${droppedQueued}`,
     );

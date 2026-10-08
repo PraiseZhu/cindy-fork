@@ -74,7 +74,7 @@ describe('session Agent switch UI wiring', () => {
 
     // 模型药丸按 Agent 所在电脑的目录显示,带远程标记;读屏标签读出那台电脑。
     expect(source).toContain('providers: composerAgentCatalog.providers,');
-    expect(source).toContain('<RemoteSourceMark size={iconSize.lg}>{sourceMark}</RemoteSourceMark>');
+    expect(source).toContain('remote={Boolean(nextAgentDeviceId)}');
     expect(source).toContain('accessibilityLabel={composerRuntimeAccessibilityLabel}');
   });
 

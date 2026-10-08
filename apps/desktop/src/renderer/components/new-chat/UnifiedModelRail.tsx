@@ -139,7 +139,7 @@ export function UnifiedModelRail({
               ) : item.kind === 'provider' ? (
                 <ProviderRailMark providerId={item.providerId} providers={railProviders} />
               ) : item.kind === 'remote-provider' ? (
-                <RemoteSourceMark size={20}>
+                <RemoteSourceMark>
                   <ProviderRailMark providerId={item.providerId} providers={railProviders} />
                 </RemoteSourceMark>
               ) : null}

@@ -115,6 +115,7 @@ import { isModelEnabled, useModelVisibilityVersion } from '@/state/modelVisibili
 import { seedDefaultFavorite } from '@/state/modelFavorites';
 import { useProviderModelMemoryVersion } from '@/state/providerModelMemory';
 import { useDeviceLinkModelMirrorVersion } from '@/state/deviceLinkModelMirror';
+import { useAgentDeviceModelMemoryVersion } from '@/state/agentDeviceModelMemory';
 import {
   connectedProvidersForAgent,
   chatEligibleSourcesForModel,
@@ -664,6 +665,11 @@ export interface RemoteAgentSelectorOptions {
   selectedDeviceId: string | null;
   /** 本机目录的模型记忆。Agent 当前在其他电脑时,浏览本机目录用它显示各行的档位。 */
   localModelMemory?: ModelMemoryAccessors;
+  /**
+   * 本机为某台电脑记的模型记忆。浏览不是 Agent 当前所在的那台电脑的目录时,用它显示 / 记住
+   * 各行的档位与 Fast(当前所在那台走 modelMemory)。
+   */
+  deviceModelMemory?: (deviceId: string) => ModelMemoryAccessors;
   /**
    * 已建任务传:选中的行不在 Agent 落点那台电脑的目录里 = 把 Agent 挪过去(与跨引擎同一套意图,
    * 下一条消息发送时生效)。返回 false = 没有执行(确认被取消 / 登记失败),面板留在原地。
@@ -1219,7 +1225,7 @@ function ModelSelectorContentView({
     !remoteAgent || browsingSelectedCatalog
       ? modelMemoryProp
       : remoteBrowse
-        ? undefined
+        ? remoteAgent.deviceModelMemory?.(remoteBrowse.deviceId)
         : remoteAgent.localModelMemory;
   // 列表样式试用开关(本机偏好):footer 的切换按钮 + 面板行样式共用。
   const constrainedListMaxHeight = modelListMaxHeightForRows(maxVisibleModelRows);
@@ -1350,10 +1356,14 @@ function ModelSelectorContentView({
   const [editTick, setEditTick] = useState(0);
   const bump = () => setEditTick((n) => n + 1);
   // 跨进程 / 远程改动:device-link push 会直接改底层 store(providerModelMemory /
-  // deviceLinkModelMirror),不经本组件的 editTick。订阅两份 store 的版本号,任一变化即重渲染、
-  // 重算行 effort/fast 显示(本机用 providerModelMemory,远程用被控端镜像)。
+  // deviceLinkModelMirror),不经本组件的 editTick。订阅三份 store 的版本号,任一变化即重渲染、
+  // 重算行 effort/fast 显示(本机用 providerModelMemory,远程控制用被控端镜像,远程 Agent 用
+  // agentDeviceModelMemory)。
   const storeVersion =
-    editTick + useProviderModelMemoryVersion() + useDeviceLinkModelMirrorVersion();
+    editTick +
+    useProviderModelMemoryVersion() +
+    useDeviceLinkModelMirrorVersion() +
+    useAgentDeviceModelMemoryVersion();
   void storeVersion;
 
   const listRef = useRef<HTMLDivElement | null>(null);
@@ -4247,9 +4257,8 @@ export function ModelSelector({
           {/* 图标统一规则:模型条目 icon(AI Gateway / 目录设定)优先、缺省回落
               当前真正路由的来源标(activeSourceId)——客户端不按 model id 猜厂牌。 */}
           {activeSourceId && agentDevice ? (
-            // Agent 在另一台电脑:同一个图标位换成带信号波纹的远程供应商 Logo。
+            // Agent 在另一台电脑:Logo 原大小原位置不变，右上角外侧叠信号波纹。
             <RemoteSourceMark
-              size={17}
               className={cn(
                 'mr-1.5',
                 isCreateAgentVariant

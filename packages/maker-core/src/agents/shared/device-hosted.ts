@@ -2,6 +2,9 @@
  * 设备托管会话(StartSessionOptions.deviceHosted)的共用部分：Agent 在本机运行，任务、项目
  * 文件与命令在同账号另一台电脑上，工具经本机 loopback 隧道回到那台电脑执行。
  */
+import { realpathSync } from 'node:fs';
+import path from 'node:path';
+
 import type { DeviceHostedSession, PiExtraSpawnConfig } from '../base-agent.js';
 
 /** 交给 Pi 内 cindy-bridge 的托管配置(隧道地址、令牌、Agent 主机上的工作目录)。 */
@@ -25,7 +28,61 @@ export function deviceHostedPiEnvValue(hosted: DeviceHostedSession): string {
     platform: hosted.platform,
     shell: hosted.shell,
     ...(hosted.mirrorRoot ? { mirrorRoot: hosted.mirrorRoot } : {}),
+    // 受邀者会话：Pi 子代理据此同样不读本机的说明文件与技能。同账号的值保持原样。
+    ...(hosted.guest ? { guest: true } : {}),
   });
+}
+
+/**
+ * 受邀者会话自己的目录：虚拟工作区根的上一级(会话目录，里面是受邀者带来的项目与个人说明)；
+ * 旧协议没有虚拟工作区时就是本机影子目录。这一级之上属于本机用户。
+ */
+export function deviceHostedGuestSessionRoot(hosted: DeviceHostedSession, localWorkingDir: string): string {
+  return hosted.mirrorRoot ? path.dirname(path.resolve(hosted.mirrorRoot)) : path.resolve(localWorkingDir);
+}
+
+/**
+ * target 是否在 root 之内(含 root 本身)。同时按原路径与真实路径比较(符号链接、macOS 的
+ * /var → /private/var)；Windows 不区分大小写。
+ */
+export function isInsideDeviceHostedRoot(target: string, root: string, platform: NodeJS.Platform = process.platform): boolean {
+  const variants = (value: string): string[] => {
+    const resolved = path.resolve(value);
+    let real = resolved;
+    try {
+      real = realpathSync.native(resolved);
+    } catch {
+      /* 不存在的路径按原样比较 */
+    }
+    return [...new Set([resolved, real])].map((item) => (platform === 'win32' ? item.toLowerCase() : item));
+  };
+  const roots = variants(root);
+  return variants(target).some((candidate) => roots.some((base) => {
+    const relative = path.relative(base, candidate);
+    return relative === ''
+      || (relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
+  }));
+}
+
+/**
+ * 受邀者(另一个账号)的会话：Claude Code 会沿工作目录逐级向上加载 CLAUDE.md 与规则文件，
+ * 会话目录(虚拟工作区根的上一级)之外的那几级属于本机用户，例如家目录里的 CLAUDE.md，
+ * 一律排除。同时给出 `/` 分隔与本机分隔两种写法(Claude Code 用 picomatch 匹配绝对路径)。
+ */
+export function deviceHostedGuestClaudeMdExcludes(hosted: DeviceHostedSession): string[] {
+  if (!hosted.guest || !hosted.mirrorRoot) return [];
+  const sessionRoot = path.dirname(path.resolve(hosted.mirrorRoot));
+  const slash = (value: string) => value.split(path.sep).join('/');
+  const out = new Set<string>();
+  for (let dir = path.dirname(sessionRoot); ; dir = path.dirname(dir)) {
+    for (const file of [path.join(dir, 'CLAUDE.md'), path.join(dir, 'CLAUDE.local.md'), path.join(dir, '.claude', 'CLAUDE.md')]) {
+      out.add(slash(file));
+      out.add(file);
+    }
+    out.add(`${slash(path.join(dir, '.claude', 'rules'))}/**`);
+    if (path.dirname(dir) === dir) break;
+  }
+  return [...out];
 }
 
 /** 隧道上某个 MCP 服务的地址。 */

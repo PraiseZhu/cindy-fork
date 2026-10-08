@@ -52,7 +52,6 @@ import {
   type ThemeColors,
 } from "@/theme";
 import { MobileModelIconMark, MobileProviderMark } from "./MobileProviderMark";
-import { RemoteSourceMark } from "./RemoteSourceMark";
 import { groupSourceFilters } from "./remoteSourceFilters";
 import { SheetModal } from "./SheetModal";
 import { SheetSurface } from "./SheetSurface";
@@ -276,13 +275,7 @@ export function UnifiedModelPickerView(p: UnifiedMobilePickerViewProps) {
     ) : filter.id === "favorites" ? (
       icon(Star, selected || p.filter === "favorites")
     ) : filter.providerMark ? (
-      filter.remote ? (
-        <RemoteSourceMark size={iconSize.action}>
-          <MobileProviderMark {...filter.providerMark} />
-        </RemoteSourceMark>
-      ) : (
-        <MobileProviderMark {...filter.providerMark} />
-      )
+      <MobileProviderMark {...filter.providerMark} remote={filter.remote != null} />
     ) : (
       icon(LayoutGrid)
     );
@@ -669,21 +662,12 @@ export function UnifiedModelPickerView(p: UnifiedMobilePickerViewProps) {
           testID={`${p.testID}.model.${row.key}`}
         >
           <View style={styles.leading}>
-            {row.remoteDevice ? (
-              <RemoteSourceMark size={iconSize.action}>
-                <MobileModelIconMark
-                  icon={row.entry.icon}
-                  {...row.providerMark}
-                  color={colors.textSecondary}
-                />
-              </RemoteSourceMark>
-            ) : (
-              <MobileModelIconMark
-                icon={row.entry.icon}
-                {...row.providerMark}
-                color={colors.textSecondary}
-              />
-            )}
+            <MobileModelIconMark
+              icon={row.entry.icon}
+              {...row.providerMark}
+              color={colors.textSecondary}
+              remote={row.remoteDevice != null}
+            />
           </View>
           <View style={styles.rowMain}>
             <View style={styles.titleLine}>

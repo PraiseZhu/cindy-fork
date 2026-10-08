@@ -1,9 +1,16 @@
+import { mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+
 import { describe, expect, it } from 'vitest';
 
 import type { DeviceHostedSession } from '../base-agent.js';
 import {
   deviceHostedEnvironmentNote,
+  deviceHostedGuestClaudeMdExcludes,
+  deviceHostedGuestSessionRoot,
   deviceHostedPiEnvValue,
+  isInsideDeviceHostedRoot,
   deviceHostedSubagentAllows,
   parseClaudeAgentToolRule,
   type DeviceHostedAgentToolRule,
@@ -24,6 +31,27 @@ function hosted(overrides: Partial<DeviceHostedSession> = {}): DeviceHostedSessi
   };
 }
 
+describe('deviceHostedGuestClaudeMdExcludes', () => {
+  const sessionRoot = path.resolve('/data/cindy/remote-agent/workspaces/c1/s1');
+  const mirrorRoot = path.join(sessionRoot, 'fs');
+  const slash = (value: string) => value.split(path.sep).join('/');
+
+  it('is empty for same-account sessions', () => {
+    expect(deviceHostedGuestClaudeMdExcludes(hosted({ mirrorRoot }))).toEqual([]);
+  });
+
+  it('excludes every CLAUDE.md above the session root, not inside it', () => {
+    const excludes = deviceHostedGuestClaudeMdExcludes(hosted({ mirrorRoot, guest: true }));
+    const parent = path.dirname(sessionRoot);
+    const top = path.parse(sessionRoot).root;
+    expect(excludes).toContain(slash(path.join(parent, 'CLAUDE.md')));
+    expect(excludes).toContain(path.join(parent, 'CLAUDE.local.md'));
+    expect(excludes).toContain(slash(path.join(top, 'CLAUDE.md')));
+    expect(excludes).toContain(`${slash(path.join(parent, '.claude', 'rules'))}/**`);
+    expect(excludes.some((entry) => entry.startsWith(slash(sessionRoot)) || entry.startsWith(sessionRoot))).toBe(false);
+  });
+});
+
 describe('deviceHostedPiEnvValue', () => {
   it('omits the mirror root when the shadow is not mirrored', () => {
     expect(JSON.parse(deviceHostedPiEnvValue(hosted()))).not.toHaveProperty('mirrorRoot');
@@ -32,6 +60,41 @@ describe('deviceHostedPiEnvValue', () => {
   it('carries the mirror root so the bridge can map shadow ancestors back', () => {
     expect(JSON.parse(deviceHostedPiEnvValue(hosted({ mirrorRoot: '/runs/ws/abc/s1/fs' }))).mirrorRoot)
       .toBe('/runs/ws/abc/s1/fs');
+  });
+
+  it('marks shared-user sessions and leaves same-account values unchanged', () => {
+    expect(JSON.parse(deviceHostedPiEnvValue(hosted({ guest: true }))).guest).toBe(true);
+    expect(deviceHostedPiEnvValue(hosted())).toBe(JSON.stringify({
+      url: 'http://127.0.0.1:4000/t/tok/',
+      token: 'tok',
+      cwd: '/Users/me/project',
+      platform: 'darwin',
+      shell: 'zsh',
+    }));
+  });
+});
+
+describe('device-hosted guest session root', () => {
+  it('is the session directory above the virtual workspace, or the shadow directory on the old protocol', () => {
+    const sessionRoot = path.resolve('/data/cindy/remote-agent/workspaces/c1/s1');
+    expect(deviceHostedGuestSessionRoot(hosted({ mirrorRoot: path.join(sessionRoot, 'fs') }), '/ignored')).toBe(sessionRoot);
+    expect(deviceHostedGuestSessionRoot(hosted(), path.resolve('/shadow/dir'))).toBe(path.resolve('/shadow/dir'));
+  });
+
+  it('accepts paths inside the root (including symlinked spellings) and rejects siblings and parents', () => {
+    const base = realpathSync.native(mkdtempSync(path.join(os.tmpdir(), 'device-hosted-root-')));
+    try {
+      const root = path.join(base, 'session');
+      mkdirSync(path.join(root, 'fs', 'workspace'), { recursive: true });
+      expect(isInsideDeviceHostedRoot(root, root)).toBe(true);
+      expect(isInsideDeviceHostedRoot(path.join(root, 'fs', 'workspace', 'SKILL.md'), root)).toBe(true);
+      expect(isInsideDeviceHostedRoot(base, root)).toBe(false);
+      expect(isInsideDeviceHostedRoot(path.join(base, 'session-other', 'x'), root)).toBe(false);
+      expect(isInsideDeviceHostedRoot(path.join(base, '..session', 'x'), root)).toBe(false);
+      expect(isInsideDeviceHostedRoot(path.join(root.toUpperCase(), 'fs'), root, 'win32')).toBe(true);
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
   });
 });
 

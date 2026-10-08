@@ -213,7 +213,23 @@ import {
 } from './project-resource-assembly.js';
 import { applyPiBotSkillPolicy } from './bot-skill-policy.js';
 import { resolveAllowedManagedSkills, snapshotManagedSkillGrants } from '../shared/managed-skill-policy.js';
-import { DEVICE_HOSTED_PI_ENV, deviceHostedPiEnvValue, deviceHostedPiMcpBridge } from '../shared/device-hosted.js';
+import {
+  DEVICE_HOSTED_PI_ENV,
+  deviceHostedGuestSessionRoot,
+  deviceHostedPiEnvValue,
+  deviceHostedPiMcpBridge,
+  isInsideDeviceHostedRoot,
+} from '../shared/device-hosted.js';
+import {
+  CINDY_GUEST_CONTEXT_DATA_FILENAME,
+  CINDY_GUEST_CONTEXT_EXTENSION_FILENAME,
+  CINDY_GUEST_CONTEXT_EXTENSION_SOURCE,
+  collectPiGuestContextFiles,
+  PI_DEVICE_HOSTED_GUEST_FLAGS,
+  piGuestUsesGateway,
+  restrictPiGuestNativeProviders,
+  restrictPiGuestProjectResources,
+} from './device-hosted-guest.js';
 import {
   assertPiSpawnArgvFitsPlatform,
   collectPiProjectResourceCliPaths,
@@ -2217,6 +2233,8 @@ export class PiAgent extends BaseAgent {
       /** Host-installed roots/specs for Pi's own package discovery. */
       packages?: readonly PiNativePackageEntry[];
       disabledSkills?: DisabledSkillLaunchSnapshot;
+      /** 受邀者分享的不是 Cindy 网关：网关 provider 块不写任何模型(Pi 选不到网关路由)。 */
+      omitGatewayModels?: boolean;
     } = {},
   ): Promise<{
     gatewayImageInputByModel: Map<string, boolean>;
@@ -2244,9 +2262,11 @@ export class PiAgent extends BaseAgent {
       }
       this.deps.logger.warn('pi: runtimeConfig.endpoint missing — models.json will have no usable provider');
     }
-    const publicModels = this.deps.resolvePiRuntimeModels?.() ?? this.capabilities.availableModels;
+    const publicModels = opts.omitGatewayModels
+      ? []
+      : this.deps.resolvePiRuntimeModels?.() ?? this.capabilities.availableModels;
     const runtimeModels =
-      retainedRuntimeModel && !publicModels.some((m) => m.id === retainedRuntimeModel.id)
+      !opts.omitGatewayModels && retainedRuntimeModel && !publicModels.some((m) => m.id === retainedRuntimeModel.id)
         ? [...publicModels, retainedRuntimeModel]
         : publicModels;
     const gatewayImageInputByModel = new Map<string, boolean>();
@@ -2546,6 +2566,31 @@ export class PiAgent extends BaseAgent {
     // 电脑的真实工作目录；opts.workingDir 只是本机影子目录(进程 cwd 与项目说明)。
     const hosted = opts.deviceHosted && !remote ? opts.deviceHosted : undefined;
     const logicalWorkingDir = hosted?.workingDir ?? opts.workingDir;
+    // 受邀者(另一个账号)：本机用户的 Pi 包、扩展、托管技能、全局说明与技能偏好都不进入会话，
+    // 受邀者带来的项目扩展也不在本机执行；说明文件只取会话目录内的(见 device-hosted-guest.ts)。
+    const hostedGuest = hosted?.guest === true;
+    const guestRoot = hosted && hostedGuest ? deviceHostedGuestSessionRoot(hosted, opts.workingDir) : undefined;
+    // 受邀者的 Pi 会话文件放在受邀者目录里(分享删除时整体清理)，不与本机用户的会话混放；
+    // 恢复只能打开那里的会话文件，不能凭路径打开本机的其它文件。
+    const guestSessionDir = hosted && hostedGuest && hosted.guestHome
+      ? path.join(hosted.guestHome, 'pi-sessions')
+      : undefined;
+    if (guestSessionDir && opts.resumeSessionId && !isInsideDeviceHostedRoot(opts.resumeSessionId, guestSessionDir)) {
+      throw new Error('[REMOTE_AGENT_INVALID] This conversation cannot be resumed on this computer.');
+    }
+    // 受邀者只能用分享给它的那一个供应商(启动来源就是它)：Pi 原生 provider、子代理可选的模型路由与
+    // 本机 proxy 令牌都只留它；分享的不是 Cindy 网关时也不写网关模型。
+    const guestProviderId = hostedGuest ? hosted?.guestProvider?.providerId : undefined;
+    if (hostedGuest && (!guestProviderId || guestProviderId !== opts.providerId)) {
+      throw new Error('[REMOTE_AGENT_PROVIDER_NOT_ALLOWED] this provider is not allowed for remote use on this computer');
+    }
+    const guestOmitsGateway = guestProviderId !== undefined && !piGuestUsesGateway(guestProviderId);
+    const sessionNativeProviderResolver = (): AgentDeps['resolvePiNativeProviders'] => {
+      const resolve = this.deps.resolvePiNativeProviders;
+      if (!resolve || !guestProviderId) return resolve?.bind(this.deps);
+      return async (input) => restrictPiGuestNativeProviders(await resolve.call(this.deps, input), guestProviderId);
+    };
+    const resolvePiNativeProviders = sessionNativeProviderResolver();
     const sessionPiAutoCompactPct = this.deps.runtimeConfig.piAutoCompactThresholdPct;
 
     // BYOM:host 解析当前会话可用的原生 provider(用户自定义/本地模型)+ 需注入的 env(keys)。
@@ -2553,9 +2598,9 @@ export class PiAgent extends BaseAgent {
     let nativeProviders: PiNativeProviderSpec[] = [];
     let nativeEnv: Record<string, string> = {};
     let nativeResolveFailed = false;
-    if (this.deps.resolvePiNativeProviders) {
+    if (resolvePiNativeProviders) {
       try {
-        const resolved = await this.deps.resolvePiNativeProviders({
+        const resolved = await resolvePiNativeProviders({
           workingDir: opts.workingDir,
           remoteHostId: opts.remoteHostId,
           providerId: opts.providerId,
@@ -2855,7 +2900,8 @@ export class PiAgent extends BaseAgent {
     // for that model. Otherwise the native provider route above is the sole
     // authority; adding a guessed gateway candidate can make a bare alias pick
     // the current `cindy` provider and leak an invalid unnamespaced model id.
-    const routedGatewaySubagentModels = gatewaySubagentModels.filter((model) => {
+    // 受邀者分享的不是网关时，子代理不能改走网关。
+    const routedGatewaySubagentModels = guestOmitsGateway ? [] : gatewaySubagentModels.filter((model) => {
       const resolverContext = { remote };
       const spec = this.deps.resolvePiGatewayModelSpec?.(PI_PROVIDER_ID, model.id, resolverContext);
       const api = spec?.api ?? this.deps.resolvePiGatewayModelApi?.(
@@ -2988,7 +3034,8 @@ export class PiAgent extends BaseAgent {
         this.deps.logger,
       );
     }
-    const allowPiPackageManagement = !reviewMode && !remote && Boolean(this.deps.mutatePiManagedPackage);
+    // 受邀者不能在本机安装 / 更新 / 移除 Pi 包：包装进本机共享的包目录，会在本机执行并影响本机用户自己的任务。
+    const allowPiPackageManagement = !reviewMode && !remote && !hostedGuest && Boolean(this.deps.mutatePiManagedPackage);
     // The UI-request title is visible to every extension in the Pi process.
     // Authenticate the host-backed mutation channel with a per-runtime bearer
     // kept only in Cindy's bridge closure so third-party extensions cannot
@@ -3060,7 +3107,8 @@ export class PiAgent extends BaseAgent {
     const localConfigHomeRuntimeId = remote ? undefined : randomBytes(16).toString('hex');
     // Bot contexts remain profile-only. SSH tasks use the remote user's rules,
     // never the controlling desktop's personal instructions.
-    const globalContextFiles = opts.botRuntimeProfile ? [] : await readPiGlobalContext(
+    // 受邀者会话不带本机用户的全局说明(~/.pi/agent/AGENTS.md 等)。
+    const globalContextFiles = opts.botRuntimeProfile || hostedGuest ? [] : await readPiGlobalContext(
       this.deps.resolvePiGlobalContextHome?.(opts.remoteHostId),
       fileOps,
     );
@@ -3142,6 +3190,7 @@ export class PiAgent extends BaseAgent {
         remote, fileOps, contextWindow: startupContextWindow,
         workingContextWindow: startupWorkingContextWindow,
         piCompactionPct: sessionPiAutoCompactPct,
+        ...(guestOmitsGateway ? { omitGatewayModels: true } : {}),
       },
     );
     const explicitlyRequestedGateway = isExplicitPiGatewayProviderId(opts.providerId);
@@ -3157,7 +3206,7 @@ export class PiAgent extends BaseAgent {
     }
     const bashPackageHome = joinRemotePosixPath(configHome, 'bash-package-home');
     await mkdirp(bashPackageHome);
-    const sessionDir = joinRemotePosixPath(agentHome, 'sessions');
+    const sessionDir = guestSessionDir ?? joinRemotePosixPath(agentHome, 'sessions');
     await mkdirp(sessionDir);
 
     // cindy-bridge extension:每次 startSession 覆写,保证桥代码与本版本一致。
@@ -3193,6 +3242,15 @@ export class PiAgent extends BaseAgent {
     if (localSubagentSupported) {
       await writeFile(subagentExtensionPath, CINDY_SUBAGENT_EXTENSION_SOURCE);
       await writeFile(subagentRunnerPath, CINDY_SUBAGENT_RUNNER_SOURCE, 0o600);
+    }
+    // 受邀者：会话目录内的说明文件由这个扩展放回系统提示(Pi 以 --no-context-files 启动)。
+    const guestContextExtensionPath = guestRoot
+      ? joinRemotePosixPath(extensionsDir, CINDY_GUEST_CONTEXT_EXTENSION_FILENAME)
+      : undefined;
+    if (guestRoot && guestContextExtensionPath) {
+      const files = await collectPiGuestContextFiles(opts.workingDir, guestRoot);
+      await writeFile(joinRemotePosixPath(extensionsDir, CINDY_GUEST_CONTEXT_DATA_FILENAME), JSON.stringify({ files }), 0o600);
+      await writeFile(guestContextExtensionPath, CINDY_GUEST_CONTEXT_EXTENSION_SOURCE);
     }
 
     // 权限档文件:extension 每次 tool_call 现读(热切换);读不到按 ask fail-closed。
@@ -3634,7 +3692,8 @@ export class PiAgent extends BaseAgent {
 
     // 追加而非替换:pi 默认 prompt(工具用法/工程约定)原样保留,只追加 host 产品段
     // 与用户段。前缀稳定(默认 prompt 静态),易变内容禁止进入(缓存规则 3.1)。
-    const ghostRosterPrompt = reviewMode || opts.botRuntimeProfile
+    // 受邀者(另一个账号)的托管会话不带本机的插件清单。
+    const ghostRosterPrompt = reviewMode || opts.botRuntimeProfile || hostedGuest
       ? ''
       : (this.deps.getGhostRosterPrompt?.({ workingDir: opts.workingDir }) ?? '');
     const appendSections = [
@@ -3691,7 +3750,8 @@ export class PiAgent extends BaseAgent {
     // snapshot. Freeze it once per new runtime, then assemble only its eligible
     // skills. Missing/throwing authorities and paths fail closed; never infer
     // approval from permission mode, MCP/plugin state, or caller vendor options.
-    const disabledSkillPaths = opts.remoteHostId || opts.botRuntimeProfile || reviewMode
+    // 受邀者不读本机用户的技能停用偏好(本机技能整体不加载)。
+    const disabledSkillPaths = opts.remoteHostId || opts.botRuntimeProfile || reviewMode || hostedGuest
       ? [] : [...(this.deps.getDisabledSkillPaths?.() ?? [])];
     let disabledSkillLaunch = snapshotDisabledSkillLaunch(disabledSkillPaths);
     const disabledSkillSnapshot = disabledSkillLaunch.identities;
@@ -3744,7 +3804,8 @@ export class PiAgent extends BaseAgent {
       packageRoots: string[];
     } = { extensions: [], skills: [], promptTemplates: [], packageRoots: [] };
     let nativePackagePaths: PiNativePackageEntry[] = [];
-    if (!reviewMode && !opts.remoteHostId) {
+    // 受邀者不加载本机用户安装的 Pi 包(其中的扩展会在本机执行)。
+    if (!reviewMode && !opts.remoteHostId && !hostedGuest) {
       if (this.deps.resolvePiNativePackagePaths) {
         try {
           nativePackagePaths = await this.deps.resolvePiNativePackagePaths();
@@ -3809,8 +3870,11 @@ export class PiAgent extends BaseAgent {
 
     // Local root tasks load project skills/prompts/extensions in place via
     // explicit CLI flags. Keep --no-approve so `.pi/settings.json` is unread.
+    // 受邀者：只要会话目录内的技能与提示词模板，项目扩展不加载(会在本机执行)。
     const collectedProjectResources = loadProjectResourcesInPlace
-      ? collectPiProjectResourceCliPaths(opts.workingDir)
+      ? guestRoot
+        ? restrictPiGuestProjectResources(collectPiProjectResourceCliPaths(opts.workingDir), guestRoot)
+        : collectPiProjectResourceCliPaths(opts.workingDir)
       : emptyPiProjectResourceCliPaths();
     const projectResourceCli = loadProjectResourcesInPlace
       ? {
@@ -3829,8 +3893,9 @@ export class PiAgent extends BaseAgent {
     let args: string[];
     try {
       const managedSkillGrants = snapshotManagedSkillGrants(opts.botRuntimeProfile?.skillPolicy);
-      const managedSkills = opts.remoteHostId || reviewMode ? [] : await this.deps.getManagedSkills?.() ?? [];
-      const managedDisabledPaths = snapshotDisabledSkillLaunch(opts.remoteHostId || reviewMode ? [] : this.deps.getDisabledSkillPaths?.() ?? []);
+      // 受邀者不带本机安装的托管技能(属于本机用户与其组织)。
+      const managedSkills = opts.remoteHostId || reviewMode || hostedGuest ? [] : await this.deps.getManagedSkills?.() ?? [];
+      const managedDisabledPaths = snapshotDisabledSkillLaunch(opts.remoteHostId || reviewMode || hostedGuest ? [] : this.deps.getDisabledSkillPaths?.() ?? []);
       const managedSourceIdentities = new Set(managedSkills.flatMap((skill) =>
         skill.path ? [canonicalSkillPath(skill.path)] : []));
       const managedSourcePaths = new Set(managedSkills.flatMap((skill) => skill.path ? [path.resolve(skill.path)] : []));
@@ -3869,11 +3934,19 @@ export class PiAgent extends BaseAgent {
         // the cwd chain — their context is the Bot profile, not the workspace.
         ...(opts.botRuntimeProfile ? ['--no-context-files'] : []),
         ...(botSkillSelection.disableImplicitSkills ? ['--no-skills'] : []),
+        // 受邀者：不发现本机用户的技能、模板与会话目录之外的说明文件；受邀者自己的用下面的显式路径。
+        ...(hostedGuest
+          ? PI_DEVICE_HOSTED_GUEST_FLAGS.filter((flag) => !(
+            (flag === '--no-context-files' && opts.botRuntimeProfile)
+            || (flag === '--no-skills' && botSkillSelection.disableImplicitSkills)))
+          : []),
         ...additionalSkillPaths.filter((skillPath) => !projectResourceCli.skills
           .some((existing) => canonicalSkillPath(existing) === canonicalSkillPath(skillPath)))
           .flatMap((skillPath) => ['--skill', skillPath]),
         ...(managedSkillRoot ? ['--skill', managedSkillRoot] : []),
         ...(appendSystemPrompt.length > 0 ? ['--append-system-prompt', appendSystemPrompt] : []),
+        // 受邀者的说明文件扩展排在 bridge 之前：托管时 bridge 会按当前选项渲染整段系统提示。
+        ...(guestContextExtensionPath ? ['--extension', guestContextExtensionPath] : []),
         '--extension',
         bridgeExtensionPath,
         ...(localSubagentSupported ? ['--extension', subagentExtensionPath] : []),
@@ -5246,7 +5319,10 @@ export class PiAgent extends BaseAgent {
       // 传当前 session model：未命中视觉桥目标模型的 Pi 模型不注入 env、不注册
       // vision 工具（零干扰，不因别的模型配置了视觉桥而改变本模型工具面）。
       // sessionId 供 OpenCode Go 后端确定性派生会话头（spawn env 必须稳定）。
-      const visionBridgeEnv = this.deps.resolvePiVisionBridgeEnv?.(opts.model, opts.sessionId) ?? null;
+      // 供应商分享受邀者不注入：视觉后端是本机用户自己的其它供应商，且 vision 工具直接读本机文件。
+      const visionBridgeEnv = hostedGuest
+        ? null
+        : this.deps.resolvePiVisionBridgeEnv?.(opts.model, opts.sessionId) ?? null;
       // 这些值必须留在 Pi 父进程，供 models.json 的 $ENV 请求期解析及 bridge
       // client 使用；cindy-bridge 用该**仅含变量名**的清单在 bash spawn 边界剥离
       // 真值，阻止 LLM shell 绕过工具审批直连 localhost proxy/MCP 或盗用 BYOM key。
@@ -6292,9 +6368,10 @@ export class PiAgent extends BaseAgent {
       const sameRoute = model === mutableModel && requestedProviderId === mutableProviderId;
       let latestProviders = nativeProviders;
       let latestEnv = nativeEnv;
-      if (this.deps.resolvePiNativeProviders) {
+      const resolveLatestNativeProviders = sessionNativeProviderResolver();
+      if (resolveLatestNativeProviders) {
         try {
-          const resolved = await this.deps.resolvePiNativeProviders({
+          const resolved = await resolveLatestNativeProviders({
             workingDir: opts.workingDir,
             remoteHostId: opts.remoteHostId,
             providerId: requestedProviderId,
@@ -6404,7 +6481,8 @@ export class PiAgent extends BaseAgent {
           contextWindow: targetContextWindow ?? ctx.contextWindow ?? startupContextWindow,
           workingContextWindow: this.deps.resolveModelContextLimit?.(sourceId, model) ?? undefined,
           piCompactionPct: sessionPiAutoCompactPct,
-          packages: nativePackagePaths, disabledSkills: disabledSkillLaunch },
+          packages: nativePackagePaths, disabledSkills: disabledSkillLaunch,
+          ...(guestOmitsGateway ? { omitGatewayModels: true } : {}) },
       );
       if (gateway && !projected.gatewayApiByModel.has(model)) {
         return { action: 'unavailable', targetContextWindow, windowVerified: false,
@@ -6453,7 +6531,7 @@ export class PiAgent extends BaseAgent {
       model: string,
       requestedProviderId: string | null | undefined,
     ): Promise<void> => {
-      const live = await this.deps.resolvePiNativeProviders?.({
+      const live = await sessionNativeProviderResolver()?.({
         workingDir: opts.workingDir,
         remoteHostId: opts.remoteHostId,
         providerId: requestedProviderId,
@@ -6537,7 +6615,8 @@ export class PiAgent extends BaseAgent {
           { remote, fileOps, contextWindow: nextDescriptor?.contextWindow ?? ctx.contextWindow,
             workingContextWindow: this.deps.resolveModelContextLimit?.(sourceId, model) ?? undefined,
             piCompactionPct: sessionPiAutoCompactPct, packages: nativePackagePaths,
-            disabledSkills: disabledSkillLaunch },
+            disabledSkills: disabledSkillLaunch,
+            ...(guestOmitsGateway ? { omitGatewayModels: true } : {}) },
         );
       } catch (error) {
         await restoreFilesOrTerminate();

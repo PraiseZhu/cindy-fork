@@ -503,10 +503,10 @@ describe('ChatInput model source switching wiring', () => {
     ]) {
       expect(draftBlock).toContain(write);
     }
-    // 远程 Agent 换落点:记忆按目标目录写(回本机写本机预设,去另一台电脑不写),
-    // 落点原样交给草稿层。
-    expect(draftBlock).toContain('selection.agentDevice === null');
-    expect(draftBlock).toContain('? LOCAL_MODEL_MEMORY');
+    // 远程 Agent 换落点:记忆按目标目录写(回本机写本机预设,去另一台电脑写本机为那台记的
+    // 一份),落点原样交给草稿层。
+    expect(draftBlock).toContain('? agentDeviceModelMemoryAccessors(selection.agentDevice.deviceId)');
+    expect(draftBlock).toContain(': LOCAL_MODEL_MEMORY;');
     expect(draftBlock).toContain('agentDevice: selection.agentDevice');
     // 「恢复推荐」已先删除记忆键；直通草稿时不得把推荐档位重新写成 override。
     expect(draftBlock).toContain('!selection.resetToRecommended');

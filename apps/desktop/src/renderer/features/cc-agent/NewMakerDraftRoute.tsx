@@ -62,6 +62,8 @@ import {
 } from '@/components/new-chat/AddRemoteProjectDialog';
 import { useHasAnyRemoteTarget } from '@/hooks/useHasAnyReadyRemoteHost';
 import { useSelectableDevices } from '@/hooks/useControllableDevices';
+import { useProviderShareAgentDevices } from '@/features/provider-share/useProviderShareAgentDevices';
+import { isProviderShareAgentDeviceId } from '../../../shared/providerShare';
 import { useProviderOnboarding } from '@/hooks/useProviderOnboarding';
 import { HomeZeroModelAction } from './HomeZeroModelAction';
 import { resolveDeviceLinkSubmission } from './deviceLinkCreateArgs';
@@ -116,6 +118,7 @@ import {
   setProviderModelFast,
   useProviderModelMemoryVersion,
 } from '@/state/providerModelMemory';
+import { useAgentDeviceModelMemoryVersion } from '@/state/agentDeviceModelMemory';
 import {
   deliverRecoverableHandoff,
   rememberRecoverableHandoff,
@@ -915,15 +918,20 @@ export function NewMakerDraftRoute() {
    * 模型 = Agent 在那台运行)。只有已允许远程调用的供应商会投影出来;没有可用供应商的
    * 设备不会占模型列表的位置。当前落点即使掉线也保留,让用户看得到、换得回来。
    */
+  // 供应商分享：别人分享给我的供应商(`share:<id>`)同样是落点，只并进模型选择器，不进设备切换器。
+  const { devices: providerShareDevices } =
+    useProviderShareAgentDevices([effectiveAgentDeviceId]);
   const remoteAgentDevices = useMemo(
-    () =>
-      selectableDevices
+    () => [
+      ...selectableDevices
         .filter(
           (device) =>
             device.online || device.deviceId === effectiveAgentDeviceId,
         )
         .map(({ deviceId, name }) => ({ deviceId, name })),
-    [selectableDevices, effectiveAgentDeviceId],
+      ...providerShareDevices,
+    ],
+    [selectableDevices, providerShareDevices, effectiveAgentDeviceId],
   );
   /**
    * 模型目录所在的电脑:任务建到远程设备时是那台;Agent 在另一台电脑运行时也是那台(模型、
@@ -1560,14 +1568,22 @@ export function NewMakerDraftRoute() {
   ]);
 
   // 运行 Agent 的电脑只提供模型目录：任务在本机，没有远程草稿默认值，改用本次运行内对这台
-  // 电脑的上一次选择(见 agentDeviceDraftMemory)。
+  // 电脑的上一次选择 + 本机为这台电脑记的每模型档位(见 agentDeviceDraftMemory)。
+  const agentDeviceModelMemoryVersion = useAgentDeviceModelMemoryVersion();
   const deviceDraftDefaultsReady = isAgentDeviceDraft || remoteDraftState.status === 'ready';
   const deviceDraftDefaults = useMemo<RemoteDraftDefaults | null>(
     () =>
       isAgentDeviceDraft && effectiveAgentDeviceId
         ? recallAgentDeviceSelection(effectiveAgentDeviceId, capabilityAgentKind)
         : remoteDraftState.value,
-    [isAgentDeviceDraft, effectiveAgentDeviceId, capabilityAgentKind, remoteDraftState.value],
+    // agentDeviceModelMemoryVersion:档位记忆变了要重新取回,切模型时才按最新档位还原。
+    [
+      isAgentDeviceDraft,
+      effectiveAgentDeviceId,
+      capabilityAgentKind,
+      remoteDraftState.value,
+      agentDeviceModelMemoryVersion,
+    ],
   );
 
   // seed dlSel:等被控端 capabilities + 草稿值都就绪后播种。切设备 / vendor 必须重种；同一目标
@@ -3031,8 +3047,13 @@ export function NewMakerDraftRoute() {
 
   // 运行 Agent 的电脑同理：被解除配对 / 撤销远程控制后不再可选，回到「Agent 在本机」。
   // 任务本来就在本机，项目、附件与草稿都不用动。
+  // 分享来的供应商(`share:<id>`)不在设备列表里，也不自动回落：已收到的分享由同区域与跨区域
+  // 两路分别加载，任一路还没到或暂时失败时列表并不完整，不能据此判定分享已不在。草稿保留原
+  // 选择，发送时由主进程给出「已暂停 / 已不可用」的原因，用户可换模型。
   useEffect(() => {
-    if (!effectiveAgentDeviceId || !selectableDevicesLoaded) return;
+    if (!effectiveAgentDeviceId) return;
+    if (isProviderShareAgentDeviceId(effectiveAgentDeviceId)) return;
+    if (!selectableDevicesLoaded) return;
     if (selectableDevices.some((d) => d.deviceId === effectiveAgentDeviceId)) return;
     log.warn('[new-maker] selected agent computer is no longer selectable, running the agent here');
     patchDraft({ agentDeviceId: null, agentDeviceName: null });

@@ -454,7 +454,7 @@ export const SessionItem = withSidebarNavigation<SessionItemProps>(function Sess
   const isAutomationGenerated = isAutomationGeneratedSession(session);
   // heartbeat schedule 绑定标识(targetSessionId 指向本会话);schedule 删除/过期后
   // schedulesStore 'changed' 刷新 → 列表为空 → 徽章消失。
-  const boundSchedules = useSessionBoundSchedules(session.id);
+  const boundSchedules = useSessionBoundSchedules(session.id, session.deviceLinkDeviceId);
   const hasAutomationMeta = boundSchedules.length > 0 || isAutomationGenerated;
   // 单个 automation-generated 会话行的「schedule 反查」:sessionId → scheduleId 走
   // sidebar-index-runs(Session 上没有 scheduleId 字段)。用于两处:
@@ -1058,7 +1058,11 @@ export const SessionItem = withSidebarNavigation<SessionItemProps>(function Sess
           {/* 绑定徽章优先于普通自动化 Timer:persistentSession 会话两者皆真,
               主图标统一为 Timer，绑定态额外承载频率/暂停信息。 */}
           {boundSchedules.length > 0 ? (
-            <ScheduleBindingBadge schedules={boundSchedules} activeForeground={isActive} />
+            <ScheduleBindingBadge
+              schedules={boundSchedules}
+              deviceLinkDeviceId={session.deviceLinkDeviceId}
+              activeForeground={isActive}
+            />
           ) : isAutomationGenerated ? (
             <AutomationSessionButton sessionId={session.id} size={10} activeForeground={isActive} />
           ) : null}
