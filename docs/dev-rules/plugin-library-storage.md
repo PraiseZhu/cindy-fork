@@ -36,8 +36,12 @@ owners/<ownerKey>/
 ├── libraries/<ghostId>/          # 系统管理默认根
 ├── libraries-binding.json        # 自定义位置持久 binding（原子写）
 ├── libraries-trash/<ghostId>-<ts>/  # 删除通道的 30 天回收站
+├── library-reattach.json         # 设置页「接回以前的作品数据」未完成时的日志
 └── library-staging/<ghostId>/    # H1 上传 staging（不可随 Library 根迁移）
 ```
+
+这里的 `<ghostId>` 是实例键（`installedGhostStoragePart`）：升级前的旧安装是裸 id，
+namespace 之后的新安装是 `_ns__<org>__<id>` / `_root__<id>`。
 
 自定义根 = `<用户所选父目录>/<ghostId>`（binding 记录 realpath 快照 + 文件
 identity + generation）。库内宿主命名空间 `.cindy-library/`（meta/usage/tmp/
@@ -62,6 +66,14 @@ backups）对插件不可达——路径语法段首不许点，协议层天然�
    事实不因重装消失）。删除 = 设置页独立破坏性确认 + `trashGhostLibrary`
    （rename 进回收站，漂移时 NOT_FOUND 不误删）。内置插件退役清理
    （`cleanupRetiredGhostData`）**不得**触及 Library。
+   **重装接回**：企业市场首次安装若找不到可复用的实例记录，市场账本又证明裸 id 下的
+   旧库属于同一插件编号、同一组织（升级前已卸载、未打 namespace 标记），安装直接收回
+   裸 id 键，旧库与 binding 原样接上；证明不了但裸 id 下有旧库时，由 Main 在安装确认
+   之后询问用户（后台 / 默认安装不询问，按新键）。已经拿到新键空库的实例，可在设置页
+   「接回以前的作品数据」：当前库与 staging 进回收站，旧库改名到当前实例键并改 meta
+   身份；动手前写 `library-reattach.json`，每步可重跑，下次作品库请求或打开设置页时续完；
+   换库前停插件运行时、换完重启并通知面板从磁盘重载。属于其他组织或仍在启用的记录
+   不让出裸 id；接回只动作品库与 staging，不碰密钥、账号、KV 与私有目录。
 3. **owner 隔离**：会话绑定 `activeOwnerScopeKey` 每请求比对；切换在途由
    `interruptGhostCallsForAccountBoundary` 的 `disposeAll` 收口（在途写入随串行
    链归属原 owner）。根解析每次经 binding store 现解。
