@@ -51,6 +51,7 @@ function deps(overrides: Partial<LegacyLibraryReattachDeps> = {}): LegacyLibrary
     relocateStaging: async (dir, fromId, toId) => {
       await relocateLibraryMetaOwner(dir, fromId, toId);
     },
+    clearPanelStorage: async () => {},
     assertCurrent: () => {},
     ...overrides,
   };
@@ -162,5 +163,37 @@ describe('legacy library reattach', () => {
     }));
     expect(relocateCustomBinding).toHaveBeenCalledWith(FROM, TO);
     expect(readMeta(path.join(custom, TO)).ghostId).toBe(TO);
+  });
+
+  it('clears the panel storage once, after the swap is finished', async () => {
+    plantDefaultPair();
+    const journalFile = path.join(root, 'library-reattach.json');
+    const clearPanelStorage = vi.fn(async () => {
+      // The swap is complete: the old library is in place and the journal is gone.
+      expect(fs.readFileSync(path.join(root, 'libraries', TO, 'marker.txt'), 'utf8')).toBe('old');
+      expect(fs.existsSync(journalFile)).toBe(false);
+    });
+    await startLegacyLibraryReattach({ fromId: FROM, toId: TO, oldLocation: 'default', now: 7 }, deps({ clearPanelStorage }));
+    expect(clearPanelStorage).toHaveBeenCalledOnce();
+    expect(clearPanelStorage).toHaveBeenCalledWith(TO);
+  });
+
+  it('keeps the panel storage when the swap stops midway, and clears it when the journal finishes', async () => {
+    plantDefaultPair();
+    const clearPanelStorage = vi.fn(async () => {});
+    let checks = 0;
+    await expect(startLegacyLibraryReattach({ fromId: FROM, toId: TO, oldLocation: 'default', now: 7 }, deps({
+      clearPanelStorage,
+      assertCurrent: () => {
+        checks += 1;
+        if (checks === 5) throw new Error('stopped');
+      },
+    }))).rejects.toThrow('stopped');
+    expect(clearPanelStorage).not.toHaveBeenCalled();
+    const journal = await readLegacyLibraryReattachJournal(path.join(root, 'library-reattach.json'));
+    await finishLegacyLibraryReattach(journal!, deps({ clearPanelStorage }));
+    expect(clearPanelStorage).toHaveBeenCalledOnce();
+    expect(clearPanelStorage).toHaveBeenCalledWith(TO);
+    expectReattached();
   });
 });

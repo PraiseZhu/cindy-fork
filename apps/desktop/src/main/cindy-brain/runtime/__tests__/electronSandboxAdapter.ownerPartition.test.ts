@@ -13,6 +13,7 @@ const harness = vi.hoisted(() => {
     downloadHandler?: (event: { preventDefault(): void }) => void;
     session?: object;
     fetch: ReturnType<typeof vi.fn>;
+    clearStorageData: ReturnType<typeof vi.fn>;
   };
   const sessions = new Map<string, RegisteredSession>();
   const contents = new Map<number, { session: object; isDestroyed(): boolean; executeJavaScript: ReturnType<typeof vi.fn> }>();
@@ -41,6 +42,7 @@ const harness = vi.hoisted(() => {
             created.protocolHandler = handler;
           },
         ),
+        clearStorageData: vi.fn(async () => {}),
       };
       created.session = {
         setPermissionRequestHandler: created.permissionRequest,
@@ -49,6 +51,7 @@ const harness = vi.hoisted(() => {
         webRequest: { onBeforeRequest: created.beforeRequest },
         protocol: { handle: created.protocolHandle },
         fetch: created.fetch,
+        clearStorageData: created.clearStorageData,
       };
       sessions.set(partition, created);
       return created.session;
@@ -119,6 +122,7 @@ import { handleGhostOauthRequest } from '../ghostOauthEndpoint.js';
 import { handleGhostSecretsRequest } from '../ghostSecretsEndpoint.js';
 import { ownerScopedGhostPartitionForInstalledGhost } from '../../ghostWebviewPartition.js';
 import {
+  clearGhostPartitionStorage,
   electronSandboxAdapter,
   invokeGhostMobileRelay,
   fetchGhostMobilePage,
@@ -400,6 +404,20 @@ describe('electronSandboxAdapter owner partition', () => {
       1,
       '/plugins/_ns/_root/shared',
     ))).toBe(true);
+  });
+
+  it('clears only the registered receipt partition after a library replace, and leaves cookies alone', async () => {
+    const installed = ghost('library-replaced');
+    const partition = ownerScopedGhostPartitionForInstalledGhost(installed, harness.activeOwner)!;
+    // Never opened in this run: nothing to clear, and no session is created for it.
+    await clearGhostPartitionStorage(installed);
+    expect(harness.sessions.has(partition)).toBe(false);
+    ensureGhostProtocolRegistered(installed);
+    await clearGhostPartitionStorage(installed);
+    expect(harness.sessions.get(partition)!.clearStorageData).toHaveBeenCalledOnce();
+    expect(harness.sessions.get(partition)!.clearStorageData).toHaveBeenCalledWith({
+      storages: ['indexdb', 'localstorage', 'filesystem', 'websql', 'serviceworkers', 'cachestorage'],
+    });
   });
 
   it('reuses the directory key for an in-place stamp but opens a separate session per committed namespace', () => {
