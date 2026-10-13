@@ -442,7 +442,7 @@ import {
   type LegacyLibraryReattachDeps,
 } from './libraryLegacyReattach.js';
 import { migrateGhostLibrary } from './libraryMigrate.js';
-import { setGhostLibraryFileResolver } from './runtime/electronSandboxAdapter.js';
+import { clearGhostPartitionStorage, setGhostLibraryFileResolver } from './runtime/electronSandboxAdapter.js';
 import {
   createBetterSqliteDatabase,
   resolveBetterSqliteModuleEntry,
@@ -6308,6 +6308,17 @@ function legacyLibraryReattachDeps(assertCurrent: () => void): LegacyLibraryReat
     },
     relocateStaging: (root, fromId, toId) =>
       relocateLibraryStagingOwner(root, fromId, toId, ownerKey, assertCurrent),
+    // 库已换完：清不掉只记日志，不把已完成的换库报成失败。
+    clearPanelStorage: async (id) => {
+      const ghost = findGhostForInstanceId(id);
+      if (!ghost) return;
+      await clearGhostPartitionStorage(ghost).catch((error: unknown) => {
+        log.warn('library reattach panel storage clear failed', {
+          id,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      });
+    },
     assertCurrent,
   };
 }

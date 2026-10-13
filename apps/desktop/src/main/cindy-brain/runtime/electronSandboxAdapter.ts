@@ -328,6 +328,22 @@ const partitionTargetGuard = new Map<string, () => boolean>();
 type GhostProtocolOwnerIdentity = Pick<ActiveAppSession, 'mode' | 'dataOwnerId' | 'generation'>;
 const partitionOwner = new Map<string, GhostProtocolOwnerIdentity>();
 
+/** 作品库换掉后要清的网页存储；cookies 与着色器缓存不属于插件数据，不动。 */
+const LIBRARY_REPLACED_STORAGES: Array<'indexdb' | 'localstorage' | 'filesystem' | 'websql' | 'serviceworkers' | 'cachestorage'> = [
+  'indexdb', 'localstorage', 'filesystem', 'websql', 'serviceworkers', 'cachestorage',
+];
+
+/**
+ * 作品库被换掉后清空插件分区里的网页存储。分区是纯内存的，只重载面板清不掉；插件若在里面
+ * 缓存画布（如 Mivo Canvas 的 IndexedDB），重载后会拿被换下那座库的缓存盖掉接回来的库里
+ * 同 id 的内容。本次运行没建过这个分区（面板与电子脑都没开过）就没有东西可清。
+ */
+export async function clearGhostPartitionStorage(ghost: InstalledGhost): Promise<void> {
+  const partition = ownerScopedGhostPartitionForInstalledGhost(ghost, getActiveAppSession());
+  if (!partition || !partitionRegistered.has(partition)) return;
+  await session.fromPartition(partition).clearStorageData({ storages: LIBRARY_REPLACED_STORAGES });
+}
+
 function ghostProtocolOwnerSnapshot(owner: ActiveAppSession): GhostProtocolOwnerIdentity {
   return { mode: owner.mode, dataOwnerId: owner.dataOwnerId, generation: owner.generation };
 }

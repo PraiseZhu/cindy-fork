@@ -7,7 +7,8 @@
  *
  *   1. 当前实例的新库（及暂存区）移入作品库回收站（保留 30 天）；
  *   2. 旧库改名到当前实例键（自定义位置由 binding store 搬，它自带日志）；
- *   3. 改旧库与暂存区里记录的身份。
+ *   3. 改旧库与暂存区里记录的身份；
+ *   4. 清掉插件分区里的网页存储，面板重载后只从磁盘读接回来的库。
  *
  * 动手前先写日志，每一步都可以重跑：中途崩溃后，下次打开作品库前按日志做完。
  * 纯 Node + 依赖注入，单测拿 tmpdir 直测。
@@ -46,6 +47,11 @@ export interface LegacyLibraryReattachDeps {
   customRoot(id: string): Promise<string | null>;
   relocateMeta(root: string, fromId: string, toId: string): Promise<void>;
   relocateStaging(root: string, fromId: string, toId: string): Promise<void>;
+  /**
+   * 换库完成后清掉 toId 插件分区里的网页存储（IndexedDB、localStorage 等）。分区是纯内存的，
+   * 只重载面板清不掉；插件若把画布缓存在里面，重载后会拿被换下那座库的缓存盖掉接回来的库。
+   */
+  clearPanelStorage(toId: string): Promise<void>;
   assertCurrent(): void;
 }
 
@@ -172,4 +178,6 @@ export async function finishLegacyLibraryReattach(
   await deps.relocateStaging(deps.stagingRoot(toId), fromId, toId);
   deps.assertCurrent();
   await fs.promises.rm(deps.journalFile(), { force: true });
+  // 库已换完：插件分区里留着的是被换下那座库的缓存。中途崩溃时分区随进程消失，续完时再清一次也无害。
+  await deps.clearPanelStorage(toId);
 }
