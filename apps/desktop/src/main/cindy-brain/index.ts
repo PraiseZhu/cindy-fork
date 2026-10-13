@@ -1856,6 +1856,8 @@ export function getGhostManager(): GhostManager {
       },
       readUnconfirmedConfirmationEvidence: (record) =>
         getNamespaceMigrationHost().readUnconfirmedConfirmationEvidence(record),
+      canReclaimLegacyBareInstance: (input) =>
+        getNamespaceMigrationHost().canReclaimLegacyBareInstance(input),
       isNamespaceMigrationBusy: (ghostId) => getNamespaceMigrationHost().isNamespaceMigrationBusy(ghostId),
       marketIdentityForInstance: (instance) => {
         try {

@@ -289,6 +289,11 @@ export interface GhostManagerOptions {
     namespace: string | null;
     packageSha256: string | null;
   }) => { pluginId: string } | null;
+  /**
+   * Market evidence that a bare-id library left by an organization install
+   * removed before the registry existed belongs to this organization plugin.
+   */
+  canReclaimLegacyBareInstance?: (input: { ghostId: string; namespace: string; pluginId: string }) => boolean;
   canResumePendingResidentOffline?: (ghostId: string) => boolean;
   onResumePendingResidentOffline?: (ghost: InstalledGhost) => void;
   preparePendingResidentForMigration?: (ghostId: string) => Promise<boolean>;
@@ -810,6 +815,14 @@ export class GhostManager {
       }
       const reusable = findReusableInstance(registry, { ghostId, namespace, source, pluginId });
       if (reusable) return { kind: 'ok', instanceKey: reusable.instanceKey, relId: reusable.contentRelId };
+      // Without a registry record, the bare key is free. The same organization
+      // plugin takes it back, so its leftover library opens again.
+      if (namespace !== null && source === 'market' && pluginId &&
+          !Object.values(registry.instances).some((record) =>
+            record.instanceKey === ghostId || record.contentRelId === ghostId) &&
+          this.options.canReclaimLegacyBareInstance?.({ ghostId, namespace, pluginId }) === true) {
+        return { kind: 'ok', instanceKey: ghostId, relId: ghostId };
+      }
     }
     return { kind: 'ok', instanceKey, relId };
   }

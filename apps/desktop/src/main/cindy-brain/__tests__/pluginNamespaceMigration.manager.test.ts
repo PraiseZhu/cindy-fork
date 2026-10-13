@@ -1198,6 +1198,35 @@ describe('plugin instance registry boundaries', () => {
     expect(fs.existsSync(path.join(rootDir, '_ns', '_root', 'hello'))).toBe(true);
   });
 
+  it('takes back the bare key for a removed pre-registry organization install', async () => {
+    const canReclaimLegacyBareInstance = vi.fn(() => true);
+    const reclaiming = createManager({ mutateSnapshot, canReclaimLegacyBareInstance });
+    await expect(reclaiming.install(await makeCindy('hello'), {
+      namespace: 'acme', registrySource: 'market', pluginId: 'plugin-a',
+    })).resolves.toMatchObject({ ghost: { instanceKey: 'hello', namespace: 'acme' } });
+    expect(canReclaimLegacyBareInstance).toHaveBeenCalledWith({
+      ghostId: 'hello', namespace: 'acme', pluginId: 'plugin-a',
+    });
+    expect(fs.existsSync(path.join(rootDir, 'hello'))).toBe(true);
+    const registry = JSON.parse(fs.readFileSync(
+      pluginInstanceRegistryPath(path.join(workDir, 'ghosts-install-state')), 'utf8',
+    )) as { instances: Record<string, { namespace: string | null; namespaceState: string; contentRelId: string }> };
+    expect(registry.instances['hello']).toMatchObject({
+      namespace: 'acme', namespaceState: 'confirmed', contentRelId: 'hello',
+    });
+  });
+
+  it('keeps the bare key for the instance that still owns it', async () => {
+    const reclaiming = createManager({ mutateSnapshot, canReclaimLegacyBareInstance: () => true });
+    await plantLegacyInstall('hello');
+    reclaiming.list();
+    await expect(reclaiming.commitPendingNamespace('hello', null, 'explicit-root')).resolves.toEqual({ ok: true });
+    await expect(reclaiming.uninstall('hello', { notify: false })).resolves.toEqual({ ok: true });
+    await expect(reclaiming.install(await makeCindy('hello'), {
+      namespace: 'acme', registrySource: 'market', pluginId: 'plugin-a',
+    })).resolves.toMatchObject({ ghost: { instanceKey: '_ns__acme__hello' } });
+  });
+
   it('records the market plugin id instead of treating the install as manual', async () => {
     await expect(manager.install(await makeCindy('hello'), {
       namespace: 'acme', registrySource: 'market', pluginId: 'plugin-a',
