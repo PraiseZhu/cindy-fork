@@ -6595,7 +6595,11 @@
         "installLocationPickedPrefix": "Selected:",
         "installLocationChange": "Change…",
         "bindAfterInstallFailed": "Failed to set the custom storage location; fell back to the default",
-        "cancel": "Cancel"
+        "cancel": "Cancel",
+        "reattachTitle": "Reattach this plugin's earlier work data?",
+        "reattachDescription": "This computer still has work data from an earlier install of this plugin, possibly a locally imported version that was later uninstalled. Reattach it to keep your earlier canvases and images in this install. If you skip, this install starts empty and the earlier data stays on this computer.",
+        "reattachConfirm": "Reattach",
+        "reattachSkip": "Don't reattach"
       },
       "updateConfirm": {
         "title": "Update plugin \"{{name}}\"?",

@@ -6570,7 +6570,11 @@
         "installLocationPickedPrefix": "선택됨:",
         "installLocationChange": "변경…",
         "bindAfterInstallFailed": "사용자 지정 저장 위치 설정에 실패하여 기본 위치로 되돌렸습니다",
-        "cancel": "취소"
+        "cancel": "취소",
+        "reattachTitle": "이 플러그인의 이전 작업 데이터를 다시 연결할까요?",
+        "reattachDescription": "이 컴퓨터에 이 플러그인을 이전에 설치했을 때의 작업 데이터가 남아 있습니다. 이전에 로컬에서 가져온 후 제거한 버전의 데이터일 수 있습니다. 다시 연결하면 이전 캔버스와 이미지를 이번에 설치한 플러그인에서 계속 사용할 수 있습니다. 연결하지 않으면 빈 상태로 시작하며, 이전 데이터는 이 컴퓨터에 그대로 남습니다.",
+        "reattachConfirm": "다시 연결",
+        "reattachSkip": "연결 안 함"
       },
       "updateConfirm": {
         "title": "플러그인 \"{{name}}\"을(를) 업데이트할까요?",

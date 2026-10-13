@@ -6570,7 +6570,11 @@
         "installLocationPickedPrefix": "選択済み:",
         "installLocationChange": "変更…",
         "bindAfterInstallFailed": "カスタム保存場所の設定に失敗したため、既定の場所に戻しました",
-        "cancel": "キャンセル"
+        "cancel": "キャンセル",
+        "reattachTitle": "このプラグインの以前の作品データを引き継ぎますか?",
+        "reattachDescription": "このコンピューターには、このプラグインを以前インストールしたときの作品データが残っています。以前ローカルから読み込み、その後アンインストールしたバージョンのものかもしれません。引き継ぐと、以前のキャンバスや画像を今回インストールしたプラグインで引き続き使えます。引き継がない場合は空の状態から始まり、以前のデータはこのコンピューターに残ります。",
+        "reattachConfirm": "引き継ぐ",
+        "reattachSkip": "引き継がない"
       },
       "updateConfirm": {
         "title": "プラグイン「{{name}}」を更新しますか?",

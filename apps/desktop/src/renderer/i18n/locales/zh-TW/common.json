@@ -6570,7 +6570,11 @@
         "installLocationPickedPrefix": "已選擇：",
         "installLocationChange": "更改…",
         "bindAfterInstallFailed": "自訂儲存位置設定失敗，已回退預設位置",
-        "cancel": "取消"
+        "cancel": "取消",
+        "reattachTitle": "接回這個插件以前的作品資料？",
+        "reattachDescription": "這台電腦還保留著這個插件以前安裝時的作品資料，可能來自之前從本機匯入、後來解除安裝的版本。接回後，以前的畫布和圖片會繼續出現在這次安裝的插件裡；不接回則從空白開始，以前的資料仍保留在這台電腦上。",
+        "reattachConfirm": "接回",
+        "reattachSkip": "不接回"
       },
       "updateConfirm": {
         "title": "更新插件「{{name}}」？",

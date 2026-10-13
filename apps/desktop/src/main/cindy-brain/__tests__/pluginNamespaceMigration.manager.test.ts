@@ -1256,6 +1256,33 @@ describe('plugin instance registry boundaries', () => {
     })).resolves.toMatchObject({ ghost: { instanceKey: '_ns__acme__hello' } });
   });
 
+  it('takes the bare key from a removed local install once the user confirms', async () => {
+    await plantLegacyInstall('hello');
+    manager.list();
+    await expect(manager.commitPendingNamespace('hello', null, 'manual-after-sync')).resolves.toEqual({ ok: true });
+    expect(manager.canOfferBareReclaim('hello', 'acme', 'plugin-a')).toBe(false);
+    await expect(manager.uninstall('hello', { notify: false })).resolves.toEqual({ ok: true });
+    expect(manager.canOfferBareReclaim('hello', 'acme', 'plugin-a')).toBe(true);
+    await expect(manager.install(await makeCindy('hello'), {
+      namespace: 'acme', registrySource: 'market', pluginId: 'plugin-a', reclaimLegacyBareInstance: true,
+    })).resolves.toMatchObject({ ghost: { instanceKey: 'hello', namespace: 'acme' } });
+    const registry = JSON.parse(fs.readFileSync(
+      pluginInstanceRegistryPath(path.join(workDir, 'ghosts-install-state')), 'utf8',
+    )) as { instances: Record<string, { namespace: string | null; namespaceState: string; active: boolean }> };
+    expect(registry.instances['hello']).toMatchObject({ namespace: 'acme', namespaceState: 'confirmed', active: true });
+  });
+
+  it('never offers another organization its bare key', async () => {
+    await plantLegacyInstall('hello');
+    manager.list();
+    await expect(manager.commitPendingNamespace('hello', 'other', 'market-organization')).resolves.toEqual({ ok: true });
+    await expect(manager.uninstall('hello', { notify: false })).resolves.toEqual({ ok: true });
+    expect(manager.canOfferBareReclaim('hello', 'acme', 'plugin-a')).toBe(false);
+    await expect(manager.install(await makeCindy('hello'), {
+      namespace: 'acme', registrySource: 'market', pluginId: 'plugin-a', reclaimLegacyBareInstance: true,
+    })).resolves.toMatchObject({ ghost: { instanceKey: '_ns__acme__hello' } });
+  });
+
   it('records the market plugin id instead of treating the install as manual', async () => {
     await expect(manager.install(await makeCindy('hello'), {
       namespace: 'acme', registrySource: 'market', pluginId: 'plugin-a',

@@ -6446,6 +6446,8 @@ export async function installAndDock(
     trustOverride?: GhostHostTrustOverride;
     registrySource?: 'market' | 'manual' | 'agent-forge' | 'legacy' | 'builtin';
     pluginId?: string | null;
+    /** The user agreed to reattach the library left under the bare id. */
+    reclaimLegacyBareInstance?: boolean;
     beforePackagePlacement?: () => void;
   },
 ): Promise<InstalledGhost> {
@@ -6465,6 +6467,8 @@ async function installAndDockLocked(
     installOrigin?: 'agent-forge';
     registrySource?: 'market' | 'manual' | 'agent-forge' | 'legacy' | 'builtin';
     pluginId?: string | null;
+    /** The user agreed to reattach the library left under the bare id. */
+    reclaimLegacyBareInstance?: boolean;
     beforePackagePlacement?: () => void;
   },
 ): Promise<InstalledGhost> {
@@ -6490,6 +6494,7 @@ async function installAndDockLocked(
     ...(opts.installOrigin ? { installOrigin: opts.installOrigin } : {}),
     ...(opts.registrySource ? { registrySource: opts.registrySource } : {}),
     ...(opts.pluginId ? { pluginId: opts.pluginId } : {}),
+    ...(opts.reclaimLegacyBareInstance ? { reclaimLegacyBareInstance: true } : {}),
     namespace: opts.namespace,
     ...(opts.beforePackagePlacement ? { beforePackagePlacement: opts.beforePackagePlacement } : {}),
   });
@@ -6875,6 +6880,44 @@ export interface MarketGhostPackageCommitEvidence {
   canonicalManifest: GhostManifest;
 }
 
+/**
+ * An organization market install may find a library left under the bare id by
+ * an earlier install whose source cannot be proven, such as a local package.
+ * Ask before reattaching it. Market evidence reattaches without asking.
+ */
+export async function confirmLegacyLibraryReattach(plugin: {
+  ghostId: string;
+  namespace: string | null;
+  pluginId: string;
+  name: string;
+}): Promise<boolean> {
+  const { ghostId, namespace, pluginId } = plugin;
+  if (namespace === null || !isValidGhostId(ghostId)) return false;
+  if (!getGhostManager().canOfferBareReclaim(ghostId, namespace, pluginId)) return false;
+  if (getNamespaceMigrationHost().canReclaimLegacyBareInstance({ ghostId, namespace, pluginId })) return false;
+  const leftover = fs.existsSync(ownerScopedUserDataPath('libraries', ghostId)) ||
+    (await getGhostLibraryBindingStore().getBinding(ghostId)) !== null;
+  if (!leftover) return false;
+  const options = {
+    type: 'question' as const,
+    title: t('settings.ghosts.library.reattachTitle'),
+    message: t('settings.ghosts.library.reattachTitle'),
+    detail: `${plugin.name}\n\n${t('settings.ghosts.library.reattachDescription')}`,
+    buttons: [
+      t('settings.ghosts.library.reattachConfirm'),
+      t('settings.ghosts.library.reattachSkip'),
+    ],
+    defaultId: 0,
+    cancelId: 1,
+    noLink: true,
+  };
+  const parent = mainShellWindows().find((window) => window.isVisible() && !window.isMinimized());
+  const decision = parent
+    ? await dialog.showMessageBox(parent, options)
+    : await dialog.showMessageBox(options);
+  return decision.response === 0;
+}
+
 export async function installOrUpdateMarketGhostPackage(
   cindyFilePath: string,
   expected: {
@@ -6893,6 +6936,8 @@ export async function installOrUpdateMarketGhostPackage(
     pendingMarketRecord?: GhostFirstPartyPendingMarketRecord;
     /** Server-market resource id. Recorded on the instance so another market does not reuse it. */
     pluginId?: string;
+    /** The user agreed to reattach the library left under the bare id. */
+    reclaimLegacyBareInstance?: boolean;
     /** 自定义 Git/本地市场在打包前读取的 Manifest，用于防止打包窗口内能力扩张。 */
     manifestCap?: GhostManifest;
     beforeCommitInLock?: () => void;
@@ -6932,6 +6977,8 @@ async function installOrUpdateMarketGhostPackageLocked(
     pendingMarketRecord?: GhostFirstPartyPendingMarketRecord;
     /** Server-market resource id. Recorded on the instance so another market does not reuse it. */
     pluginId?: string;
+    /** The user agreed to reattach the library left under the bare id. */
+    reclaimLegacyBareInstance?: boolean;
     manifestCap?: GhostManifest;
     beforeCommitInLock?: () => void;
     /** 新包已经原子换位；后续异常不能再按落位失败回滚来源路由。 */
@@ -7052,6 +7099,7 @@ async function installOrUpdateMarketGhostPackageLocked(
         enable: true,
         registrySource: 'market',
         ...(expected.pluginId ? { pluginId: expected.pluginId } : {}),
+        ...(expected.reclaimLegacyBareInstance ? { reclaimLegacyBareInstance: true } : {}),
         expectedPackageSha256: inspected.packageSha256,
         consent: { decision: expected.consent, manifest: inspected.manifest },
         beforePackagePlacement: expected.beforeCommitInLock,
