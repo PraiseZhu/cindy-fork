@@ -8534,6 +8534,11 @@ export interface GhostLibraryOverview {
   softLimitExceeded: boolean;
   /** 卸载后未删除的标记(重装自动清除;设置页以横幅提示)。 */
   orphaned: boolean;
+  /**
+   * 裸 id 下还留着这个插件以前的作品库，可以换回当前实例（设置页提供「接回」）。
+   * 没有可接回的旧库时为 null。
+   */
+  legacyLibrary: { usedBytes: number; fileCount: number } | null;
 }
 
 /** 上行:主机代理 fetch 请求。 */

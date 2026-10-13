@@ -6574,7 +6574,15 @@
         "reattachTitle": "このプラグインの以前の作品データを引き継ぎますか?",
         "reattachDescription": "このコンピューターには、このプラグインを以前インストールしたときの作品データが残っています。以前ローカルから読み込み、その後アンインストールしたバージョンのものかもしれません。引き継ぐと、以前のキャンバスや画像を今回インストールしたプラグインで引き続き使えます。引き継がない場合は空の状態から始まり、以前のデータはこのコンピューターに残ります。",
         "reattachConfirm": "引き継ぐ",
-        "reattachSkip": "引き継がない"
+        "reattachSkip": "引き継がない",
+        "legacyFoundBanner": "このコンピューターには、このプラグインが以前残した作品データ({{size}} · {{count}} ファイル)があり、現在のインストールでは使われていません。",
+        "legacyReattach": "以前の作品データを引き継ぐ",
+        "legacyReattachBusy": "引き継ぎ中…",
+        "legacyReattachConfirmTitle": "以前の作品データを引き継ぎますか?",
+        "legacyReattachConfirmDescription": "プラグインは以前の作品データを使うようになります。現在の作品データはごみ箱に移動され 30 日間保持された後、完全に消去されます。",
+        "legacyReattachConfirmText": "引き継ぐ",
+        "legacyReattachDone": "以前の作品データを引き継ぎました",
+        "legacyReattachFailed": "引き継ぎに失敗しました"
       },
       "updateConfirm": {
         "title": "プラグイン「{{name}}」を更新しますか?",

@@ -844,6 +844,27 @@ export class GhostManager {
   }
 
   /**
+   * Whether the library left under the bare id may move to an installed
+   * instance in this namespace. Nothing is installed under the bare id, and no
+   * record of another organization owns it. The caller asks the user.
+   */
+  canOfferBareLibrary(ghostId: string, namespace: string | null): boolean {
+    this.ensureCurrentOwnerContextSync();
+    const registry = this.syncInstanceRegistry();
+    if (this.instanceRegistryService.isBlocked()) return false;
+    const holders = Object.values(registry.instances).filter((record) =>
+      record.instanceKey === ghostId || record.contentRelId === ghostId);
+    if (holders.some((record) => record.active || (record.namespace !== null && record.namespace !== namespace))) {
+      return false;
+    }
+    try {
+      return fs.lstatSync(this.contentPath(ghostId), { throwIfNoEntry: false }) === undefined;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
    * Whether an organization market install could take the bare key if the
    * user confirms. No evidence is checked here; the caller asks the user.
    */

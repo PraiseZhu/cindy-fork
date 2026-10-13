@@ -1,6 +1,6 @@
 /** @vitest-environment jsdom */
 
-import { fireEvent, render, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('../ghostPanelTheme', () => ({
@@ -29,6 +29,23 @@ const manifest: GhostManifest = {
 
 describe('GhostWebviewBody', () => {
   afterEach(() => vi.unstubAllGlobals());
+
+  it('reloads only the panel whose library the host replaced', () => {
+    let notify: ((payload: { id: string }) => void) | undefined;
+    vi.stubGlobal('electronAPI', { ghosts: { onLibraryReplaced: (callback: typeof notify) => {
+      notify = callback;
+      return () => { notify = undefined; };
+    } } });
+    const ghost = { manifest, dir: '/plugins/workspace', approval: { state: 'approved' as const, revision: 'receipt-a' } };
+    const { container, unmount } = render(<GhostWebviewBody ghost={ghost} html="panel.html" />);
+    const original = container.querySelector('webview');
+    act(() => notify?.({ id: 'another' }));
+    expect(container.querySelector('webview')).toBe(original);
+    act(() => notify?.({ id: 'workspace' }));
+    expect(container.querySelector('webview')).not.toBe(original);
+    unmount();
+    expect(notify).toBeUndefined();
+  });
 
   it.each(['panel.html', 'main-view.html'])('recreates %s on a same-version receipt replacement', (html) => {
     const ghost = { manifest, dir: '/plugins/workspace', approval: { state: 'approved' as const, revision: 'receipt-a' } };

@@ -6599,7 +6599,15 @@
         "reattachTitle": "Reattach this plugin's earlier work data?",
         "reattachDescription": "This computer still has work data from an earlier install of this plugin, possibly a locally imported version that was later uninstalled. Reattach it to keep your earlier canvases and images in this install. If you skip, this install starts empty and the earlier data stays on this computer.",
         "reattachConfirm": "Reattach",
-        "reattachSkip": "Don't reattach"
+        "reattachSkip": "Don't reattach",
+        "legacyFoundBanner": "This computer still has earlier work data from this plugin ({{size}} · {{count}} files) that the current install does not use.",
+        "legacyReattach": "Reattach earlier work data",
+        "legacyReattachBusy": "Reattaching…",
+        "legacyReattachConfirmTitle": "Reattach earlier work data?",
+        "legacyReattachConfirmDescription": "The plugin will use the earlier work data instead. Its current work data is moved to the trash and kept for 30 days, then permanently removed.",
+        "legacyReattachConfirmText": "Reattach",
+        "legacyReattachDone": "Earlier work data reattached",
+        "legacyReattachFailed": "Reattach failed"
       },
       "updateConfirm": {
         "title": "Update plugin \"{{name}}\"?",

@@ -435,6 +435,12 @@ import { LibraryVault, statfsFreeBytes, DEFAULT_LIBRARY_LIMITS } from './library
 import { LibraryStagingStore, relocateLibraryStagingOwner } from './libraryStaging.js';
 import { LibrarySqlService, defaultLibraryDbWorkerPath } from './librarySqlService.js';
 import { trashGhostLibrary } from './libraryTrash.js';
+import {
+  finishLegacyLibraryReattach,
+  readLegacyLibraryReattachJournal,
+  startLegacyLibraryReattach,
+  type LegacyLibraryReattachDeps,
+} from './libraryLegacyReattach.js';
 import { migrateGhostLibrary } from './libraryMigrate.js';
 import { setGhostLibraryFileResolver } from './runtime/electronSandboxAdapter.js';
 import {
@@ -5937,6 +5943,7 @@ export function getGhostLibrarySlot(): GhostLibrarySlot {
     });
     librarySlotSingleton = new GhostLibrarySlot({
       getGhost: findGhostForLibraryRequest,
+      prepareRequest: finishPendingLegacyLibraryReattach,
       bindingStore,
       getDefaultRoot: (ghostId) => ownerScopedUserDataPath('libraries', ghostId),
       getStagingRoot: (ghostId) => ownerScopedUserDataPath('library-staging', ghostId),
@@ -6150,8 +6157,12 @@ export async function getGhostLibraryOverview(ghostId: string): Promise<GhostLib
       softLimitBytes: DEFAULT_LIBRARY_LIMITS.softLimitBytes,
       softLimitExceeded: false,
       orphaned: false,
+      legacyLibrary: null,
     };
   }
+  await finishPendingLegacyLibraryReattach()?.catch((error: unknown) => {
+    log.warn('library reattach recovery failed', { error: error instanceof Error ? error.message : String(error) });
+  });
   const store = getGhostLibraryBindingStore();
   const binding = await store.getBinding(storagePart);
   const resolution = await store.resolveLibraryRoot(storagePart);
@@ -6213,7 +6224,199 @@ export async function getGhostLibraryOverview(ghostId: string): Promise<GhostLib
     softLimitBytes: DEFAULT_LIBRARY_LIMITS.softLimitBytes,
     softLimitExceeded: usedBytes > DEFAULT_LIBRARY_LIMITS.softLimitBytes,
     orphaned,
+    legacyLibrary: supported && ghost ? await findLegacyLibraryUsage(ghost) : null,
   };
+}
+
+interface LegacyLibraryCandidate {
+  fromId: string;
+  toId: string;
+  oldLocation: 'default' | 'custom';
+  usedBytes: number;
+  fileCount: number;
+}
+
+/**
+ * An installed instance under a namespaced key may have an older library left
+ * under the bare id by an earlier install. Only a library marked as left by an
+ * uninstall counts, and the current instance must still use the default
+ * location. GhostManager decides whether the bare id is free to give away.
+ */
+async function findLegacyLibraryCandidate(ghost: InstalledGhost): Promise<LegacyLibraryCandidate | null> {
+  const fromId = ghost.manifest.id;
+  const toId = installedGhostStoragePart(ghost);
+  if (fromId === toId || ghost.manifest.library !== true || !isValidGhostId(fromId)) return null;
+  if (!getGhostManager().canOfferBareLibrary(fromId, ghost.namespace ?? null)) return null;
+  const store = getGhostLibraryBindingStore();
+  if (await store.getBinding(toId) !== null) return null;
+  let oldLocation: 'default' | 'custom' = 'default';
+  let root = ownerScopedUserDataPath('libraries', fromId);
+  if (await store.getBinding(fromId) !== null) {
+    const resolution = await store.resolveLibraryRoot(fromId);
+    if (resolution.kind !== 'custom' || resolution.root === null) return null;
+    oldLocation = 'custom';
+    root = resolution.root;
+  }
+  let meta: { ghostId?: unknown; orphaned?: unknown };
+  try {
+    meta = JSON.parse(await fs.promises.readFile(path.join(root, '.cindy-library', 'meta.json'), 'utf8')) as typeof meta;
+  } catch {
+    return null;
+  }
+  if (meta.ghostId !== fromId || meta.orphaned === undefined) return null;
+  let usedBytes = 0;
+  let fileCount = 0;
+  try {
+    const usage = JSON.parse(
+      await fs.promises.readFile(path.join(root, '.cindy-library', 'usage.json'), 'utf8'),
+    ) as { files?: number; bytes?: number };
+    usedBytes = Number(usage.bytes ?? 0);
+    fileCount = Number(usage.files ?? 0);
+  } catch {
+    /* 账本缺失按 0 计 */
+  }
+  return { fromId, toId, oldLocation, usedBytes, fileCount };
+}
+
+async function findLegacyLibraryUsage(
+  ghost: InstalledGhost,
+): Promise<GhostLibraryOverview['legacyLibrary']> {
+  try {
+    const candidate = await findLegacyLibraryCandidate(ghost);
+    return candidate ? { usedBytes: candidate.usedBytes, fileCount: candidate.fileCount } : null;
+  } catch (error) {
+    log.warn('legacy library lookup failed', { error: error instanceof Error ? error.message : String(error) });
+    return null;
+  }
+}
+
+function legacyLibraryReattachDeps(assertCurrent: () => void): LegacyLibraryReattachDeps {
+  const ownerKey = activeOwnerScopeKey();
+  const store = getGhostLibraryBindingStore();
+  return {
+    journalFile: () => ownerScopedUserDataPath('library-reattach.json'),
+    defaultRoot: (id) => ownerScopedUserDataPath('libraries', id),
+    stagingRoot: (id) => ownerScopedUserDataPath('library-staging', id),
+    trashRoot: () => ownerScopedUserDataPath('libraries-trash'),
+    relocateCustomBinding: (fromId, toId) => store.relocateBinding(fromId, toId),
+    customRoot: async (id) => {
+      const binding = await store.getBinding(id, { strict: true });
+      return binding ? path.join(binding.root, id) : null;
+    },
+    relocateMeta: async (root, fromId, toId) => {
+      await relocateLibraryMetaOwner(root, fromId, toId, assertCurrent);
+    },
+    relocateStaging: (root, fromId, toId) =>
+      relocateLibraryStagingOwner(root, fromId, toId, ownerKey, assertCurrent),
+    assertCurrent,
+  };
+}
+
+/**
+ * Holds the library slot closed for both ends while their directories move.
+ * The plugin runtime keeps library state in memory, so it is stopped first and
+ * restarted afterwards; open panels are told to reload from disk.
+ */
+async function withLibrariesHeld<T>(fromId: string, toId: string, run: () => Promise<T>): Promise<T> {
+  const browserRuntimeRunning = getGhostRuntime().stateOf(toId) === 'running';
+  const nodeRuntimeRunning = getGhostNodeRuntimeBroker().stateOf(toId) === 'running';
+  getGhostRuntime().stop(toId);
+  await getGhostNodeRuntimeBroker().stopAndWait(toId);
+  const slot = getGhostLibrarySlot();
+  const ids = [fromId, toId];
+  for (const id of ids) slot.setRelocating(id, true);
+  try {
+    for (const id of ids) await slot.disposeGhost(id);
+    return await run();
+  } finally {
+    for (const id of ids) slot.setRelocating(id, false);
+    const ghost = findGhostForInstanceId(toId);
+    if (ghost?.enabled && isGhostAvailableForActiveSession(ghost.manifest.id)) {
+      spawnIfResident(ghost);
+      const warn = (error: unknown) => log.warn('plugin restart after library reattach failed', {
+        id: toId, error: error instanceof Error ? error.message : String(error),
+      });
+      if (browserRuntimeRunning && !isResidentBrowserGhost(ghost.manifest)) {
+        void getGhostRuntime().spawn(ghost).catch(warn);
+      }
+      if (nodeRuntimeRunning && ghost.manifest.node?.lifecycle !== 'resident') {
+        void getGhostNodeRuntimeBroker().startForRecovery(ghost).catch(warn);
+      }
+    }
+    broadcastGhostWindowPush('ghosts:library-replaced', { id: toId });
+  }
+}
+
+let pendingLegacyLibraryReattach: Promise<void> | null = null;
+/** Owner whose journal is known to be absent; library requests then skip the file read. */
+let legacyLibraryReattachClearOwner: string | null = null;
+
+/**
+ * A reattach that stopped midway leaves its journal. Finish it before a
+ * library request runs, so neither end is opened half moved.
+ */
+function finishPendingLegacyLibraryReattach(): Promise<void> | undefined {
+  if (isAppSessionBoundaryPending()) return undefined;
+  if (legacyLibraryReattachClearOwner === activeOwnerScopeKey()) return undefined;
+  pendingLegacyLibraryReattach ??= (async () => {
+    try {
+      const ownerKey = activeOwnerScopeKey();
+      const assertCurrent = (): void => {
+        if (activeOwnerScopeKey() !== ownerKey || isAppSessionBoundaryPending()) {
+          throw new Error('Library reattach owner changed');
+        }
+      };
+      const deps = legacyLibraryReattachDeps(assertCurrent);
+      const journal = await readLegacyLibraryReattachJournal(deps.journalFile());
+      if (journal) {
+        await getGhostManager().runExclusiveMutation(() =>
+          withLibrariesHeld(journal.fromId, journal.toId, () => finishLegacyLibraryReattach(journal, deps)));
+        await refreshMivoLibraryExtraDirGrant().catch(() => undefined);
+      }
+      legacyLibraryReattachClearOwner = ownerKey;
+    } finally {
+      pendingLegacyLibraryReattach = null;
+    }
+  })();
+  return pendingLegacyLibraryReattach;
+}
+
+/**
+ * Settings-page reattach, run after the Main confirmation. The current
+ * library goes to the library trash; the old one takes its place.
+ */
+export async function reattachLegacyLibraryForActiveOwner(
+  ghostId: string,
+  expectedTarget: string | null,
+): Promise<{ ok: boolean; message?: string }> {
+  await finishPendingLegacyLibraryReattach();
+  return getGhostManager().runExclusiveMutation(async () => {
+    const assertCurrent = (): void => {
+      if (expectedTarget === null || ghostLibraryDeleteTargetFor(ghostId) !== expectedTarget) {
+        throw new Error('Library 对应的 Plugin 或账号已变化，请重新操作');
+      }
+    };
+    assertCurrent();
+    const ghost = findGhostForInstanceId(ghostId);
+    const candidate = ghost ? await findLegacyLibraryCandidate(ghost) : null;
+    if (!candidate) return { ok: false, message: '没有可以接回的作品数据' };
+    assertCurrent();
+    // A failure midway leaves the journal; the next library request finishes it.
+    legacyLibraryReattachClearOwner = null;
+    await withLibrariesHeld(candidate.fromId, candidate.toId, () =>
+      startLegacyLibraryReattach(
+        { fromId: candidate.fromId, toId: candidate.toId, oldLocation: candidate.oldLocation, now: Date.now() },
+        legacyLibraryReattachDeps(assertCurrent),
+      ));
+    legacyLibraryReattachClearOwner = activeOwnerScopeKey();
+    await refreshMivoLibraryExtraDirGrant().catch((error) => {
+      log.warn('library extraDirs reattach sync failed', {
+        ghostId: candidate.toId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    });
+    return { ok: true };
+  });
 }
 
 function ghostLibraryDeleteTargetFor(ghostId: string): string | null {
@@ -9308,6 +9511,44 @@ export function registerGhostIpc(): void {
       return res.ok
         ? { ok: true as const }
         : { ok: false as const, cancelled: false as const, message: res.message };
+    } finally {
+      releaseMutation();
+    }
+  });
+  ipcMain.handle('ghosts:library-reattach-legacy', async (event, id: unknown) => {
+    assertTrustedAppRendererEvent(event);
+    if (typeof id !== 'string' || !isGhostInstanceId(id)) throwIpcError('INVALID_PARAMS', '非法插件 id');
+    const expectedOwner = captureGhostMutationOwner();
+    const expectedTarget = ghostLibraryDeleteTargetFor(id);
+    // 换掉当前作品数据是破坏性操作，唯一有效的确认在 Main(与删除同口径)。
+    const parent = BrowserWindow.fromWebContents(event.sender);
+    const ghostName = findGhostForInstanceId(id)?.manifest.name ?? id;
+    const options = {
+      type: 'question' as const,
+      title: t('settings.ghosts.library.legacyReattachConfirmTitle'),
+      message: t('settings.ghosts.library.legacyReattachConfirmTitle'),
+      detail: `${ghostName}\n\n${t('settings.ghosts.library.legacyReattachConfirmDescription')}`,
+      buttons: [
+        t('settings.ghosts.library.legacyReattachConfirmText'),
+        t('settings.ghosts.library.cancel'),
+      ],
+      defaultId: 1,
+      cancelId: 1,
+      noLink: true,
+    };
+    const decision = parent
+      ? await dialog.showMessageBox(parent, options)
+      : await dialog.showMessageBox(options);
+    if (decision.response !== 0) return { ok: false as const, cancelled: true as const };
+    const releaseMutation = beginGhostMutation(expectedOwner);
+    try {
+      const res = await reattachLegacyLibraryForActiveOwner(id, expectedTarget);
+      return res.ok
+        ? { ok: true as const }
+        : { ok: false as const, cancelled: false as const, message: res.message };
+    } catch (error) {
+      log.warn('legacy library reattach failed', { id, error: error instanceof Error ? error.message : String(error) });
+      return { ok: false as const, cancelled: false as const, message: error instanceof Error ? error.message : String(error) };
     } finally {
       releaseMutation();
     }

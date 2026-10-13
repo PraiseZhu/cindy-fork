@@ -1283,6 +1283,18 @@ describe('plugin instance registry boundaries', () => {
     })).resolves.toMatchObject({ ghost: { instanceKey: '_ns__acme__hello' } });
   });
 
+  it('offers a bare-id library only while nothing installed or foreign owns the bare id', async () => {
+    expect(manager.canOfferBareLibrary('hello', 'acme')).toBe(true);
+    await plantLegacyInstall('hello');
+    manager.list();
+    expect(manager.canOfferBareLibrary('hello', 'acme')).toBe(false);
+    await expect(manager.commitPendingNamespace('hello', 'acme', 'market-organization')).resolves.toEqual({ ok: true });
+    await expect(manager.uninstall('hello', { notify: false })).resolves.toEqual({ ok: true });
+    expect(manager.canOfferBareLibrary('hello', 'acme')).toBe(true);
+    expect(manager.canOfferBareLibrary('hello', 'other')).toBe(false);
+    expect(manager.canOfferBareLibrary('hello', null)).toBe(false);
+  });
+
   it('records the market plugin id instead of treating the install as manual', async () => {
     await expect(manager.install(await makeCindy('hello'), {
       namespace: 'acme', registrySource: 'market', pluginId: 'plugin-a',

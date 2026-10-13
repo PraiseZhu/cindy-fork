@@ -6574,7 +6574,15 @@
         "reattachTitle": "이 플러그인의 이전 작업 데이터를 다시 연결할까요?",
         "reattachDescription": "이 컴퓨터에 이 플러그인을 이전에 설치했을 때의 작업 데이터가 남아 있습니다. 이전에 로컬에서 가져온 후 제거한 버전의 데이터일 수 있습니다. 다시 연결하면 이전 캔버스와 이미지를 이번에 설치한 플러그인에서 계속 사용할 수 있습니다. 연결하지 않으면 빈 상태로 시작하며, 이전 데이터는 이 컴퓨터에 그대로 남습니다.",
         "reattachConfirm": "다시 연결",
-        "reattachSkip": "연결 안 함"
+        "reattachSkip": "연결 안 함",
+        "legacyFoundBanner": "이 컴퓨터에 이 플러그인이 이전에 남긴 작업 데이터({{size}} · 파일 {{count}}개)가 있지만, 현재 설치에서는 사용하지 않고 있습니다.",
+        "legacyReattach": "이전 작업 데이터 다시 연결",
+        "legacyReattachBusy": "다시 연결하는 중…",
+        "legacyReattachConfirmTitle": "이전 작업 데이터를 다시 연결할까요?",
+        "legacyReattachConfirmDescription": "플러그인이 이전 작업 데이터를 사용하게 됩니다. 현재 작업 데이터는 휴지통으로 옮겨져 30일간 보관된 후 완전히 삭제됩니다.",
+        "legacyReattachConfirmText": "다시 연결",
+        "legacyReattachDone": "이전 작업 데이터를 다시 연결했습니다",
+        "legacyReattachFailed": "다시 연결하지 못했습니다"
       },
       "updateConfirm": {
         "title": "플러그인 \"{{name}}\"을(를) 업데이트할까요?",

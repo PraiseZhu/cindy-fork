@@ -206,6 +206,12 @@ export function GhostWebviewBody({
   const partitionClaim = installedGhostWebviewPartitionClaim(ghost);
   const [generation, setGeneration] = useState(0);
   const [mediaMenu, setMediaMenu] = useState<GhostPanelMediaMenuState | null>(null);
+
+  // The host swapped this instance's library on disk; reload instead of
+  // keeping (and later saving) the replaced library's state.
+  useEffect(() => window.electronAPI?.ghosts?.onLibraryReplaced?.((payload) => {
+    if (payload?.id === instanceId) setGeneration((value) => value + 1);
+  }), [instanceId]);
   const hostRef = useRef<HTMLDivElement | null>(null);
   const setHostNode = useCallback(
     (el: HTMLDivElement | null) => {
