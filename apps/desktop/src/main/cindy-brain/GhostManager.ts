@@ -2452,7 +2452,33 @@ export class GhostManager {
   list(): InstalledGhost[] {
     this.ensureCurrentOwnerContextSync();
     this.syncInstanceRegistry();
-    const listedDirs = this.listContentEntries();
+    const result = this.projectListedEntries(this.listContentEntries());
+    result.sort((a, b) => a.manifest.id.localeCompare(b.manifest.id));
+    return result;
+  }
+
+  /**
+   * One active instance by its registry key, projected exactly as list() does
+   * but without rescanning every install. Undefined means the cached registry
+   * cannot answer, so the caller must fall back to list().
+   */
+  findInstalledInstance(instanceKey: string): InstalledGhost | undefined {
+    this.ensureCurrentOwnerContextSync();
+    if (this.instanceRegistryService.isBlocked()) return undefined;
+    const record = this.instanceRegistryService.current()?.instances[instanceKey];
+    if (!record?.active || !isValidPluginInstallRelId(record.contentRelId)) return undefined;
+    let dir: string;
+    try {
+      dir = this.contentPath(record.contentRelId);
+      if (classifyGhostDirEntrySync(dir) !== 'directory') return undefined;
+    } catch {
+      return undefined;
+    }
+    const [ghost] = this.projectListedEntries([{ relId: record.contentRelId, dir }]);
+    return ghost && installedGhostStoragePart(ghost) === instanceKey ? ghost : undefined;
+  }
+
+  private projectListedEntries(listedDirs: Array<{ relId: string; dir: string }>): InstalledGhost[] {
     const result: InstalledGhost[] = [];
     for (const listed of listedDirs) {
       const { relId, dir } = listed;
@@ -2581,7 +2607,6 @@ export class GhostManager {
         ...(identity.namespace === null && this.options.isTrustedBundledId?.(identity.ghostId) ? { builtin: true } : {}),
       });
     }
-    result.sort((a, b) => a.manifest.id.localeCompare(b.manifest.id));
     return result;
   }
 

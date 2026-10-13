@@ -294,8 +294,7 @@ export class GhostLibrarySlot {
     this.relocationGenerations.set(ghostId, (this.relocationGenerations.get(ghostId) ?? 0) + 1);
   }
 
-  private ghostRequestTarget(ghostId: string): string | null {
-    const ghost = this.deps.getGhost(ghostId);
+  private ghostRequestTarget(ghostId: string, ghost = this.deps.getGhost(ghostId)): string | null {
     return ghost ? JSON.stringify([
       ghost.manifest.id, ghost.dir, ghost.namespace ?? null, ghost.enabled !== false,
       ghostInstallApprovalToken(ghost.approval),
@@ -312,8 +311,13 @@ export class GhostLibrarySlot {
     return !this.relocating.has(ghostId)
       && target.relocationGeneration === this.relocationGenerations.get(ghostId)
       && target.ownerScopeKey === this.deps.captureOwnerScope()
-      && this.checkEligibility(ghostId)
-      && target.ghostTarget === this.ghostRequestTarget(ghostId);
+      && this.isCurrentGhostTarget(ghostId, target.ghostTarget);
+  }
+
+  /** One lookup serves both checks: eligibility and the captured target must see the same ghost. */
+  private isCurrentGhostTarget(ghostId: string, ghostTarget: string | null): boolean {
+    const ghost = this.deps.getGhost(ghostId);
+    return this.checkEligibility(ghostId, ghost) && ghostTarget === this.ghostRequestTarget(ghostId, ghost);
   }
 
   private assertRequestCurrent(ghostId: string, target: GhostLibraryRequestTarget, session?: GhostLibrarySession): void {
@@ -541,8 +545,7 @@ export class GhostLibrarySlot {
    * 与 read 同源校验——面板与电子脑看到同一个库。
    */
   /** 资格审:装入 + 启用 + 声明 library 能力(dispatch 与面板投影共用)。 */
-  private checkEligibility(ghostId: string): boolean {
-    const ghost = this.deps.getGhost(ghostId);
+  private checkEligibility(ghostId: string, ghost = this.deps.getGhost(ghostId)): boolean {
     if (!ghost) return false;
     if (ghost.enabled === false) return false;
     if (ghost.approval && ghost.approval.state !== 'approved') return false;

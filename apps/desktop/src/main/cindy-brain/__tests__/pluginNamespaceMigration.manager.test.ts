@@ -1116,6 +1116,35 @@ describe('GhostManager namespace migration census', () => {
 
 });
 
+describe('single instance lookup', () => {
+  it('projects one instance exactly as list() does without rescanning', async () => {
+    await expect(manager.install(await makeCindy('hello'), {
+      namespace: 'acme', registrySource: 'market', pluginId: 'plugin-a',
+    })).resolves.toMatchObject({ ghost: { instanceKey: '_ns__acme__hello' } });
+    await expect(manager.install(await makeCindy('other'))).resolves.toMatchObject({ ghost: {} });
+    const listed = manager.list().find((ghost) => ghost.instanceKey === '_ns__acme__hello');
+    const readdir = vi.spyOn(fs, 'readdirSync');
+    try {
+      expect(manager.findInstalledInstance('_ns__acme__hello')).toEqual(listed);
+      expect(readdir).not.toHaveBeenCalled();
+    } finally {
+      readdir.mockRestore();
+    }
+    await expect(manager.setEnabled('_ns/acme/hello', false)).resolves.toEqual({ ok: true });
+    expect(manager.findInstalledInstance('_ns__acme__hello')).toMatchObject({ enabled: false });
+  });
+
+  it('leaves removed and unregistered installs to the full scan', async () => {
+    await expect(manager.install(await makeCindy('hello'), {
+      namespace: 'acme', registrySource: 'market', pluginId: 'plugin-a',
+    })).resolves.toMatchObject({ ghost: {} });
+    await expect(manager.uninstall('_ns/acme/hello', { notify: false })).resolves.toEqual({ ok: true });
+    expect(manager.findInstalledInstance('_ns__acme__hello')).toBeUndefined();
+    await plantLegacyInstall('legacy');
+    expect(manager.findInstalledInstance('legacy')).toBeUndefined();
+  });
+});
+
 describe('plugin instance registry boundaries', () => {
   it('uses the directory key for a new install and removes that key on uninstall', async () => {
     const installed = await manager.install(await makeCindy('hello'));

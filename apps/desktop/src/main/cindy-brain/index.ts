@@ -1122,6 +1122,17 @@ export function findGhostForInstanceId(id: string, namespace?: string | null): I
   return resolved.status === 'unique' ? resolved.ghost : null;
 }
 
+/**
+ * Library requests recheck their target after every await. Read only this
+ * instance so each check does not rescan every install.
+ */
+function findGhostForLibraryRequest(id: string): InstalledGhost | null {
+  if (isAppSessionBoundaryPending()) return null;
+  const ghost = getGhostManager().findInstalledInstance(id);
+  if (!ghost) return findGhostForInstanceId(id);
+  return isGhostAvailableForActiveSession(ghost.manifest.id) ? ghost : null;
+}
+
 function libraryStorageKeyFor(id: string): string | null {
   return resolvePluginLibraryStorageKey(id, findGhostForInstanceId(id));
 }
@@ -5925,7 +5936,7 @@ export function getGhostLibrarySlot(): GhostLibrarySlot {
       log,
     });
     librarySlotSingleton = new GhostLibrarySlot({
-      getGhost: findGhostForInstanceId,
+      getGhost: findGhostForLibraryRequest,
       bindingStore,
       getDefaultRoot: (ghostId) => ownerScopedUserDataPath('libraries', ghostId),
       getStagingRoot: (ghostId) => ownerScopedUserDataPath('library-staging', ghostId),
