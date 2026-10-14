@@ -1671,17 +1671,27 @@ const SUBAGENT_RECLAIM_MAX_ROUNDS = 3;
  */
 async function reclaimSubagentRunnersOnce(agentHome: string): Promise<boolean> {
   try {
-    return await Promise.race([
-      stopAllPiSubagentRunsForExit(agentHome, 2_000, {
-        // Scoped to this process so an update relaunch never kills a concurrent
-        // instance's Subagents out of the shared agent home.
-        hostPid: process.pid,
-        killUnresponsiveRunners: true,
-        // Inside the 4s ceiling below, leaving the 2s stop wait its own room.
-        killBudgetMs: 1_500,
-      }),
-      new Promise<boolean>((resolve) => { setTimeout(() => resolve(false), 4_000); }),
-    ]);
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        stopAllPiSubagentRunsForExit(agentHome, 2_000, {
+          // Scoped to this process so an update relaunch never kills a concurrent
+          // instance's Subagents out of the shared agent home.
+          hostPid: process.pid,
+          killUnresponsiveRunners: true,
+          // Inside the 4s ceiling below, leaving the 2s stop wait its own room.
+          killBudgetMs: 1_500,
+        }),
+        new Promise<boolean>((resolve) => {
+          timeout = setTimeout(() => {
+            log.warn('Subagent reclaim before update relaunch timed out after 4s');
+            resolve(false);
+          }, 4_000);
+        }),
+      ]);
+    } finally {
+      if (timeout) clearTimeout(timeout);
+    }
   } catch (err) {
     log.error('Subagent reclaim before update relaunch failed: %s', String(err));
     return false;
@@ -1711,6 +1721,17 @@ async function reclaimSubagentRunnersForRelaunch(): Promise<boolean> {
     return null;
   });
   if (!releaseSubagentLaunchFence) return false;
+  // The async sweep queues on libuv. During startup that pool is already full,
+  // so a quiet agent home still races the 4s ceiling and the relaunch is
+  // cancelled as unconfirmed. A sync scan does not wait on that pool; it is
+  // already this function's stability re-check, and unreadable counts as
+  // active, so skipping the sweep here does not change the safety verdict.
+  try {
+    if (!hasActivePiSubagentRunsSync(agentHome, { hostPid: process.pid })) return true;
+  } catch (err) {
+    log.error('Subagent stability re-check failed: %s', String(err));
+    return false;
+  }
   const deadline = Date.now() + SUBAGENT_RECLAIM_TOTAL_MS;
   for (let round = 1; round <= SUBAGENT_RECLAIM_MAX_ROUNDS; round += 1) {
     if (!await reclaimSubagentRunnersOnce(agentHome)) return false;
