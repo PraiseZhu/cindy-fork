@@ -35,8 +35,38 @@ describe('PI Subagent reclaim before an update relaunch', () => {
     // A hard ceiling, so a wedged probe cannot hold the update open — and the
     // catch keeps any throw from reaching a native dialog.
     expect(reclaim).toContain('Promise.race([');
-    expect(reclaim).toContain('setTimeout(() => resolve(false), 4_000)');
+    // The timeout arm must be a block so it can log; a bare resolve(false)
+    // is indistinguishable from stopAll returning false.
+    expect(reclaim).toMatch(/setTimeout\(\(\) => \{[\s\S]*resolve\(false\)[\s\S]*\}, 4_000\)/);
     expect(reclaim).toContain('catch (err)');
+  });
+
+  it('skips the async sweep when a sync scan finds no active Subagents', () => {
+    // Startup I/O saturates the libuv pool; the async sweep then races the 4s
+    // ceiling and the relaunch is cancelled even though nothing is running.
+    // A sync scan does not queue on that pool. Unreadable is treated as active.
+    const loop = source.slice(
+      source.indexOf('async function reclaimSubagentRunnersForRelaunch()'),
+      source.indexOf('async function executeRelaunch('),
+    );
+    const fenceReady = loop.indexOf('if (!releaseSubagentLaunchFence) return false;');
+    const forLoop = loop.indexOf('for (let round = 1; round <= SUBAGENT_RECLAIM_MAX_ROUNDS;');
+    expect(fenceReady).toBeGreaterThan(-1);
+    expect(forLoop).toBeGreaterThan(fenceReady);
+    const beforeLoop = loop.slice(fenceReady, forLoop);
+    expect(beforeLoop).toContain('hasActivePiSubagentRunsSync(agentHome, { hostPid: process.pid })');
+    expect(beforeLoop).toMatch(/if \(![\s\S]*?\) return true;/);
+    expect(beforeLoop).not.toContain('reclaimSubagentRunnersOnce');
+    expect(beforeLoop).toContain('catch (err)');
+    expect(beforeLoop).toContain('return false;');
+  });
+
+  it('logs when the 4s reclaim race times out', () => {
+    const reclaim = source.slice(
+      source.indexOf('async function reclaimSubagentRunnersOnce('),
+      source.indexOf('async function reclaimSubagentRunnersForRelaunch()'),
+    );
+    expect(reclaim).toMatch(/log\.(?:warn|error)\([\s\S]*timeout/i);
   });
 
   it('reclaims until the agent home is stable, not just until one pass succeeds', () => {
