@@ -2572,7 +2572,7 @@ const r = await cindy.send({
   异步读取必须捕获开始时的 version，不得用读取结束时的新版本代替；前台恢复后重新呈现再回报。
 - 包内静态资源按打开时的文件身份读取，整页资源最多 64 MiB。大媒体用归属明确的
   \`/media/\` 或 \`/library/\`；不要把课程/用户媒体打进页面启动包。
-- 普通数据端点支持 \`/kv\`、\`/app-context\`、\`/agent-models\`、\`/media-models\`、\`/gallery\`。
+- 普通数据端点支持 \`/kv\`、\`/app-context\`、\`/agent-models\`、\`/agent-model-routes\`、\`/media-models\`、\`/gallery\`。
   凭证、OAuth、连接不走页面 fetch 或业务频道，必须使用 Host 原生配置流程。
 - 页面需自行完成触屏布局、Light/Dark 与草稿保存，不依赖桌面 localStorage 同步、Node、
   悬停或 Electron 桥。当前页面供片要求自包含的脚本/样式资源；模块动态加载须实际验收，
@@ -2587,6 +2587,13 @@ visible 跟随当前账号模型选择器；建议默认显示可见项，隐藏
 只包含本机已连接且可用于新任务的模型，不代表远程 SSH 目录。读取不调用模型、
 不触发凭证认领或上游发现，不返回凭证、账号 identity 或 endpoint；不需要新增 manifest 权限。
 旧 Host 可能返回 404，插件应明确提示升级；503 时提供重试。运行前再次核验选定来源。
+
+GET 同源 \`/agent-model-routes\` 返回本机与当前账号已授权远程来源的只读目录。
+可选唯一查询 \`source\`（\`local\` 或目录返回的来源 id）用于保存/派工前复核。
+其它参数、重复参数或空 source 返回 400 \`INVALID_QUERY\`。来源不在当前授权目录返回 403 \`SOURCE_NOT_ALLOWED\`，不探测该目标。
+成功 \`{ok:true,version:1,checkedAt,complete,sources,models}\`。models 仅含 ready 来源中已启用、可用于新任务的聊天模型，并带 \`agentDeviceId\` 与 \`sourceName\`。
+某来源失败时仍返回 200 且 complete=false，该来源 status=unavailable，其余来源照常。不返回凭证、endpoint 或内部配置。
+旧 Host 对该路径可能返回空 body 的 403 或 404；插件不得把远程项改成本机执行。本轮不把该路径加入手机页面白名单。
 
 ## 4.0.4 媒体模型配置与调用边界
 

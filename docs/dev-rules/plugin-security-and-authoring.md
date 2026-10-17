@@ -808,3 +808,5 @@ visible 复用当前账号模型选择器的用户开关与目录默认值；隐
 不暴露 ProviderView、auth、账号 identity 或 endpoint；响应 no-store、仅 GET、无参数，
 检查插件在装启用与 owner 归属，异步返回前复核。旧 Host 404 时插件应明确提示升级。
 此端点不覆盖远程 SSH 模型，执行前仍需核验真实路由。
+
+`GET /agent-model-routes` 是独立只读端点，不改变 `/agent-models`。它投影本机与已授权远程/共享来源，每项必须带 Host 返回的 `agentDeviceId`。可选 `source` 仅用于复核已选来源。owner、插件启用与异步返回前复核与 `/agent-models` 相同。部分失败返回 200 + complete=false，不得用过期结果复活已撤权来源。不加入手机页面转发白名单。

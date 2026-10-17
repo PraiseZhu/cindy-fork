@@ -11,10 +11,12 @@ import {
   GHOST_SCHEME,
   type GhostAppContextResult,
   type GhostAgentModelsResult,
+  type GhostAgentModelRoutesResult,
   type GhostMediaModelsResult,
   type GhostMediaModelType,
   type InstalledGhost,
 } from '../../../shared/ghost.js';
+import { parseAgentModelRoutesQuery } from '../ghostAgentModelRoutes.js';
 import { getActiveAppSession, type ActiveAppSession } from '../../appSessionState.js';
 import { ownerScopedGhostPartition, ownerScopedGhostPartitionForInstalledGhost } from '../ghostWebviewPartition.js';
 import { installedGhostStoragePart } from '../../../shared/pluginIdentity.js';
@@ -243,6 +245,15 @@ export function setGhostAgentModelsProvider(
   provider: (ghostId: string) => Promise<GhostAgentModelsResult>,
 ): void {
   ghostAgentModelsProvider = provider;
+}
+
+let ghostAgentModelRoutesProvider:
+  | ((ghostId: string, query: { source?: string }) => Promise<GhostAgentModelRoutesResult>)
+  | null = null;
+export function setGhostAgentModelRoutesProvider(
+  provider: (ghostId: string, query: { source?: string }) => Promise<GhostAgentModelRoutesResult>,
+): void {
+  ghostAgentModelRoutesProvider = provider;
 }
 
 /**
@@ -511,6 +522,33 @@ function registerGhostProtocol(
             status: result.ok ? 200 : result.errorCode === 'PERMISSION_DENIED' ? 403 : 503,
             headers,
           });
+        } catch {
+          if (!isGhostProtocolOwnerActive(owner)) return new Response(null, { status: 403, headers });
+          return new Response(
+            JSON.stringify({ ok: false, errorCode: 'NOT_AVAILABLE', message: 'Model catalog unavailable' }),
+            { status: 503, headers },
+          );
+        }
+      }
+      if (url.pathname === '/agent-model-routes') {
+        const headers = { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' };
+        if (request.method !== 'GET') return new Response(null, { status: 405, headers });
+        const query = parseAgentModelRoutesQuery(url);
+        if (!query.ok) {
+          return new Response(JSON.stringify(query), { status: 400, headers });
+        }
+        if (!ghostAgentModelRoutesProvider) return new Response(null, { status: 503, headers });
+        try {
+          const result = await ghostAgentModelRoutesProvider(storagePart, { source: query.source });
+          if (!isGhostProtocolOwnerActive(owner)) return new Response(null, { status: 403, headers });
+          const status = result.ok
+            ? 200
+            : result.errorCode === 'PERMISSION_DENIED' || result.errorCode === 'SOURCE_NOT_ALLOWED'
+              ? 403
+              : result.errorCode === 'INVALID_QUERY'
+                ? 400
+                : 503;
+          return new Response(JSON.stringify(result), { status, headers });
         } catch {
           if (!isGhostProtocolOwnerActive(owner)) return new Response(null, { status: 403, headers });
           return new Response(

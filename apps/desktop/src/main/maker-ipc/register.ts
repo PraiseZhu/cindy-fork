@@ -981,6 +981,7 @@ import {
 } from './orcaRemoteWorkerHost.js';
 import { createOrcaRemoteWorkers, invokeDeviceValue, isExecutionDeviceCandidate, type OrcaRemoteWorkers } from './orcaRemoteWorkers.js';
 import { getReceivedShares, providerShareAgentDeviceId } from '../device-link/providerShareGuest.js';
+import { listAgentModelSourceLocations } from '../remote-agent/controller/modelSources.js';
 import {
   ORCA_EXECUTION_DEVICES_CHANNEL,
   COMPANION_CLOUD_CAPS_CHANNEL,
@@ -14363,22 +14364,13 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
    */
   async function listWorkerAgentLocations(): Promise<Array<{ agentDeviceId: string; name: string }>> {
     const { devices } = await handleListDevices(deviceDirectoryDeps()).catch(() => ({ devices: [] }));
-    const shares = getReceivedShares().filter((share) => share.status === 'active');
-    return [
-      ...devices
-        .filter(isExecutionDeviceCandidate)
-        .map((device) => ({ agentDeviceId: device.deviceId, name: device.name || device.deviceId })),
-      ...shares.flatMap((share) => {
-        try {
-          return [{
-            agentDeviceId: providerShareAgentDeviceId(share.shareId),
-            name: `${share.providerLabel} · ${share.owner.displayName}`,
-          }];
-        } catch {
-          return [];
-        }
-      }),
-    ];
+    return listAgentModelSourceLocations({
+      devices,
+      shares: getReceivedShares(),
+      includeLocal: false,
+      isDeviceCandidate: isExecutionDeviceCandidate,
+      shareAgentDeviceId: providerShareAgentDeviceId,
+    }).map(({ agentDeviceId, name }) => ({ agentDeviceId, name }));
   }
 
   const getProviderRoutingContext = () =>

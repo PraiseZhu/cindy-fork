@@ -126,6 +126,7 @@ import {
   revokeLegacyGhostProtocolPartition,
   setGhostAppContextProvider,
   setGhostAgentModelsProvider,
+  setGhostAgentModelRoutesProvider,
   setGhostKvStore,
   setGhostConnectionsHandler,
   setGhostOauthHandler,
@@ -734,6 +735,47 @@ describe('read-only agent model directory', () => {
     finish({ ok: true, models: [] });
     expect((await pending).status).toBe(403);
     expect((await handler(new Request('cindy-ghost://agent-owner/agent-models'))).status).toBe(403);
+  });
+});
+
+describe('read-only agent model routes', () => {
+  const emptyRoutes = {
+    ok: true as const,
+    version: 1 as const,
+    checkedAt: 1,
+    complete: true,
+    sources: [],
+    models: [],
+  };
+  it('keeps the local catalog unchanged and serves the new endpoint separately', async () => {
+    const local = vi.fn().mockResolvedValue({ ok: true, models: [{ id: 'local-only' }] });
+    const routes = vi.fn().mockResolvedValue(emptyRoutes);
+    setGhostAgentModelsProvider(local);
+    setGhostAgentModelRoutesProvider(routes);
+    ensureGhostProtocolRegistered(ghost('agent-routes'));
+    const handler = harness.sessions.get(approvedPartition('cindy-ghost-owner:cloud:opaque-owner-a:agent-routes'))!.protocolHandler!;
+    expect(await (await handler(new Request('cindy-ghost://agent-routes/agent-models'))).json()).toEqual({
+      ok: true,
+      models: [{ id: 'local-only' }],
+    });
+    const listed = await handler(new Request('cindy-ghost://agent-routes/agent-model-routes'));
+    expect(listed.status).toBe(200);
+    expect(listed.headers.get('cache-control')).toBe('no-store');
+    expect(routes).toHaveBeenCalledWith('agent-routes', {});
+    expect((await handler(new Request('cindy-ghost://agent-routes/agent-model-routes', { method: 'POST' }))).status).toBe(405);
+    expect((await handler(new Request('cindy-ghost://agent-routes/agent-model-routes?owner=x'))).status).toBe(400);
+    expect((await handler(new Request('cindy-ghost://agent-routes/agent-model-routes?source=local'))).status).toBe(200);
+    expect(routes).toHaveBeenLastCalledWith('agent-routes', { source: 'local' });
+  });
+  it('does not deliver an in-flight remote catalog after owner changes', async () => {
+    let finish!: (value: typeof emptyRoutes) => void;
+    setGhostAgentModelRoutesProvider(() => new Promise(resolve => { finish = resolve; }));
+    ensureGhostProtocolRegistered(ghost('agent-routes-owner'));
+    const handler = harness.sessions.get(approvedPartition('cindy-ghost-owner:cloud:opaque-owner-a:agent-routes-owner'))!.protocolHandler!;
+    const pending = handler(new Request('cindy-ghost://agent-routes-owner/agent-model-routes?source=share:abc'));
+    harness.activeOwner = { mode: 'cloud', dataOwnerId: 'owner-b', generation: 2 };
+    finish(emptyRoutes);
+    expect((await pending).status).toBe(403);
   });
 });
 

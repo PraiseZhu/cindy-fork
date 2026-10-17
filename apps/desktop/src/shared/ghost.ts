@@ -6844,6 +6844,51 @@ export type GhostAgentModelsResult =
     }
   | { ok: false; errorCode: 'PERMISSION_DENIED' | 'NOT_AVAILABLE'; message: string };
 
+export type GhostAgentModelSourceKind = 'local' | 'device' | 'share';
+export type GhostAgentModelSourceStatus = 'ready' | 'empty' | 'unavailable';
+export type GhostAgentModelSourceErrorCode =
+  | 'SOURCE_UNREACHABLE'
+  | 'SOURCE_ACCESS_REVOKED'
+  | 'SOURCE_UNSUPPORTED'
+  | 'CATALOG_TIMEOUT'
+  | 'CATALOG_INVALID';
+
+/** Read-only local plus authorized remote agent routes. No credentials or provider configuration. */
+export type GhostAgentModelRoutesResult =
+  | {
+      ok: true;
+      version: 1;
+      checkedAt: number;
+      complete: boolean;
+      sources: Array<{
+        id: string;
+        name: string;
+        kind: GhostAgentModelSourceKind;
+        status: GhostAgentModelSourceStatus;
+        checkedAt: number;
+        errorCode?: GhostAgentModelSourceErrorCode;
+        message?: string;
+      }>;
+      models: Array<{
+        id: string;
+        name: string;
+        agent: 'codex' | 'claude-code' | 'pi';
+        providerId: string;
+        providerName: string;
+        agentDeviceId: string;
+        sourceName: string;
+        efforts: string[];
+        defaultEffort: string | null;
+        supportsFastMode: boolean | null;
+        visible: true;
+      }>;
+    }
+  | {
+      ok: false;
+      errorCode: 'PERMISSION_DENIED' | 'NOT_AVAILABLE' | 'INVALID_QUERY' | 'SOURCE_NOT_ALLOWED';
+      message: string;
+    };
+
 /** 插件设置页 / 面板可读取的 Cindy Core 媒体模型类型。 */
 export const GHOST_MEDIA_MODEL_TYPES = ['image', 'video'] as const;
 export type GhostMediaModelType = (typeof GHOST_MEDIA_MODEL_TYPES)[number];

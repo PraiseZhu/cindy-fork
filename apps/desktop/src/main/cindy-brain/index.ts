@@ -37,6 +37,13 @@ async function resolveMobilePluginMedia(instanceId: string, url: string, current
 }
 import { getModelVisibilityOverride, waitForModelVisibilityMirror } from '../maker-host/model-visibility-mirror.js';
 import { projectGhostAgentModels } from './ghostAgentModels.js';
+import { createGhostAgentModelRoutesService } from './ghostAgentModelRoutes.js';
+import { handleListDevices, defaultDeps as deviceDirectoryDeps } from '../device-link/ipc.js';
+import { remoteBackgroundInvoke } from '../device-link/index.js';
+import { getReceivedShares, providerShareAgentDeviceId } from '../device-link/providerShareGuest.js';
+import { isExecutionDeviceCandidate } from '../maker-ipc/orcaRemoteWorkers.js';
+import { readDeviceProviderCatalog } from '../remote-agent/controller/deviceCatalog.js';
+import { listAgentModelSourceLocations } from '../remote-agent/controller/modelSources.js';
 import { getDesktopProviderService } from '../maker-host/createDesktopProviderService.js';
 import { PluginDownloadSlot } from './downloadSlot.js';
 import { createDownloader } from '../downloader/index.js';
@@ -244,6 +251,7 @@ import {
   setGhostKvStore,
   setGhostMediaModelsProvider,
   setGhostAgentModelsProvider,
+  setGhostAgentModelRoutesProvider,
   setGhostOauthHandler,
   setGhostSandboxDevToolsDisabled,
   setGhostSecretsHandler,
@@ -7955,6 +7963,48 @@ export function registerGhostIpc(): void {
       return { ok: false, errorCode: 'NOT_AVAILABLE', message: 'Model runtimes unavailable' };
     }
     return projectGhostAgentModels(views, maker.listAvailableAgents(), getModelVisibilityOverride);
+  });
+  setGhostAgentModelRoutesProvider(async (instanceId, query) => {
+    const owner = activeOwnerScopeKey();
+    const stillCurrent = () => owner === activeOwnerScopeKey() && !!findGhostForInstanceId(instanceId)?.enabled;
+    if (!stillCurrent()) {
+      return { ok: false, errorCode: 'NOT_AVAILABLE', message: 'Plugin unavailable' };
+    }
+    return createGhostAgentModelRoutesService({
+      ownerKey: () => String(owner),
+      isCurrent: stillCurrent,
+      listSources: async () => {
+        const { devices } = await handleListDevices(deviceDirectoryDeps()).catch(() => ({ devices: [] }));
+        return listAgentModelSourceLocations({
+          devices,
+          shares: getReceivedShares(),
+          isDeviceCandidate: isExecutionDeviceCandidate,
+          shareAgentDeviceId: providerShareAgentDeviceId,
+        });
+      },
+      readLocal: async () => {
+        await waitForModelVisibilityMirror();
+        const views = await getDesktopProviderService({ allowSideEffects: false }).listProviders({
+          allowSideEffects: false,
+          snapshotOnly: true,
+        });
+        const { getMakerIfReady } = await import('../maker-host/index.js');
+        const maker = getMakerIfReady();
+        if (!maker) throw Object.assign(new Error('Model runtimes unavailable'), { code: 'NOT_AVAILABLE' });
+        return { views, availableAgents: maker.listAvailableAgents(), visibilityOverride: getModelVisibilityOverride };
+      },
+      readRemote: async (sourceId, isCurrent) => {
+        const catalog = await readDeviceProviderCatalog(
+          (id, channel, args) => remoteBackgroundInvoke(id, channel, args, {
+            preSend: () => {
+              if (!isCurrent()) throw Object.assign(new Error('Plugin unavailable'), { code: 'PERMISSION_DENIED' });
+            },
+          }),
+          sourceId,
+        );
+        return { views: catalog.providers, modelVisibilityOverrides: catalog.modelVisibilityOverrides };
+      },
+    })(query);
   });
   // 面板唤醒电子脑(cindy-ghost://<id>/wake 供片分支):面板零桥,唤醒经它
   // 自己的协议通道进来。只对"已装且唤醒"的意识放行;熔断态不清账(重载 /

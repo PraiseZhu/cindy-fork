@@ -4,7 +4,12 @@
 import { CONTROLLER_CAPABILITY_PROVIDER_LOGO_KINDS_V2 } from '@cindy/device-link';
 import { describe, expect, it, vi } from 'vitest';
 
-import { parseDeviceProviderViews, readDeviceProviderViews } from '../controller/deviceCatalog';
+import {
+  parseDeviceProviderCatalog,
+  parseDeviceProviderViews,
+  readDeviceProviderCatalog,
+  readDeviceProviderViews,
+} from '../controller/deviceCatalog';
 
 const provider = (overrides: Record<string, unknown> = {}) => ({
   id: 'spark',
@@ -69,5 +74,25 @@ describe('readDeviceProviderViews', () => {
   it('keeps the error code when the other computer cannot answer', async () => {
     const invoke = vi.fn(async () => ({ ok: false, error: { code: 'DEVICE_OFFLINE', message: 'offline' } }));
     await expect(readDeviceProviderViews(invoke, 'device-b')).rejects.toMatchObject({ message: 'offline', code: 'DEVICE_OFFLINE' });
+  });
+});
+
+describe('readDeviceProviderCatalog', () => {
+  it('keeps boolean visibility overrides and treats a missing map as unsupported', async () => {
+    const invoke = vi.fn(async () => ({
+      ok: true,
+      result: {
+        providers: [provider({ remoteInvocationEnabled: true })],
+        modelVisibilityOverrides: { 'pi:spark:spark/qwen': true, skip: 'yes' },
+      },
+    }));
+    await expect(readDeviceProviderCatalog(invoke, 'share:abc')).resolves.toMatchObject({
+      providers: [{ id: 'spark' }],
+      modelVisibilityOverrides: { 'pi:spark:spark/qwen': true },
+    });
+    expect(parseDeviceProviderCatalog({ providers: [provider()] }).modelVisibilityOverrides).toBeNull();
+    expect(() => parseDeviceProviderCatalog({ providers: [provider()], modelVisibilityOverrides: [] })).toThrow(
+      /Invalid provider list/,
+    );
   });
 });

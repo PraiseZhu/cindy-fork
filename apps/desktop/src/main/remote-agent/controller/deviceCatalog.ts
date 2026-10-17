@@ -48,13 +48,53 @@ export function parseDeviceProviderViews(value: unknown): ProviderView[] {
   });
 }
 
-/** 读那台电脑允许被远程调用的供应商视图。 */
-export async function readDeviceProviderViews(invoke: RemoteInvoke, deviceId: string): Promise<ProviderView[]> {
+export function parseDeviceProviderCatalog(value: unknown): {
+  providers: ProviderView[];
+  modelVisibilityOverrides: Record<string, boolean> | null;
+} {
+  const providers = parseDeviceProviderViews(value);
+  if (!isRecord(value)) throw new Error('Invalid provider list response');
+  if (value.modelVisibilityOverrides == null) {
+    return { providers, modelVisibilityOverrides: null };
+  }
+  if (typeof value.modelVisibilityOverrides !== 'object' || Array.isArray(value.modelVisibilityOverrides)) {
+    throw new Error('Invalid provider list response');
+  }
+  return {
+    providers,
+    modelVisibilityOverrides: Object.fromEntries(
+      Object.entries(value.modelVisibilityOverrides).filter(
+        (entry): entry is [string, boolean] => typeof entry[1] === 'boolean',
+      ),
+    ),
+  };
+}
+
+async function invokeProviderList(invoke: RemoteInvoke, deviceId: string): Promise<unknown> {
   const result = await invoke(deviceId, 'maker:provider:list', [
     { capabilities: [CONTROLLER_CAPABILITY_PROVIDER_LOGO_KINDS_V2] },
   ]);
   if (!result.ok) {
     throw Object.assign(new Error(result.error?.message ?? 'provider list unavailable'), { code: result.error?.code });
   }
-  return parseDeviceProviderViews(result.result).filter((view) => view.remoteInvocationEnabled === true);
+  return result.result;
+}
+
+/** 读那台电脑允许被远程调用的供应商视图。 */
+export async function readDeviceProviderViews(invoke: RemoteInvoke, deviceId: string): Promise<ProviderView[]> {
+  return parseDeviceProviderViews(await invokeProviderList(invoke, deviceId)).filter(
+    (view) => view.remoteInvocationEnabled === true,
+  );
+}
+
+/** 读那台电脑允许被远程调用的供应商，以及它自己的模型可见性快照。 */
+export async function readDeviceProviderCatalog(
+  invoke: RemoteInvoke,
+  sourceId: string,
+): Promise<{ providers: ProviderView[]; modelVisibilityOverrides: Record<string, boolean> | null }> {
+  const catalog = parseDeviceProviderCatalog(await invokeProviderList(invoke, sourceId));
+  return {
+    providers: catalog.providers.filter((view) => view.remoteInvocationEnabled === true),
+    modelVisibilityOverrides: catalog.modelVisibilityOverrides,
+  };
 }
