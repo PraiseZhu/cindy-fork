@@ -1187,6 +1187,7 @@ import {
   runGenericOAuthLogin,
 } from '../maker-host/generic-oauth.js';
 import {
+  revokeCodexAccountUltrafast,
   getCustomProvider,
   mergeDiscoveredModelsIntoConfig,
   updateCustomProviderIfUnchanged,
@@ -7373,10 +7374,17 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       if (method === 'device') throw new Error('Device login is only available for Grok');
       if (isCodexAccountProvider(providerId)) {
         const owner = getActiveAppSession();
-        const current = () => isCurrent() && getActiveAppSession().generation === owner.generation;
+        const sameOwner = () => getActiveAppSession().generation === owner.generation;
+        const current = () => isCurrent() && sameOwner();
         const result = await loginCodexAccount(providerId, isCurrent, onBrowserUrl);
         if (!result.ok) return result;
-        return { ...result, afterCommit: async () => {
+        return { ...result,
+          ...(result.identityChanged ? {
+            commitAccountCapabilities: () => revokeCodexAccountUltrafast(providerId, sameOwner),
+          } : {}),
+          afterCommit: async () => {
+          if (!sameOwner()) return;
+          if (result.identityChanged) await refreshCustomProvidersIntoCatalog();
           if (!current()) return;
           const previous = await getCustomProvider(providerId);
           if (!current()) return;

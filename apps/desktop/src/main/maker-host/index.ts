@@ -1801,6 +1801,7 @@ export function getMaker(): Maker {
           if (!previous?.runtimes.codex || previous.auth?.native !== 'codex') return;
           const next = { ...previous, runtimes: { codex: { ...previous.runtimes.codex,
             models: mapped.map((model) => ({ id: model.id, name: model.name,
+              supportsUltrafastMode: model.supportsUltrafastMode === true,
               ...(model.contextWindowVerified ? { contextWindow: model.contextWindow } : {}),
               discoveredMetadata: model.discoveredMetadata,
             })),

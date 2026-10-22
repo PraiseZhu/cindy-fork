@@ -27,6 +27,7 @@ import { CompanionProfileArtifacts } from './CompanionProfileArtifacts';
 import { loadCompanionProfile, profileFormDirty, type CompanionProfileData, type ProfilePanel, type ProfileValues } from './companionProfileData';
 import { CompanionMemoryPage } from './CompanionMemoryPage';
 import { useCompanionMemory } from './useCompanionMemory';
+import { saveCompanionReplyTargetPreference, useCompanionReplyTargetPreference } from './companionReplyTargetPreference';
 
 // Same identity block as iOS: a 48pt avatar and the name, not a navigation target.
 const AVATAR_SIZE = 48;
@@ -68,6 +69,7 @@ function CompanionProfileSheetContent(props: CompanionProfileSheetProps) {
   const { accountGeneration } = useAuth();
   const styles = useThemedStyles(makeStyles);
   const { colors } = useTheme();
+  const showReplyTargets = useCompanionReplyTargetPreference();
   const [data, setData] = useState<CompanionProfileData | null>(null);
   const [page, setPage] = useState('home');
   const [modelStage, setModelStage] = useState<'profile' | 'closing-profile' | 'picker' | 'closing-picker'>('profile');
@@ -383,6 +385,15 @@ function CompanionProfileSheetContent(props: CompanionProfileSheetProps) {
       <Text accessibilityRole="header" numberOfLines={2} style={styles.name}>{name}</Text>
     </View>
     <View style={styles.group}>{row('profile', Info)}{row('memory', Brain)}{row('models', Sparkles)}{row('skills', Settings2)}</View>
+    {/* Device preference for every teammate's chat, not part of this teammate's host profile. */}
+    <View style={styles.field}>
+      <View style={styles.group}><View style={styles.inline}>
+        <Text style={styles.switchLabel}>{t('devices.companionProfile.showReplyTarget')}</Text>
+        <NativeSwitch accessibilityLabel={t('devices.companionProfile.showReplyTarget')} value={showReplyTargets}
+          onValueChange={value => void saveCompanionReplyTargetPreference(value)} seedColor={colors.inputCaret} />
+      </View></View>
+      {note('showReplyTargetHint')}
+    </View>
     {data?.panels.find(item => item.id === 'followUp')?.entries?.map(entry => <View style={styles.group} key={entry.id}><ContextSheetRow icon={null} trailing="chevron" label={label(entry.title)} onPress={() => void openEditor(entry.resourceId)} disabled={!online} /></View>)}
     <View style={styles.group}>{row('artifacts', FileText)}{onOpenSearch ? row('search', History, onOpenSearch) : null}{row('permissions', Hand)}</View>
     {onOpenHome ? <View style={styles.group}>{row('home', Monitor, onOpenHome)}</View> : null}
@@ -615,6 +626,7 @@ const makeStyles = (colors: ThemeColors) => StyleSheet.create({
   note: { fontSize: typeScale.footnote, lineHeight: lineHeight.caption, color: colors.textSecondary },
   body: { fontSize: typeScale.body, lineHeight: lineHeight.body, color: colors.textPrimary },
   heading: { fontSize: typeScale.body, lineHeight: lineHeight.body, color: colors.textPrimary, fontWeight: fontWeight.medium },
+  switchLabel: { flex: 1, fontSize: typeScale.body, lineHeight: lineHeight.body, color: colors.textPrimary },
   group: { backgroundColor: colors.surfaceElevated, borderColor: colors.border, borderWidth: StyleSheet.hairlineWidth, borderRadius: radius.container, overflow: 'hidden', paddingHorizontal: spacing.lg },
   groupText: { paddingVertical: spacing.md },
   spinner: { paddingVertical: spacing.md },

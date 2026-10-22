@@ -761,7 +761,10 @@
     "uploadAvatar": "上傳頭像",
     "avatarFailed": "無法開啟此圖片，請換一張。",
     "nameTaken": "已有同名夥伴，請換一個名字。",
-    "home": "主力電腦"
+    "home": "主力電腦",
+    "chat": "對話",
+    "showReplyTarget": "顯示回覆對應的訊息",
+    "showReplyTargetHint": "夥伴回覆上方標出它回的是你哪則訊息。對所有夥伴生效，較早的回覆不顯示。"
   },
   "companionImport": {
     "title": "匯入夥伴",

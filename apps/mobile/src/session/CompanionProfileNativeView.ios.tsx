@@ -13,6 +13,7 @@ import type { CompanionProfileNativeViewProps } from './CompanionProfileNativeVi
 import type { ProfilePanel, ProfileValues } from './companionProfileData';
 import { CompanionPortraitPicker } from './CompanionPortraitPicker';
 import { CompanionNativeContent } from './CompanionNativeContent.ios';
+import { saveCompanionReplyTargetPreference, useCompanionReplyTargetPreference } from './companionReplyTargetPreference';
 
 export function CompanionNativeField({ field, values, onChange, busy }: { field: RemoteActionField; values: ProfileValues; onChange(values: ProfileValues): void; busy: boolean }) {
   const { i18n } = useTranslation();
@@ -39,6 +40,7 @@ const Field = CompanionNativeField;
 
 export function CompanionProfileNativeView(p: CompanionProfileNativeViewProps) {
   const { t, i18n } = useTranslation(); const { colors } = useTheme();
+  const showReplyTargets = useCompanionReplyTargetPreference();
   const tr = (key: string) => t(`devices.companionProfile.${key}`, { deviceName: p.deviceName });
   const label = (value: Parameters<typeof resolveRemoteText>[0]) => resolveRemoteText(value, i18n.language);
   const note = (text: string, error = false) => <Section><Text modifiers={[font({ textStyle: 'footnote' }), foregroundStyle(error ? colors.errorText : colors.textSecondary)]}>{text}</Text></Section>;
@@ -57,6 +59,11 @@ export function CompanionProfileNativeView(p: CompanionProfileNativeViewProps) {
       <Text modifiers={[font({ textStyle: 'headline' }), lineLimit(2)]}>{p.name}</Text><Spacer />
     </HStack></Section>
     <Section>{row('profile', 'person.crop.circle')}{row('memory', 'brain')}{row('models', 'slider.horizontal.3')}{row('skills', 'sparkles')}</Section>
+    {/* Device preference for every teammate's chat, not part of this teammate's host profile. */}
+    <Section title={tr('chat')} footer={<Text modifiers={[font({ textStyle: 'footnote' }), foregroundStyle(colors.textSecondary)]}>{tr('showReplyTargetHint')}</Text>}>
+      <Toggle label={tr('showReplyTarget')} isOn={showReplyTargets} onIsOnChange={value => void saveCompanionReplyTargetPreference(value)}
+        modifiers={[tint(colors.inputCaret)]} testID="companionProfile.showReplyTarget" />
+    </Section>
     {p.data?.panels.find(item => item.id === 'followUp')?.entries?.map(entry => <Section key={entry.id}>{action(label(entry.title), () => p.onEditor(entry.resourceId), !p.online)}</Section>)}
     <Section>{row('artifacts', 'doc.text')}{p.onSearch ? row('search', 'magnifyingglass', p.onSearch) : null}{row('permissions', 'hand.raised')}</Section>
     {p.onHome ? <Section>{row('home', 'desktopcomputer', p.onHome)}</Section> : null}

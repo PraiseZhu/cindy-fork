@@ -5879,6 +5879,8 @@ function CCAgentSessionContent({
                 ) : pendingAskUser ? (
                   <AskUserQuestionPrompt
                     voiceBridge={voiceModeOpen && voiceModeAvailable && !voiceModeBlocked ? voiceQuestionBridge : undefined}
+                    voiceShortcutPreferred={isOrcaLeadSessionView}
+                    hostVisible={viewVisible}
                     sessionId={sessionId}
                     workingDir={session?.workingDir ?? ''}
                     remoteHostId={session?.remoteHostId}

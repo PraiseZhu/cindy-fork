@@ -761,7 +761,10 @@
     "uploadAvatar": "Upload Avatar",
     "avatarFailed": "Could not open this image. Try another.",
     "nameTaken": "That name is already in use. Choose another.",
-    "home": "Main Computer"
+    "home": "Main Computer",
+    "chat": "Chat",
+    "showReplyTarget": "Show which message a reply answers",
+    "showReplyTargetHint": "Above a teammate’s reply, show which of your messages it answers. Applies to all teammates. Older replies don’t show this."
   },
   "companionImport": {
     "title": "Import a teammate",

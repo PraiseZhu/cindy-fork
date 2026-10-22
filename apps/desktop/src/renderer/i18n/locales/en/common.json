@@ -4065,7 +4065,7 @@
         "assigned": "Replies come from the linked teammate",
         "description": "Chat with {{name}} on WeChat, sharing memory and the main task. This computer’s WeChat connection can belong to one teammate at a time.",
         "other": "WeChat is linked to another teammate. Remove that link in their connection settings or Personal WeChat settings first.",
-        "permissionNote": "WeChat keeps per-action permission checks. Choose Claude Code or Codex for this teammate, with Auto-review or Ask permissions.",
+        "permissionNote": "Your WeChat messages to this teammate use its permission settings, including Full access. Change permissions below the teammate’s chat input in Cindy. Messages from other people remain restricted.",
         "remove": "Remove teammate link",
         "useExisting": "Use connected WeChat with {{name}}",
         "updateFailed": "Could not update the link. Wait for WeChat tasks to finish, then retry and check that the teammate is available."

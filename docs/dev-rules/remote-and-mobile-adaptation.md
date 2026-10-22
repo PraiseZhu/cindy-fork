@@ -108,6 +108,34 @@ relay 以 close 1013 `inbound backpressure` 主动断连，此时任何「立即
 一起打掉线，由 #1405 收窄止损半径修复。协议兼容、allowlist、单测三层防线对这类问题
 全部免疫，只有 review 时点名问「半径」才拦得住。
 
+### 直连优先、中继兜底(同账号设备)
+
+产品要求：Device Link 的设备间功能(含手机)在两端已授权、网络实际可达时优先直连，
+直连失败、超时或中途断开时自动改走 relay，不能让功能卡住，也不能重复执行命令。
+选路与兜底在 `packages/device-link` 统一实现(`directPath.ts` 与 `DeviceLinkClient`)，
+平台只负责建立通道并调用 `attachDirectPath`。
+
+- **分工**：relay 仍是控制面——登录、在线状态、账号归属、link-open/accept/close、
+  链路确认 ACK 都只走 relay。直连只承载已建立可靠链路上的 reliable-transport 帧
+  (invoke / invoke-result / push)及普通累计 ACK。可靠层按 seq 去重、按序交付，
+  同一条消息经两条路径各到一次也只执行一次。
+- **授权**：直连帧的来源取自通道绑定的设备，不信任帧内 `src`；被控端照常逐条复验
+  被控开关、撤权名单与 allowlist。共享任务、供应商分享等跨账号范围不走直连，逐帧
+  授权仍由 relay 执行。relay 报告对端离线(含被移出账号)、链路被关闭或撤权、客户端
+  停止时立即撤下直连。ACK 原路返回，单向失效时发送端不会被困在直连上。
+- **故障半径三问**：① 故障层级是单个 peer 的直连通道(通道关闭、写入失败、发送缓冲
+  在一个可靠重试基准期内没有下降，或已发出的帧过了自适应 ACK 基准期仍未确认)；直连
+  判活不乘 relay 的大消息字节退避，单条大结果也能及时回退；缓冲仍有进展时
+  继续等待排空，不误判正常背压；② 动作只撤下这一台设备的直连，把它仍未确认的帧
+  恢复为未发送、按 relay 既有恢复预算(先探测一批、收到 ACK 再继续)重发，不重连
+  relay、不重建链路，直连的失败不消耗 relay 的重试次数；③ 回归见
+  `packages/device-link/src/__tests__/client.test.ts`「直连优先、中继兜底」：两个控制端
+  共用同一被控端，其中一个的直连静默，断言命令只执行一次、结果经 relay 送达，另一个
+  控制端仍走直连、在途请求与 relay 连接不受影响。
+- **范围**：本阶段只有连接层选路与兜底，没有平台接入通道时行为与改动前完全相同，
+  也没有 wire 变更。relay 断线期间链路随之复位，直连暂不单独维持链路。Desktop 与
+  Mobile 经已授权信令建立 WebRTC 直连、手机局域网权限等平台接入另行实现。
+
 ## 远程 Agent 的拉取与恢复(`maker:remote-agent:v1`)
 
 协议见 [`protocol-compatibility.md`](protocol-compatibility.md)「远程 Agent」。恢复策略按故障半径三问：
