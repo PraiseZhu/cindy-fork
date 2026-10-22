@@ -2,7 +2,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { DeviceLinkError, type InvokeResultPayload } from '@cindy/device-link';
 
 import type { DeviceLinkDeviceView } from '../../../shared/deviceLinkIpc.js';
-import type { OrcaTeamService, OrcaTeamServiceDeps, WorkerTerminalTurnCapture } from '../orcaTeamService.js';
+import type { OrcaRemotePendingReport } from '../../../shared/orcaRemoteWorker.js';
+import { createOrcaTeamService, type OrcaTeamService, type OrcaTeamServiceDeps, type OrcaWorkerRecordSnapshot, type WorkerTerminalTurnCapture } from '../orcaTeamService.js';
 import { withSendToSessionLock } from '../sendToSessionLock.js';
 import { createOrcaRemoteWorkerHost, type OrcaRemoteWorkerExistingSession } from '../orcaRemoteWorkerHost.js';
 
@@ -12,7 +13,8 @@ const store = vi.hoisted(() => ({
   listActiveRemoteWorkers: vi.fn(async () => []),
   listUnreleasedEndedRemoteWorkers: vi.fn(async () => []),
   markWorkerRemoteReleased: vi.fn(async () => undefined),
-  saveWorkerRemoteReport: vi.fn(async () => undefined),
+  saveWorkerRemoteReport: vi.fn(async (_id: string, _pending: OrcaRemotePendingReport | null,
+    _messageId?: string, _markWorkerDone?: boolean) => undefined),
   markWorkerRemoteStopConfirmed: vi.fn(async () => undefined),
   getWorkerRemoteReleaseState: vi.fn(async () => ({ remoteStopConfirmedAt: null as number | null, remoteReleasedAt: null as number | null })),
   saveRemoteWorkerOpen: vi.fn(async () => undefined),
@@ -57,6 +59,7 @@ function setup(opts: {
   getTeamService?: () => OrcaTeamService | null;
 } = {}) {
   const devices = opts.devices ?? [device({})];
+  const acceptedInputs = new Map<string, string>();
   const remoteInvoke = vi.fn(async (deviceId: string, channel: string, args: unknown[]) => {
     const custom = await opts.handle?.(deviceId, channel, args);
     if (custom) return custom;
@@ -75,7 +78,13 @@ function setup(opts: {
       case 'local-db:history:messages':
         return ok({ items: [], terminal: null });
       case 'maker:input:enqueue':
+        acceptedInputs.set((args[1] as { clientId: string }).clientId, 'cc');
         return ok({});
+      case 'local-db:messages:around-client-id': {
+        const clientId = args[1] as string;
+        const agentKind = acceptedInputs.get(clientId);
+        return ok(agentKind ? [{ clientId, role: 'user', agentKind }] : []);
+      }
       case 'maker:abort-session':
         return ok(undefined);
       case 'maker:orca:remote-worker:release':
@@ -123,6 +132,7 @@ function baseDeps() {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  store.saveWorkerRemoteReport.mockReset().mockResolvedValue(undefined);
 });
 
 describe('invokeDeviceValue', () => {
@@ -488,6 +498,10 @@ describe('wrapTeamDeps', () => {
       captureWorkerText: vi.fn(),
       handleWorkerTerminalTurn: vi.fn(async () => { capture = { ...capture, autoBridgeIdentity: null }; }),
       handleWorkerTurnStarted: vi.fn(async () => undefined),
+      settleReportedWorker: vi.fn(async (reported: WorkerTerminalTurnCapture) => {
+        if (capture.autoBridgeIdentity === reported.autoBridgeIdentity)
+          capture = { ...capture, autoBridgeIdentity: null };
+      }),
     };
     const history: Array<{ id: string; clientId?: string; role: string; content: string }> = [];
     const handle = (_deviceId: string, channel: string, args: unknown[]) => {
@@ -512,6 +526,66 @@ describe('wrapTeamDeps', () => {
     };
     return { service, history, handle, onAccepted, capture: () => capture };
   }
+
+  async function trackedTeam(setupOpts: Parameters<typeof setup>[0] = {}) {
+    let service!: OrcaTeamService;
+    const ctx = await trackedWorker({ ...setupOpts, getTeamService: () => service });
+    let worker = { id: 'w-1', teamId: 'team-1', leadSessionId: 'lead-1', sessionId: 'proxy-1',
+      status: 'idle', session: { ...proxySeed, agentKind: 'claude-code' } } as OrcaWorkerRecordSnapshot;
+    store.saveWorkerRemoteReport.mockImplementation(async (_id, _pending, _messageId, markWorkerDone) => {
+      if (markWorkerDone) worker = { ...worker, status: 'done' };
+      return undefined;
+    });
+    const deps = {
+      ...baseDeps(),
+      getWorkerLinkBySessionId: vi.fn(async () => ({ workerId: 'w-1', teamId: 'team-1',
+        workerSessionId: 'proxy-1', leadSessionId: 'lead-1' })),
+      listWorkersByLead: async () => [worker],
+      getManualInterrupt: () => null,
+      clearManualInterrupt: vi.fn(),
+      updateWorkerStatus: vi.fn(async (_id: string, status: OrcaWorkerRecordSnapshot['status']) => {
+        worker = { ...worker, status };
+      }),
+      broadcastOrcaWorkerChanged: vi.fn(),
+      onLeadWorkerReportsSettled: vi.fn(),
+      sendAutoBridgeToLead: vi.fn(async () => ({ accepted: true })),
+      log: { info: vi.fn(), warn: vi.fn() },
+    };
+    service = createOrcaTeamService(ctx.workers.wrapTeamDeps(deps));
+    return { ...ctx, service, deps, getWorker: () => worker };
+  }
+
+  // PR #6659 / discussion_r4334849858: deleting runtime/durable pending before Team
+  // settlement loses the only retry after a DB lookup/write failure. The inverse
+  // order also lost Team pending on retirement failure (discussion_r4335615412).
+  // Unit: real host settlement + TeamService, one report and
+  // a one-shot storage failure; polling must later release the Lead without new input.
+  it.each(['lookup', 'retirement'] as const)('keeps a report retryable after Team %s fails', async (failure) => {
+    const report = reportService();
+    const { workers, remoteInvoke, service, deps, getWorker } = await trackedTeam({ handle: report.handle });
+    try {
+      await service.sendToWorker({ callerLeadSessionId: 'lead-1', targetSessionId: 'proxy-1', message: 'A' });
+      const enqueue = remoteInvoke.mock.calls.find(([, channel]) => channel === 'maker:input:enqueue')!;
+      const clientId = (enqueue[2][1] as { clientId: string }).clientId;
+      store.saveWorkerRemoteReport.mockClear();
+      if (failure === 'lookup') deps.getWorkerLinkBySessionId.mockRejectedValueOnce(new Error('storage unavailable'));
+      else store.saveWorkerRemoteReport.mockRejectedValueOnce(new Error('storage unavailable'));
+
+      await expect(workers.captureReportSettlement('proxy-1', [clientId])()).rejects.toThrow('storage unavailable');
+      expect(workers.runtime.hasPendingReport('proxy-1')).toBe(true);
+      expect(service.hasPendingWorkerReports('lead-1')).toBe(true);
+      expect(getWorker().status).toBe('running');
+      if (failure === 'retirement') expect(store.saveWorkerRemoteReport).toHaveBeenCalledOnce();
+      else expect(store.saveWorkerRemoteReport).not.toHaveBeenCalled();
+
+      report.history.push({ id: 'result-a', role: 'assistant', content: 'A completed' });
+      await workers.runtime.pollNow();
+      expect(workers.runtime.hasPendingReport('proxy-1')).toBe(false);
+      expect(service.hasPendingWorkerReports('lead-1')).toBe(false);
+      expect(getWorker().status).toBe('done');
+      expect(deps.onLeadWorkerReportsSettled).toHaveBeenCalledOnce();
+    } finally { workers.stop(); }
+  });
 
   it('waits for the host accepted lifecycle before reporting an immediate remote reply', async () => {
     const report = reportService();
@@ -681,6 +755,45 @@ describe('wrapTeamDeps', () => {
     } finally { workers.stop(); }
   });
 
+  // Review regression: runtime-only rollback tests missed TeamService restoring A after
+  // A was reported while B's pre-enqueue save was waiting. Real service + remote adapter
+  // must leave neither layer pending after B fails. Unit tier, in-memory store/transport.
+  it('reconciles Team pending when B fails after A was reported during B preparation', async () => {
+    let rejectEnqueue = false;
+    const { workers, remoteInvoke, service, deps, getWorker } = await trackedTeam({
+      handle: (_device, channel) => channel === 'maker:input:enqueue' && rejectEnqueue
+        ? fail('PERMISSION_DENIED', 'remote enqueue rejected') : undefined,
+    });
+    let release: (() => void) | undefined;
+    try {
+      const params = { callerLeadSessionId: 'lead-1', targetSessionId: 'proxy-1', message: 'A' };
+      await expect(service.sendToWorker(params)).resolves.toMatchObject({ ok: true });
+      const firstInput = remoteInvoke.mock.calls.find(([, channel]) => channel === 'maker:input:enqueue')!;
+      const clientId = (firstInput[2][1] as { clientId: string }).clientId;
+      const lookup = deps.getWorkerLinkBySessionId.getMockImplementation()!;
+      deps.getWorkerLinkBySessionId.mockImplementationOnce(() => new Promise(resolve => {
+        release = () => { void lookup().then(resolve); };
+      }));
+      const settle = workers.captureReportSettlement('proxy-1', [clientId])();
+      await vi.waitFor(() => expect(release).toBeTypeOf('function'));
+      // The lookup wait precedes the transition lock, so B can prepare while
+      // A still owns Team pending. The atomic write has not committed yet.
+      expect(service.hasPendingWorkerReports('lead-1')).toBe(true);
+      expect(deps.onLeadWorkerReportsSettled).not.toHaveBeenCalled();
+      remoteInvoke.mockClear();
+      rejectEnqueue = true;
+      const dispatchB = service.sendToWorker({ ...params, message: 'B' });
+      await vi.waitFor(() => expect(remoteInvoke).toHaveBeenCalledWith('mac-mini', 'local-db:sessions:get', ['remote-1']));
+      release!();
+      await settle;
+      await expect(dispatchB).resolves.toMatchObject({ ok: false });
+      expect(workers.runtime.hasPendingReport('proxy-1')).toBe(false);
+      expect(service.hasPendingWorkerReports('lead-1')).toBe(false);
+      expect(getWorker().status).toBe('done');
+      expect(deps.onLeadWorkerReportsSettled).toHaveBeenCalledTimes(2);
+    } finally { release?.(); workers.stop(); }
+  });
+
   it('preserves accepted rejection when its rollback also fails', async () => {
     const { workers, remoteInvoke } = await trackedWorker();
     const error = new Error('permission revoked');
@@ -773,6 +886,58 @@ describe('wrapTeamDeps', () => {
     expect(base.dispatchWorkerMessage).not.toHaveBeenCalled();
     expect(remoteInvoke.mock.calls.some(([, channel]) => channel === 'maker:input:enqueue')).toBe(true);
     workers.stop();
+  });
+
+  const remoteAgentKinds = ['claude-code', 'codex', 'pi'] as const;
+  const remoteSwitchCases = remoteAgentKinds.flatMap(from => remoteAgentKinds
+    .filter(to => to !== from).flatMap(to => ['dispatch', 'interrupt', 'queued'].map(mode => ({ from, to, mode }))));
+  it.each(remoteSwitchCases)('returns the execution device Agent after $from → $to ($mode)', async ({ from, to, mode }) => {
+    let dispatchCount = 0;
+    const acceptedInputs = new Map<string, string>();
+    const { workers, remoteInvoke } = await trackedWorker({ handle: (_device, channel, args) => {
+      if (channel === 'local-db:sessions:get') return ok({ status: 'active',
+        agentKind: from === 'claude-code' ? 'cc' : from,
+        workingDir: '/remote/work', model: 'remote-model' });
+      if (channel === 'maker:input:enqueue') {
+        dispatchCount += 1;
+        if (dispatchCount === 1 || mode !== 'queued') {
+          acceptedInputs.set((args[1] as { clientId: string }).clientId, dispatchCount === 1 ? from : to);
+        }
+        return ok({});
+      }
+      if (channel === 'local-db:messages:around-client-id') {
+        const clientId = args[1] as string;
+        const agentKind = acceptedInputs.get(clientId);
+        return ok(agentKind ? [{ clientId, role: 'user', agentKind }] : []);
+      }
+      if (channel === 'maker:list-active') return ok({ format: 'active-sessions-v2',
+        sessions: [{ sessionId: 'remote-1', isTurnRunning: mode === 'queued' }] });
+      return undefined;
+    } });
+    try {
+      // The pending switch commits only when the execution device consumes the
+      // second input. Both the proxy and the pre-enqueue session row remain old.
+      const wrapped = workers.wrapTeamDeps(baseDeps());
+      const params = { targetSessionId: 'proxy-1', workerId: 'w-1', message: 'Continue',
+        dispatchMeta: { source: 'mcp', context: 'send_to_worker' } };
+      const first = await wrapped.dispatchWorkerMessage(params);
+      expect(first).toMatchObject({ ok: true, mode: 'dispatched', agentKind: from });
+      if (mode === 'queued') await workers.runtime.pollNow();
+      const result = await (mode === 'interrupt'
+        ? wrapped.reserveWorkerMessage(params)
+        : wrapped.dispatchWorkerMessage(params));
+      if (mode === 'queued') {
+        expect(result).toMatchObject({ ok: true, mode: 'queued' });
+        expect(result).not.toHaveProperty('agentKind');
+      } else {
+        expect(result).toMatchObject({ ok: true, mode: 'dispatched', agentKind: to });
+      }
+      const enqueueCalls = remoteInvoke.mock.calls.filter(([, channel]) => channel === 'maker:input:enqueue');
+      expect(enqueueCalls).toHaveLength(2);
+      expect(enqueueCalls[1]![2][1]).toMatchObject({ createOpts: { agentKind: from } });
+      // Enqueue is still the old projection response; acceptance evidence comes
+      // from the existing message lookup, never from a second enqueue.
+    } finally { workers.stop(); }
   });
 
   it('fails the dispatch when the device is offline instead of queueing it', async () => {

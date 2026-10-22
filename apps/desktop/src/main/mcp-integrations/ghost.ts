@@ -198,7 +198,7 @@ function resolveCanonicalForgeDir(source: string): string {
 }
 
 type ForgeOutsideAccess =
-  | { ok: true; allowOutsideWorkdir: false }
+  | { ok: true; allowOutsideWorkdir: false; isCurrent: () => boolean }
   | {
       ok: true;
       allowOutsideWorkdir: true;
@@ -212,13 +212,13 @@ function forgeOutsidePackFlags(access: Extract<ForgeOutsideAccess, { ok: true }>
   authorizedDir?: string;
   isCurrent?: () => boolean;
 } {
-  return access.allowOutsideWorkdir
-    ? {
-        allowOutsideWorkdir: true,
-        authorizedDir: access.authorizedDir,
-        ...(access.isCurrent ? { isCurrent: access.isCurrent } : {}),
-      }
-    : {};
+  return {
+    ...(access.allowOutsideWorkdir ? {
+      allowOutsideWorkdir: true,
+      authorizedDir: access.authorizedDir,
+    } : {}),
+    ...(access.isCurrent ? { isCurrent: access.isCurrent } : {}),
+  };
 }
 
 function requireLiveSessionInstance(
@@ -257,7 +257,20 @@ async function authorizeForgeOutsideWorkdir(params: {
   getLiveSessionGrantState?: CindyGhostsHostDeps['getLiveSessionGrantState'];
 }): Promise<ForgeOutsideAccess> {
   const location = classifyForgeSourceRelativeToWorkdir(params.dir, params.sessionWorkdir);
-  if (location !== 'outside') return { ok: true, allowOutsideWorkdir: false };
+  if (location !== 'outside') {
+    // The DB plan flag is the next-message checkbox, not execution authority.
+    // In-workdir Forge writes need the same live Plan guard as outside grants.
+    try {
+      const { sessionId, sessionInstanceId } = params.sessionContext ?? {};
+      const live = sessionId && sessionInstanceId
+        ? params.getLiveSessionGrantState?.(sessionId, sessionInstanceId) : null;
+      if (live?.permissionMode && live.permissionMode !== 'plan'
+        && !live.remoteHostId && live.isCurrent?.() === true) {
+        return { ok: true, allowOutsideWorkdir: false, isCurrent: live.isCurrent };
+      }
+    } catch { /* Unavailable runtime authority cannot authorize writes. */ }
+    return { ok: false, errorCode: 'PERMISSION_DENIED', message: GRANT_AUTHORIZATION_CHANGED_MESSAGE };
+  }
   const live = requireLiveSessionInstance(
     params.sessionContext?.sessionId,
     params.sessionContext?.sessionInstanceId,
@@ -281,6 +294,7 @@ async function authorizeForgeOutsideWorkdir(params: {
     sessionId: live.sessionId,
     sessionInstanceId: live.sessionInstanceId,
     lane: 'forge_source',
+    requiresResolvedPathReview: path.relative(path.resolve(params.dir), authorizedDir) !== '',
     items: [{
       name: path.basename(authorizedDir) || authorizedDir,
       absPath: authorizedDir,
@@ -313,7 +327,7 @@ async function authorizeForgeOutsideWorkdir(params: {
 }
 
 function assertForgeGrantCurrent(access: Extract<ForgeOutsideAccess, { ok: true }>): ForgeOutsideAccess {
-  if (access.allowOutsideWorkdir && access.isCurrent?.() !== true) {
+  if (access.isCurrent?.() !== true) {
     return { ok: false, errorCode: 'PERMISSION_DENIED', message: GRANT_AUTHORIZATION_CHANGED_MESSAGE };
   }
   return access;
@@ -349,6 +363,9 @@ export async function authorizeDesktopSessionPath(
     sessionId: live.sessionId,
     sessionInstanceId: live.sessionInstanceId,
     lane: 'outside_workdir',
+    // This Host callback receives only a canonical path, without the original
+    // harness arguments. Native ownership cannot prove it reviewed this target.
+    requiresResolvedPathReview: true,
     items: [{
       name: path.basename(request.path) || request.path,
       absPath: request.path,
@@ -402,7 +419,7 @@ async function packForgeSource(
       });
     }
   }
-  if (packFlags.allowOutsideWorkdir && packFlags.authorizedDir && packFlags.isCurrent?.() !== true) {
+  if (packFlags.isCurrent?.() === false) {
     return {
       ok: false as const,
       result: { ok: false as const, errorCode: 'PERMISSION_DENIED' as const, message: GRANT_AUTHORIZATION_CHANGED_MESSAGE },
@@ -415,9 +432,9 @@ async function packForgeSource(
       ? {
           allowOutsideWorkdir: true,
           authorizedDir: packFlags.authorizedDir,
-          ...(packFlags.isCurrent ? { isCurrent: packFlags.isCurrent } : {}),
         }
       : {}),
+    ...(packFlags.isCurrent ? { isCurrent: packFlags.isCurrent } : {}),
   };
   let packed = await packGhostDir(dir, iconPng ? { ...packOptions, iconPng } : packOptions);
   // icon overlay 的任何失败都不是打包门槛：用原源码再打一次。若原源码
@@ -439,7 +456,7 @@ async function packForgeSource(
  * workdir 外过户 / Forge 源码确认:
  *   - 对象在会话 workdir 内 → 自动放行;
  *   - 本地活跃会话当前为 Full Access(bypassPermissions) → Host 自动放行;
- *   - Auto → 当前会话统一审阅器(allow 继续 / block 返回原因 / ask 才弹卡);
+ *   - Auto → 原生已接管则不复审，否则当前会话审阅器(allow / block / ask);
  *   - 其余(Ask、无会话、远程、查询失败)→ 弹确认卡,用户点允许才继续。
  * 禁止在 Host 已按当前档位放行后再因目录边界悄悄硬断。
  * Full Access 只替代本处确认,不扩大插件 manifest slot、网络、
@@ -452,6 +469,8 @@ export interface GhostGrantLiveSessionState {
   /** Includes the captured permission/Plan generations and forbids active or unknown Plan. */
   isCurrent?: () => boolean;
   reviewAction?: (action: ReviewableAction) => Promise<AutoReviewDecision>;
+  /** Supplied by the live harness; absent means Cindy owns review. */
+  autoReviewOwner?: 'native' | 'cindy';
 }
 
 /**
@@ -669,6 +688,8 @@ async function requestGrantConfirm(params: {
   sessionInstanceId: string | null;
   lane: GhostGrantLane;
   items: GhostGrantFileItem[];
+  /** Native approval of an alias does not authorize a newly resolved target. */
+  requiresResolvedPathReview?: boolean;
   toolName?: string;
   operation?: 'read' | 'write';
   getLiveSessionGrantState?: CindyGhostsHostDeps['getLiveSessionGrantState'];
@@ -701,6 +722,13 @@ async function requestGrantConfirm(params: {
         return { ok: true, approvalSource: 'full-access', isCurrent };
       }
       if (live?.permissionMode === 'auto' && live.reviewAction) {
+        // The harness already owns this MCP invocation. Keep live authority and
+        // path/slot checks, but do not ask a second model to reinterpret its intent.
+        // A remote task cannot extend approval to controller-local files.
+        if (!params.requiresResolvedPathReview && live.autoReviewOwner === 'native' && !live.remoteHostId && live.isCurrent?.() === true && isCurrent?.() === true) {
+          log.debug('ghost grant: native reviewer owns handoff', { lane: params.lane });
+          return { ok: true, approvalSource: 'auto-review', isCurrent };
+        }
         const decision = await live.reviewAction(toolAutoReviewAction('plugin_file_handoff', {
           ghostId: params.ghostId,
           lane: params.lane,
@@ -794,6 +822,10 @@ async function requestMediaPathRevealConfirm(params: {
         return { ok: true, isCurrent };
       }
       if (live?.permissionMode === 'auto' && live.reviewAction) {
+        if (live.autoReviewOwner === 'native' && !live.remoteHostId && live.isCurrent?.() === true && isCurrent?.() === true) {
+          log.debug('ghost media: native reviewer owns path reveal');
+          return { ok: true, isCurrent };
+        }
         const decision = await live.reviewAction(toolAutoReviewAction('cindy_media.resolve_local_path', {
           path: params.absPath, mimeType: params.mimeType,
         }, 'Return the controller local path of this managed media to the agent.'));
@@ -1001,6 +1033,7 @@ async function prepareLocalPathAttachments(params: {
         sessionInstanceId: params.sessionInstanceId,
         lane: 'attachments',
         items,
+        requiresResolvedPathReview: needConfirm.some((item) => path.relative(path.resolve(item.url), item.absPath) !== ''),
         getLiveSessionGrantState: params.getLiveSessionGrantState,
       });
       if (!confirm.ok) return confirm;
@@ -1114,6 +1147,7 @@ async function confirmDepositOutsideWorkdir(params: {
     sessionInstanceId: params.sessionInstanceId,
     lane: params.lane,
     items: [item],
+    requiresResolvedPathReview: path.relative(path.resolve(params.dirAbs), real) !== '',
     getLiveSessionGrantState: params.getLiveSessionGrantState,
   });
   if (!confirm.ok) return confirm;
@@ -1834,7 +1868,7 @@ export function getCindyGhostsMcpDeps(
         : undefined;
       let result: Record<string, unknown>;
       try {
-        result = await callCindyMedia(request, downloadContext);
+        result = await callCindyMedia(request, downloadContext, sessionId);
       } finally {
         downloadContext?.dispose?.();
       }
@@ -2562,7 +2596,7 @@ export function getCindyGhostsMcpDeps(
           packed: attempt.packed,
           iconNote: attempt.iconNote,
           mutationOwner,
-          ...(stillGranted.allowOutsideWorkdir && stillGranted.isCurrent
+          ...(stillGranted.isCurrent
             ? { isCurrent: stillGranted.isCurrent }
             : {}),
         };

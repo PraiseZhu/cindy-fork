@@ -49,7 +49,7 @@ const cache = new Map<string, DeviceProvidersPayload>();
 const inflight = new Map<string, Promise<DeviceProvidersPayload>>();
 const deviceGen = new Map<string, number>();
 export type DeviceProvidersEvent =
-  | { status: 'loading' }
+  | { status: 'loading'; retainDisplaySnapshot?: boolean }
   | ({ status: 'ready' } & DeviceProvidersPayload)
   | { status: 'error'; error: string; unsupported: boolean };
 const listeners = new Map<string, Set<(event: DeviceProvidersEvent) => void>>();
@@ -298,7 +298,8 @@ export function useDeviceProviders(deviceId?: string): UseDeviceProvidersResult 
       if (cancelled) return;
       if (event.status === 'loading') {
         retryGeneration = undefined;
-        // 保留上一份完整列表避免视觉跳变，但让模型选择逻辑等待同轮新快照。
+        // 配置刷新可保留显示快照；断链或账号切换必须立即清掉旧目录。
+        if (!event.retainDisplaySnapshot) setPayload(EMPTY_PAYLOAD);
         setOwnerDeviceId(deviceId);
         setLoading(true);
         setError(null);
@@ -406,10 +407,22 @@ export function isDeviceProvidersGenerationCurrent(deviceId: string, generation:
   return (deviceGen.get(deviceId) ?? 0) === generation;
 }
 
-export function evictDeviceProviders(deviceId: string): number {
+export function evictDeviceProviders(
+  deviceId: string,
+  options?: { retainDisplaySnapshot?: boolean },
+): number {
   cache.delete(deviceId);
   inflight.delete(deviceId);
   deviceGen.set(deviceId, (deviceGen.get(deviceId) ?? 0) + 1);
-  notifyDeviceProviders(deviceId, { status: 'loading' });
+  notifyDeviceProviders(deviceId, {
+    status: 'loading',
+    ...(options?.retainDisplaySnapshot ? { retainDisplaySnapshot: true } : {}),
+  });
   return deviceGen.get(deviceId)!;
+}
+
+/** 账号边界：缓存、在途读取及挂载中的旧账号目录一起失效。 */
+export function evictAllDeviceProviders(): void {
+  const devices = new Set([...cache.keys(), ...inflight.keys(), ...listeners.keys(), ...deviceGen.keys()]);
+  for (const deviceId of devices) evictDeviceProviders(deviceId);
 }

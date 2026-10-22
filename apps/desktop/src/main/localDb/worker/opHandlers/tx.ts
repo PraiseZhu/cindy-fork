@@ -1,4 +1,7 @@
+import { fastModeToStorage } from '@cindy/maker-shared';
+import { runPluginUsageTransaction } from './pluginUsageTx.js';
 import { runTaskTagsTransaction } from './taskTagsTx.js';
+import { recordMediaSpend } from './mediaSpendTx.js';
 import { batchAutoReviewProjection, readAutoReviewProjectionTransaction } from '../../autoReviewProjection.js';
 import { CLOSE_SHARED_TASKS_FOR_SESSION_SQL } from '../../sharedTaskClosureSql.js';
 import { normalizeBotName } from '../../../../shared/botCreation.js';
@@ -8,7 +11,7 @@ import { inferBotTemplatePresetId } from '../../../../shared/botTemplatePreset.j
 
 import type Database from 'better-sqlite3';
 
-import type { DbTxName } from '../../client/tx/types.js';
+import type { DbTxName, SessionsSetTerminalStatusResult } from '../../client/tx/types.js';
 import { computeForkSourceMessagesDigest, type ForkSourceMessage } from '../../forkRecoverySnapshot.js';
 import { normalizeWorkingDirForStorage } from '../../../../shared/workingDir.js';
 import { capImportedToolResultContent } from '../../../../shared/toolResultPersistCap.js';
@@ -41,7 +44,13 @@ import {
   botGroupsSetMembers,
   botGroupsSettleStep,
 } from './botGroupsTx.js';
-import type { BotGroupsCreateLaneArgs, BotGroupsCreateLaneResult } from '../../client/tx/types.js';
+import type {
+  BotGroupsCreateLaneArgs,
+  BotGroupsCreateLaneResult,
+  BotsArchiveChannelLanesArgs,
+  BotsCreateChannelLaneArgs,
+  BotsCreateThreadLaneArgs,
+} from '../../client/tx/types.js';
 
 const LOCAL_DUPLICATE_WINDOW_MS = 5 * 60 * 1000;
 const MAX_ATTEMPTS = 5;
@@ -58,6 +67,8 @@ function dispatchTransaction(db: Database.Database, args: unknown): unknown {
   const txArgs = payload.args;
 
   switch (name) {
+    case 'usage.recordMediaSpend':
+      return recordMediaSpend(db, txArgs as import('../../client/tx/types.js').MediaSpendArgs);
     case 'authorization.readProjection':
       return readAutoReviewProjectionTransaction(db, txArgs);
     case 'codex.importMessages':
@@ -106,6 +117,7 @@ function dispatchTransaction(db: Database.Database, args: unknown): unknown {
       return recentWorkdirsMergeWindowsIdentity(db, txArgs);
     case 'recentWorkdirs.removeWindowsIdentity':
       return recentWorkdirsRemoveWindowsIdentity(db, txArgs);
+    case 'pluginUsage.execute': return runPluginUsageTransaction(db, txArgs);
     case 'taskTags.execute':
       return runTaskTagsTransaction(db, txArgs);
     case 'projectAliases.replaceIdentity':
@@ -167,6 +179,12 @@ function dispatchTransaction(db: Database.Database, args: unknown): unknown {
       return botsPersistSessionPermission(db, txArgs);
     case 'bots.createGroupLane':
       return botsCreateGroupLane(db, txArgs as BotGroupsCreateLaneArgs);
+    case 'bots.createChannelLane':
+      return botsCreateChannelLane(db, txArgs as BotsCreateChannelLaneArgs);
+    case 'bots.createThreadLane':
+      return botsCreateThreadLane(db, txArgs as BotsCreateThreadLaneArgs);
+    case 'bots.archiveChannelLanes':
+      return botsArchiveChannelLanes(db, txArgs as BotsArchiveChannelLanesArgs);
     case 'botGroups.create':
       return botGroupsCreate(db, txArgs as Parameters<typeof botGroupsCreate>[1]);
     case 'botGroups.setMembers':
@@ -418,19 +436,21 @@ function botsUpdateProfile(db: Database.Database, args: unknown): { currentVersi
         VALUES (?, ?, ?, ?, ?, ?)`)
         .run(`${id}:v${nextVersion}`, id, nextVersion, expectString(p.identitySource, 'identitySource'),
           expectString(p.capabilitiesJson, 'capabilitiesJson'), now);
-      // Hermes capability epoch: the permanent canonical Chat and the Bot's
-      // group-chat lanes follow the latest Profile on their next runtime
-      // bootstrap. Route/worker links remain pinned to their creation version.
+      // Hermes capability epoch: the permanent canonical Chat, the Bot's
+      // group-chat lanes and its IM channel lanes follow the latest Profile on
+      // their next runtime bootstrap. Route/worker links remain pinned to their
+      // creation version.
       db.prepare(`UPDATE bot_session_links SET profile_version = ?
-        WHERE bot_id = ? AND role IN ('canonical', 'group') AND archived_at IS NULL`)
+        WHERE bot_id = ? AND role IN ('canonical', 'group', 'channel', 'thread') AND archived_at IS NULL`)
         .run(nextVersion, id);
     }
     if (p.canonicalPermissionMode !== undefined) {
       const mode = expectString(p.canonicalPermissionMode, 'canonicalPermissionMode');
       if (!['ask', 'auto', 'bypassPermissions'].includes(mode)) throw new Error('Invalid canonical permission mode');
-      // Group lanes run under the same permission profile as the Bot's canonical Chat.
+      // Group and IM channel lanes run under the same permission profile as the
+      // Bot's canonical Chat (per-turn group policies still apply on top).
       db.prepare(`UPDATE sessions SET permission_mode = ? WHERE id IN
-        (SELECT session_id FROM bot_session_links WHERE bot_id = ? AND role IN ('canonical', 'group') AND archived_at IS NULL)`)
+        (SELECT session_id FROM bot_session_links WHERE bot_id = ? AND role IN ('canonical', 'group', 'channel', 'thread') AND archived_at IS NULL)`)
         .run(mode, id);
     }
     return { currentVersion: nextVersion };
@@ -543,32 +563,7 @@ function botsReplaceCanonicalSession(
         return { created: false, canonicalSessionId, archivedCanonicalSessionId: null };
       }
     }
-    db.prepare(
-      `INSERT INTO sessions
-      (id, title, working_dir, workspace_kind, model, effort, permission_mode, status,
-       sdk_session_id, total_token_usage, total_cost_usd, context_tokens, context_window,
-       fast_mode, plan_mode_enabled, cleared_at, pinned_at, user_send_at, agent_kind,
-       orca_role, parent_session_id, forked_at_message_id, worktree_path, extra_dirs,
-       remote_host_id, provider_id, source, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, 'active', NULL, 0, 0, 0, 0, ?, 0, NULL, NULL, NULL,
-       ?, NULL, NULL, NULL, NULL, ?, ?, ?, ?, ?, ?)`,
-    ).run(
-      sessionId,
-      expectString(s.title, 'session.title'),
-      nullableString(s.workingDir),
-      expectString(s.workspaceKind, 'session.workspaceKind'),
-      expectString(s.model, 'session.model'),
-      expectString(s.effort, 'session.effort'),
-      expectString(s.permissionMode, 'session.permissionMode'),
-      s.fastMode === true ? 1 : 0,
-      expectString(s.agentKind, 'session.agentKind'),
-      expectString(s.extraDirs, 'session.extraDirs'),
-      nullableString(s.remoteHostId),
-      nullableString(s.providerId),
-      expectString(s.source, 'session.source'),
-      expectNumber(s.createdAt, 'session.createdAt'),
-      expectNumber(s.updatedAt, 'session.updatedAt'),
-    );
+    insertBotSession(db, { ...s, id: sessionId, parentSessionId: null });
     let archived: string | null = null;
     let missingCanonicalSessionId: string | null = compatibilityMissingCanonicalSessionId;
     if (canonicalSessionId) {
@@ -768,18 +763,18 @@ function insertBotSession(db: Database.Database, s: Record<string, unknown>): vo
      sdk_session_id, total_token_usage, total_cost_usd, context_tokens, context_window,
      fast_mode, plan_mode_enabled, cleared_at, pinned_at, user_send_at, agent_kind,
      orca_role, parent_session_id, forked_at_message_id, worktree_path, extra_dirs,
-     remote_host_id, provider_id, source, created_at, updated_at)
+     remote_host_id, provider_id, source, created_at, updated_at, agent_device_id)
     VALUES (?, ?, ?, ?, ?, ?, ?, 'active', NULL, 0, 0, 0, 0, ?, 0, NULL, NULL, NULL,
-     ?, NULL, ?, NULL, NULL, ?, ?, ?, ?, ?, ?)`)
+     ?, NULL, ?, NULL, NULL, ?, ?, ?, ?, ?, ?, ?)`)
     .run(expectString(s.id, 'session.id'), expectString(s.title, 'session.title'),
       nullableString(s.workingDir), expectString(s.workspaceKind, 'session.workspaceKind'),
       expectString(s.model, 'session.model'), expectString(s.effort, 'session.effort'),
-      expectString(s.permissionMode, 'session.permissionMode'), s.fastMode === true ? 1 : 0,
+      expectString(s.permissionMode, 'session.permissionMode'), fastModeToStorage(s.fastMode),
       expectString(s.agentKind, 'session.agentKind'),
       nullableString(s.parentSessionId),
       expectString(s.extraDirs, 'session.extraDirs'), nullableString(s.remoteHostId), nullableString(s.providerId),
       expectString(s.source, 'session.source'), expectNumber(s.createdAt, 'session.createdAt'),
-      expectNumber(s.updatedAt, 'session.updatedAt'));
+      expectNumber(s.updatedAt, 'session.updatedAt'), nullableString(s.agentDeviceId));
 }
 
 /** One hidden lane per (group, Bot); reuses an active lane instead of creating a second. */
@@ -813,6 +808,117 @@ function botsCreateGroupLane(db: Database.Database, args: BotGroupsCreateLaneArg
       VALUES (?, ?, ?, ?, 'group', ?, ?, NULL)`)
       .run(`${botId}:${sessionId}`, botId, sessionId, profile.version, routeKey, createdAt);
     return { sessionId, created: true };
+  })();
+}
+
+/**
+ * One hidden IM channel lane per (Bot, route key); reuses an active lane instead
+ * of creating a second. Unlike group lanes there is no member table: the
+ * connection binding (owner-scoped setting) is the authority, checked by Main.
+ */
+function botsCreateChannelLane(db: Database.Database, args: BotsCreateChannelLaneArgs): BotGroupsCreateLaneResult {
+  const p = asRecord(args, 'bots.createChannelLane args');
+  const botId = expectString(p.botId, 'botId');
+  const routeKey = expectString(p.routeKey, 'routeKey');
+  if (!routeKey.startsWith('im:')) throw new Error('Channel lane route key must start with im:');
+  const s = asRecord(p.session, 'session');
+  const sessionId = expectString(s.id, 'session.id');
+  const createdAt = expectNumber(s.createdAt, 'session.createdAt');
+  if (expectString(s.source, 'session.source') !== 'bot') throw new Error('Channel lane must be a Bot session');
+  return db.transaction(() => {
+    const profile = db.prepare('SELECT status, current_version AS version FROM bot_profiles WHERE id = ?')
+      .get(botId) as { status: string; version: number } | undefined;
+    if (!profile || profile.status !== 'active') {
+      throw Object.assign(new Error('伙伴当前不可用'), { code: 'BOT_UNAVAILABLE' });
+    }
+    const existing = db.prepare(`SELECT l.session_id AS sessionId FROM bot_session_links l
+      INNER JOIN sessions s ON s.id = l.session_id
+      WHERE l.bot_id = ? AND l.role = 'channel' AND l.route_key = ? AND l.archived_at IS NULL
+        AND s.source = 'bot' AND s.status = 'active'
+      LIMIT 1`).get(botId, routeKey) as { sessionId: string } | undefined;
+    if (existing) return { sessionId: existing.sessionId, created: false };
+    insertBotSession(db, s);
+    db.prepare(`INSERT INTO bot_session_links
+      (id, bot_id, session_id, profile_version, role, route_key, created_at, archived_at)
+      VALUES (?, ?, ?, ?, 'channel', ?, ?, NULL)`)
+      .run(`${botId}:${sessionId}`, botId, sessionId, profile.version, routeKey, createdAt);
+    return { sessionId, created: true };
+  })();
+}
+
+/**
+ * A private-chat topic lane (`role = 'thread'`). The root must be a visible user or
+ * companion message in this Bot's current canonical Chat; one lane per root.
+ */
+function botsCreateThreadLane(db: Database.Database, args: BotsCreateThreadLaneArgs): BotGroupsCreateLaneResult {
+  const p = asRecord(args, 'bots.createThreadLane args');
+  const botId = expectString(p.botId, 'botId');
+  const routeKey = expectString(p.routeKey, 'routeKey');
+  const rootSessionId = expectString(p.rootSessionId, 'rootSessionId');
+  const rootClientId = expectString(p.rootClientId, 'rootClientId');
+  if (routeKey !== `dm-thread:${rootSessionId}:${rootClientId}`) throw new Error('Thread lane route key does not match its root');
+  const s = asRecord(p.session, 'session');
+  const sessionId = expectString(s.id, 'session.id');
+  const createdAt = expectNumber(s.createdAt, 'session.createdAt');
+  if (expectString(s.source, 'session.source') !== 'bot') throw new Error('Thread lane must be a Bot session');
+  return db.transaction(() => {
+    const profile = db.prepare('SELECT status, current_version AS version FROM bot_profiles WHERE id = ?')
+      .get(botId) as { status: string; version: number } | undefined;
+    if (!profile || profile.status !== 'active') {
+      throw Object.assign(new Error('伙伴当前不可用'), { code: 'BOT_UNAVAILABLE' });
+    }
+    const root = db.prepare(`SELECT 1 FROM messages m
+      INNER JOIN bot_session_links l ON l.session_id = m.session_id
+      INNER JOIN sessions s ON s.id = m.session_id
+      WHERE m.session_id = ? AND m.client_id = ? AND m.role IN ('user', 'assistant') AND m.rewind_at IS NULL
+        AND l.bot_id = ? AND l.role = 'canonical' AND l.archived_at IS NULL
+        AND s.source = 'bot' AND s.status = 'active'
+      LIMIT 1`).get(rootSessionId, rootClientId, botId);
+    if (!root) throw Object.assign(new Error('原消息已不在私聊里'), { code: 'ROOT_UNAVAILABLE' });
+    const existing = db.prepare(`SELECT l.session_id AS sessionId FROM bot_session_links l
+      INNER JOIN sessions s ON s.id = l.session_id
+      WHERE l.bot_id = ? AND l.role = 'thread' AND l.route_key = ? AND l.archived_at IS NULL
+        AND s.source = 'bot' AND s.status = 'active'
+      LIMIT 1`).get(botId, routeKey) as { sessionId: string } | undefined;
+    if (existing) return { sessionId: existing.sessionId, created: false };
+    insertBotSession(db, s);
+    db.prepare(`INSERT INTO bot_session_links
+      (id, bot_id, session_id, profile_version, role, route_key, created_at, archived_at)
+      VALUES (?, ?, ?, ?, 'thread', ?, ?, NULL)`)
+      .run(`${botId}:${sessionId}`, botId, sessionId, profile.version, routeKey, createdAt);
+    return { sessionId, created: true };
+  })();
+}
+
+/** Archive IM channel lanes (link + session) by exact route key or connection prefix. */
+function botsArchiveChannelLanes(
+  db: Database.Database,
+  args: BotsArchiveChannelLanesArgs,
+): { archivedSessionIds: string[] } {
+  const p = asRecord(args, 'bots.archiveChannelLanes args');
+  const routeKey = nullableString(p.routeKey);
+  const routeKeyPrefix = nullableString(p.routeKeyPrefix);
+  const exceptBotId = nullableString(p.exceptBotId);
+  const now = expectNumber(p.now, 'now');
+  if ((routeKey === null) === (routeKeyPrefix === null)) {
+    throw new Error('Exactly one of routeKey / routeKeyPrefix is required');
+  }
+  const scope = routeKey ?? routeKeyPrefix!;
+  if (!scope.startsWith('im:')) throw new Error('Channel lane route key must start with im:');
+  return db.transaction(() => {
+    const rows = db.prepare(`SELECT bot_id AS botId, session_id AS sessionId FROM bot_session_links
+      WHERE role = 'channel' AND archived_at IS NULL
+        AND (route_key = ? OR (? IS NOT NULL AND substr(route_key, 1, length(?)) = ?))`)
+      .all(routeKey, routeKeyPrefix, routeKeyPrefix, routeKeyPrefix) as Array<{ botId: string; sessionId: string }>;
+    const targets = exceptBotId ? rows.filter((row) => row.botId !== exceptBotId) : rows;
+    const archiveLink = db.prepare('UPDATE bot_session_links SET archived_at = ? WHERE session_id = ?');
+    const archiveSession = db.prepare(`UPDATE sessions SET status = 'archived', updated_at = ?
+      WHERE id = ? AND status = 'active'`);
+    for (const row of targets) {
+      archiveLink.run(now, row.sessionId);
+      archiveSession.run(now, row.sessionId);
+    }
+    return { archivedSessionIds: targets.map((row) => row.sessionId) };
   })();
 }
 
@@ -855,8 +961,11 @@ function botsFinishDelegation(
       db.prepare(`UPDATE sessions SET status = 'archived', updated_at = ?
         WHERE id = ? AND status = 'active'`)
         .run(completedAt, row.childSessionId);
+      // 保留 route_key('delegation:<id>')作为来源标记:bot_delegations 行会随发起伙伴
+      // 的删除级联消失,之后只有它能证明这段 history 是"别人派给我的",不是自己的私聊
+      // (botHistoryScope.listBotRecallSessionIds)。route_key 的其它读者都只认 group 键。
       db.prepare(`UPDATE bot_session_links SET role = 'history',
-        route_key = NULL, archived_at = ? WHERE session_id = ?`)
+        archived_at = ? WHERE session_id = ?`)
         .run(completedAt, row.childSessionId);
     }
     return row;
@@ -1220,18 +1329,19 @@ function botsDeleteProfile(
         new Error('只能分离属于该 Bot 的任务'),
         { code: 'PRECONDITION_FAILED' },
       );
-      // Group-chat lanes hold only hidden group turns; they are never kept as
-      // standalone task history. The group's own timeline keeps what was said.
+      // Group-chat lanes and IM channel lanes hold only hidden channel turns;
+      // they are never kept as standalone task history. The group / IM chat
+      // keeps what was said.
       const hasLinkRoles = tableColumns(db, 'bot_session_links').has('role');
       if (hasLinkRoles) {
         db.prepare(`UPDATE sessions SET status = 'deleted', updated_at = ?
           WHERE source = 'bot' AND id IN (${placeholders}) AND id IN
-            (SELECT session_id FROM bot_session_links WHERE bot_id = ? AND role = 'group')`)
+            (SELECT session_id FROM bot_session_links WHERE bot_id = ? AND role IN ('group', 'channel'))`)
           .run(at, ...sessionIds, botId);
       }
       db.prepare(`UPDATE sessions SET source = 'desktop', status = ?, updated_at = ?
         WHERE source = 'bot' AND id IN (${placeholders})${hasLinkRoles ? ` AND id NOT IN
-          (SELECT session_id FROM bot_session_links WHERE bot_id = ? AND role = 'group')` : ''}`)
+          (SELECT session_id FROM bot_session_links WHERE bot_id = ? AND role IN ('group', 'channel'))` : ''}`)
         .run(status, at, ...sessionIds, ...(hasLinkRoles ? [botId] : []));
     }
 
@@ -1508,7 +1618,7 @@ function contextRebuild(db: Database.Database, args: unknown): void {
           'UPDATE sessions SET sdk_session_id = NULL, context_tokens = 0, updated_at = ?, list_message_count = NULL, model = ?, provider_id = ?, effort = COALESCE(?, effort), fast_mode = ? WHERE id = ? AND ifnull(cleared_at, -1) = ifnull(?, -1) AND sdk_session_id = ? AND status != ?',
         ).run(updatedAt, expectString(replacement.model, 'replacementRoute.model'),
           nullableString(replacement.providerId), nullableString(replacement.effort),
-          replacement.fastMode === true ? 1 : 0, sessionId, expectedClearedAt,
+          fastModeToStorage(replacement.fastMode), sessionId, expectedClearedAt,
           expectString(replacement.expectedSdkSessionId, 'replacementRoute.expectedSdkSessionId'), 'deleted')
       : db.prepare(
           'UPDATE sessions SET sdk_session_id = NULL, context_tokens = 0, updated_at = ?, list_message_count = NULL WHERE id = ? AND ifnull(cleared_at, -1) = ifnull(?, -1)',
@@ -1545,6 +1655,15 @@ function messageInsert(db: Database.Database, args: unknown): { changes: number 
       : expectNumber(payload.expectedClearBoundaryMs, 'expectedClearBoundaryMs');
   const transaction = db.transaction(() => {
     let changes = 0;
+    // The preflight read in Main can race with a user send. Keep the opening
+    // admission in this transaction, including a script fallback's next insert.
+    if (payload.requireNoUserMessage === true
+      && (!payload.publication || payload.publication === 'publish')
+      && db.prepare("SELECT 1 FROM messages WHERE session_id = ? AND role = 'user' LIMIT 1").get(sessionId)) {
+      throw Object.assign(new Error('User already spoke before the opening was stored'), {
+        code: 'MESSAGE_USER_ALREADY_SPOKE',
+      });
+    }
     // Connection-local stages never enter history, counts or persistent FTS.
     // SQLite discards them automatically when this worker exits.
     if (payload.publication) {
@@ -2079,20 +2198,12 @@ function sessionsSetStatus(db: Database.Database, args: unknown): Array<{
 }
 
 /** Atomically persist a terminal task status and its local-close fence. */
-function sessionsSetTerminalStatus(db: Database.Database, args: unknown): {
-  sessionId: string;
-  title: string | null;
-  workingDir: string | null;
-  workspaceKind: string | null;
-  remoteHostId: string | null;
-  source: string | null;
-  status: 'archived' | 'deleted';
-} {
+function sessionsSetTerminalStatus(db: Database.Database, args: unknown): SessionsSetTerminalStatusResult {
   const payload = asRecord(args, 'sessions.setTerminalStatus args');
   const sessionId = expectString(payload.sessionId, 'sessionId');
   const status = expectString(payload.status, 'status');
   if (status !== 'archived' && status !== 'deleted') throw invalidArgs('invalid terminal status: ' + status);
-  const transaction = db.transaction(() => {
+  const transaction = db.transaction((): SessionsSetTerminalStatusResult => {
     const existing = db.prepare('SELECT id, status, source FROM sessions WHERE id = ? LIMIT 1').get(sessionId) as
       | { id: string; status: string; source: string } | undefined;
     if (!existing) throw Object.assign(new Error('Session not found: ' + sessionId), { code: 'NOT_FOUND' });
@@ -2106,11 +2217,20 @@ function sessionsSetTerminalStatus(db: Database.Database, args: unknown): {
       id: string; title: string | null; workingDir: string | null; workspaceKind: string | null; remoteHostId: string | null; source: string | null;
     } | undefined;
     if (!updated) throw Object.assign(new Error('Session not found: ' + sessionId), { code: 'NOT_FOUND' });
-    return { ...updated, sessionId: updated.id, status };
+    // Hidden children must become unreachable in the same commit as the parent.
+    // A failure in either the status write or its closure fence rolls back all rows.
+    const deletedSideChats = status === 'deleted' && existing.source !== 'side-chat'
+      ? db.prepare(`UPDATE sessions SET status = 'deleted', updated_at = ?
+          WHERE parent_session_id = ? AND source = 'side-chat' AND status <> 'deleted'
+          RETURNING id AS sessionId, title, working_dir AS workingDir, workspace_kind AS workspaceKind,
+            remote_host_id AS remoteHostId, source`).all(now, sessionId) as SessionsSetTerminalStatusResult['deletedSideChats']
+      : [];
+    for (const child of deletedSideChats) {
+      db.prepare(CLOSE_SHARED_TASKS_FOR_SESSION_SQL).run(now, child.sessionId);
+    }
+    return { ...updated, sessionId: updated.id, status, deletedSideChats };
   });
-  return transaction() as {
-    sessionId: string; title: string | null; workingDir: string | null; workspaceKind: string | null; remoteHostId: string | null; source: string | null; status: 'archived' | 'deleted';
-  };
+  return transaction();
 }
 
 function invalidateSessionListProjection(db: Database.Database, sessionId: string): void {
@@ -2206,8 +2326,8 @@ function imRotateSession(
     `INSERT INTO sessions (
       id, title, working_dir, workspace_kind, model, effort, permission_mode,
       fast_mode, status, agent_kind, provider_id, source, im_bot_context_id,
-      im_user_id, im_default_route, created_at, updated_at, user_send_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      im_user_id, im_default_route, agent_device_id, created_at, updated_at, user_send_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   );
   const retirePrevious = db.prepare(
     `UPDATE sessions
@@ -2234,13 +2354,14 @@ function imRotateSession(
       expectString(session.model, 'session.model'),
       expectString(session.effort, 'session.effort'),
       expectString(session.permissionMode, 'session.permissionMode'),
-      session.fastMode === true ? 1 : 0,
+      fastModeToStorage(session.fastMode),
       expectString(session.agentKind, 'session.agentKind'),
       nullableString(session.providerId),
       expectString(session.source, 'session.source'),
       expectString(session.imBotContextId, 'session.imBotContextId'),
       expectString(session.imUserId, 'session.imUserId'),
       nullableString(session.imDefaultRoute),
+      nullableString(session.agentDeviceId),
       now,
       now,
       now,
@@ -2837,6 +2958,11 @@ function forkSession(db: Database.Database, args: unknown): { messageCount: numb
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
   );
   const transaction = db.transaction(() => {
+    if (newSession.source === 'side-chat' && !db.prepare(
+      "SELECT 1 FROM sessions WHERE id = ? AND status = 'active' AND cleared_at IS ?",
+    ).get(sourceSessionId, sourceClearedAt)) {
+      throw invalidArgs('Source task changed while opening side chat');
+    }
     if (payload.recoveryMarker != null && !db.prepare(
       'SELECT 1 FROM sessions WHERE id = ? AND cleared_at IS ?',
     ).get(sourceSessionId, sourceClearedAt)) {
@@ -2864,15 +2990,21 @@ function forkSession(db: Database.Database, args: unknown): { messageCount: numb
         `newMessageIds length mismatch: expected ${sourceMessages.length}, got ${newMessageIds.length}`,
       );
     }
+    const childCreatedAt = expectNumber(newSession.createdAt, 'newSession.createdAt');
+    // Keep inherited history strictly before the side-chat visibility boundary,
+    // without moving the child into the future or changing source timestamps.
+    const historyTimeOffset = newSession.source === 'side-chat'
+      ? sourceMessages.reduce((offset, message) => Math.max(offset, message.created_at - childCreatedAt + 1), 0)
+      : 0;
     db.prepare(
       `INSERT INTO sessions (
         id, title, working_dir, model, provider_id, effort, permission_mode, status,
         sdk_session_id, total_token_usage, total_cost_usd, context_tokens,
         context_window, context_window_runtime, fast_mode, cleared_at, pinned_at, user_send_at,
         agent_kind, workspace_kind, codex_history_has_product_prompt,
-        parent_session_id, forked_at_message_id,
+        parent_session_id, forked_at_message_id, agent_device_id,
         created_at, updated_at
-      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     ).run(
       expectString(newSession.id, 'newSession.id'),
       expectString(newSession.title, 'newSession.title'),
@@ -2888,7 +3020,7 @@ function forkSession(db: Database.Database, args: unknown): { messageCount: numb
       expectNumber(newSession.contextTokens, 'newSession.contextTokens'),
       expectNumber(newSession.contextWindow, 'newSession.contextWindow'),
       nullableNumber(newSession.contextWindowRuntime),
-      newSession.fastMode ? 1 : 0,
+      fastModeToStorage(newSession.fastMode),
       nullableNumber(newSession.clearedAt),
       nullableNumber(newSession.pinnedAt),
       nullableNumber(newSession.userSendAt),
@@ -2901,9 +3033,14 @@ function forkSession(db: Database.Database, args: unknown): { messageCount: numb
           : 0,
       nullableString(newSession.parentSessionId),
       nullableString(newSession.forkedAtMessageId),
+      nullableString(newSession.agentDeviceId),
       expectNumber(newSession.createdAt, 'newSession.createdAt'),
       expectNumber(newSession.updatedAt, 'newSession.updatedAt'),
     );
+    if (newSession.source === 'side-chat') {
+      db.prepare("UPDATE sessions SET source = 'side-chat', extra_dirs = (SELECT extra_dirs FROM sessions WHERE id = ?), writable_dirs = (SELECT writable_dirs FROM sessions WHERE id = ?) WHERE id = ?")
+        .run(sourceSessionId, sourceSessionId, expectString(newSession.id, 'newSession.id'));
+    }
     for (let i = 0; i < sourceMessages.length; i += 1) {
       const message = sourceMessages[i];
       const ids = newMessageIds[i];
@@ -2925,11 +3062,14 @@ function forkSession(db: Database.Database, args: unknown): { messageCount: numb
           nativeForkAnchorSessionMap,
         ),
         message.agent_kind,
-        message.created_at,
+        message.created_at - historyTimeOffset,
       );
     }
     if (payload.recoveryMarker != null) {
       const marker = asRecord(payload.recoveryMarker, 'recoveryMarker');
+      const markerCreatedAt = newSession.source === 'side-chat'
+        ? childCreatedAt
+        : expectNumber(marker.createdAt, 'recoveryMarker.createdAt');
       db.prepare(
         "INSERT INTO messages (id, client_id, session_id, role, content, agent_kind, created_at, rewind_at) VALUES (?, ?, ?, 'context_rebuild', ?, ?, ?, ?)",
       ).run(
@@ -2938,8 +3078,8 @@ function forkSession(db: Database.Database, args: unknown): { messageCount: numb
         expectString(newSession.id, 'newSession.id'),
         expectString(marker.content, 'recoveryMarker.content'),
         expectString(newSession.agentKind, 'newSession.agentKind'),
-        expectNumber(marker.createdAt, 'recoveryMarker.createdAt'),
-        expectNumber(marker.createdAt, 'recoveryMarker.createdAt'),
+        markerCreatedAt,
+        markerCreatedAt,
       );
       const content = asRecord(JSON.parse(expectString(marker.content, 'recoveryMarker.content')), 'recoveryMarker content');
       insertMessage.run(
@@ -2949,7 +3089,7 @@ function forkSession(db: Database.Database, args: unknown): { messageCount: numb
         'assistant', '', null,
         JSON.stringify({ contextRebuild: { reason: content.reason, handoff: content.handoff } }),
         expectString(newSession.agentKind, 'newSession.agentKind'),
-        expectNumber(marker.createdAt, 'recoveryMarker.createdAt'),
+        markerCreatedAt,
       );
     }
     return { messageCount: sourceMessages.length };
@@ -3045,7 +3185,7 @@ function sessionImportShare(db: Database.Database, args: unknown): { messageCoun
       expectNumber(rawSession.totalCostUsd, 'session.totalCostUsd'),
       expectNumber(rawSession.contextTokens, 'session.contextTokens'),
       expectNumber(rawSession.contextWindow, 'session.contextWindow'),
-      rawSession.fastMode ? 1 : 0,
+      fastModeToStorage(rawSession.fastMode),
       rawSession.planModeEnabled ? 1 : 0,
       expectString(rawSession.agentKind, 'session.agentKind'),
       nullableString(rawSession.orcaRole),
@@ -3407,7 +3547,7 @@ function orcaUpsertWorker(db: Database.Database, args: unknown): void {
           sessionId, expectString(proxy.title, 'proxySession.title'),
           expectString(proxy.model, 'proxySession.model'),
           proxy.effort == null ? 'high' : expectString(proxy.effort, 'proxySession.effort'),
-          expectString(proxy.permissionMode, 'proxySession.permissionMode'), proxy.fastMode === true ? 1 : 0,
+          expectString(proxy.permissionMode, 'proxySession.permissionMode'), fastModeToStorage(proxy.fastMode),
           expectString(proxy.agentKind, 'proxySession.agentKind'), now, now,
         );
       }

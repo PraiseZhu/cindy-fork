@@ -26,9 +26,11 @@ interface FakeHistoryMessage {
 }
 
 interface FakeDevice {
+  agentKind?: string;
   offline: boolean;
   running: boolean;
   receipts: Record<string, string>;
+  acceptedAgents: Record<string, string>;
   assistant: { id: string; content: unknown } | null;
   terminalError: boolean;
   history?: FakeHistoryMessage[];
@@ -43,6 +45,7 @@ function setup(device: Partial<FakeDevice> = {}) {
     offline: false,
     running: false,
     receipts: {},
+    acceptedAgents: {},
     assistant: { id: 'msg-0', content: '旧回复' },
     terminalError: false,
     enqueued: [],
@@ -50,7 +53,7 @@ function setup(device: Partial<FakeDevice> = {}) {
     released: 0,
     ...device,
   };
-  const invoke = vi.fn(async (_deviceId: string, channel: string, args: unknown[]) => {
+  const invoke = vi.fn(async (_deviceId: string, channel: string, args: unknown[]): Promise<unknown> => {
     if (state.offline) throw new Error('[DEVICE_OFFLINE] target offline');
     switch (channel) {
       case 'maker:list-active':
@@ -62,7 +65,7 @@ function setup(device: Partial<FakeDevice> = {}) {
         return {
           id: 'remote-1',
           status: 'active',
-          agentKind: 'cc',
+          agentKind: state.agentKind ?? 'cc',
           workingDir: '/Users/demo/Interviews',
           model: 'claude-opus-5-5',
           effort: 'high',
@@ -99,6 +102,11 @@ function setup(device: Partial<FakeDevice> = {}) {
         state.enqueued.push(args[1]);
         state.receipts[(args[1] as { clientId: string }).clientId] = 'pending';
         return {};
+      case 'local-db:messages:around-client-id': {
+        const clientId = args[1] as string;
+        const agentKind = state.acceptedAgents[clientId];
+        return agentKind ? [{ clientId, role: 'user', agentKind }] : [];
+      }
       case 'maker:input:get-projection': {
         const ids = (args[1] as { deliveryClientIds: string[] }).deliveryClientIds;
         return {
@@ -146,12 +154,12 @@ describe('orca remote worker runtime', () => {
     const { runtime, state } = setup();
     await expect(
       runtime.dispatch({ proxySessionId: 'proxy-1', rawContent: '转写这段访谈', clientId: 'c-1' }),
-    ).resolves.toEqual({ ok: true, mode: 'dispatched' });
+    ).resolves.toEqual({ ok: true, mode: 'queued', agentKind: 'claude-code' });
     expect(state.enqueued).toHaveLength(1);
     expect(state.enqueued[0]).toMatchObject({
       clientId: 'c-1',
       durableDelivery: true,
-      text: '[From Orca Lead]\n转写这段访谈',
+      text: expect.stringContaining('[From Orca Lead]\n转写这段访谈'),
       origin: { kind: 'orca', senderLabel: 'Lead', displayText: '转写这段访谈' },
       createOpts: {
         agentKind: 'claude-code',
@@ -160,7 +168,7 @@ describe('orca remote worker runtime', () => {
         resumeSessionId: 'sdk-1',
       },
     });
-    expect((state.enqueued[0] as { text: string }).text).not.toContain('worker_id');
+    expect((state.enqueued[0] as { text: string }).text).toContain('worker_id for tool calls is worker-1');
     expect(runtime.hasPendingReport('proxy-1')).toBe(true);
   });
 
@@ -187,6 +195,164 @@ describe('orca remote worker runtime', () => {
 
     await runtime.pollNow();
     expect(deps.onTurnEnded).toHaveBeenCalledTimes(1);
+  });
+
+  // A manual bridge report must retire the same persisted poll identity, even before
+  // the first running poll; otherwise the next poll reopens running and reports twice.
+  it('retires a manual report before the first running poll without auto-reporting it again', async () => {
+    const { runtime, deps, state } = setup();
+    await runtime.dispatch({ proxySessionId: 'proxy-1', rawContent: 'report', clientId: 'c-1' });
+    await expect(runtime.captureReportSettlement('proxy-1', ['c-1'])()).resolves.toBe(true);
+    expect(deps.saveReport).toHaveBeenLastCalledWith('worker-1', null);
+    state.running = true;
+    await runtime.pollNow();
+    state.running = false;
+    state.receipts['c-1'] = 'accepted';
+    state.assistant = { id: 'msg-1', content: 'already reported' };
+    await runtime.pollNow();
+    expect(deps.onTurnStarted).not.toHaveBeenCalled();
+    expect(deps.onTurnEnded).not.toHaveBeenCalled();
+    expect(runtime.hasPendingReport('proxy-1')).toBe(false);
+  });
+
+  it('does not let an older manual report settle a newly dispatched task', async () => {
+    const { runtime } = setup();
+    await runtime.dispatch({ proxySessionId: 'proxy-1', rawContent: 'old', clientId: 'c-1' });
+    const settleOld = runtime.captureReportSettlement('proxy-1', ['c-1']);
+    await runtime.dispatch({ proxySessionId: 'proxy-1', rawContent: 'new', clientId: 'c-2' });
+    await expect(settleOld()).resolves.toBe(false);
+    expect(runtime.hasPendingReport('proxy-1')).toBe(true);
+  });
+
+  // Unit regression for the 2026-10-21 review: capture used to retire the whole A+B
+  // group when A reported after B was already queued. The older test captured before B.
+  // Public dispatch/settlement/poll must keep B's durable identity and deliver its result,
+  // including after track restores the saved pending record; no timers or real device IO.
+  it.each([false, true])('reports queued B after A reports, restored=%s', async (restore) => {
+    const { runtime, deps, state } = setup();
+    await runtime.dispatch({ proxySessionId: 'proxy-1', rawContent: 'A', clientId: 'a' });
+    state.receipts.a = 'accepted';
+    state.running = true;
+    await runtime.pollNow();
+    await runtime.dispatch({ proxySessionId: 'proxy-1', rawContent: 'B', clientId: 'b' });
+
+    await expect(runtime.captureReportSettlement('proxy-1', ['a'])()).resolves.toBe(false);
+    expect(state.receipts.b).toBe('pending');
+    expect(runtime.hasPendingReport('proxy-1')).toBe(true);
+    expect(deps.saveReport).toHaveBeenLastCalledWith('worker-1', {
+      clientIds: ['b'], baselineMessageId: 'msg-0',
+    });
+    if (restore) {
+      runtime.untrack('proxy-1');
+      runtime.track({ ...ref, pendingReport: { clientIds: ['b'], baselineMessageId: 'msg-0' } });
+    }
+    state.receipts.b = 'accepted';
+    state.running = false;
+    state.assistant = { id: 'result-b', content: 'B completed' };
+    await runtime.pollNow();
+    expect(deps.onTurnEnded).toHaveBeenCalledExactlyOnceWith('proxy-1', {
+      status: 'done', finalText: 'B completed',
+    });
+  });
+
+  it('waits for an in-flight running notification before settling a manual report', async () => {
+    const { runtime, deps, state } = setup();
+    let release!: () => void;
+    vi.mocked(deps.onTurnStarted).mockImplementationOnce(() => new Promise<void>(resolve => { release = resolve; }));
+    await runtime.dispatch({ proxySessionId: 'proxy-1', rawContent: 'report', clientId: 'c-1' });
+    state.running = true;
+    const poll = runtime.pollNow();
+    await vi.waitFor(() => expect(deps.onTurnStarted).toHaveBeenCalledTimes(1));
+    const settled = runtime.captureReportSettlement('proxy-1', ['c-1'])();
+    expect(runtime.hasPendingReport('proxy-1')).toBe(true);
+    release();
+    await poll;
+    await expect(settled).resolves.toBe(true);
+    expect(runtime.hasPendingReport('proxy-1')).toBe(false);
+  });
+
+  it('keeps automatic reporting when an older peer supplies no input identity', async () => {
+    const { runtime, deps, state } = setup();
+    await runtime.dispatch({ proxySessionId: 'proxy-1', rawContent: 'A', clientId: 'a' });
+    await expect(runtime.captureReportSettlement('proxy-1')()).resolves.toBe(false);
+    state.receipts.a = 'accepted';
+    state.assistant = { id: 'result-a', content: 'A completed' };
+    await runtime.pollNow();
+    expect(deps.onTurnEnded).toHaveBeenCalledExactlyOnceWith('proxy-1', {
+      status: 'done', finalText: 'A completed',
+    });
+  });
+
+  // The settlement save can overlap a new dispatch; its failed enqueue must not roll
+  // back to already reported A. Public dispatch/poll and persisted state are the contract.
+  it('does not resurrect reported A when B is prepared during settlement then rejected', async () => {
+    const { runtime, deps, state, invoke } = setup();
+    await runtime.dispatch({ proxySessionId: 'proxy-1', rawContent: 'A', clientId: 'a' });
+    let release!: () => void;
+    vi.mocked(deps.saveReport).mockImplementationOnce(() => new Promise<void>(resolve => { release = resolve; }));
+    const settle = runtime.captureReportSettlement('proxy-1', ['a'])();
+    await vi.waitFor(() => expect(release).toBeTypeOf('function'));
+    invoke.mockClear();
+    const dispatch = runtime.dispatch({
+      proxySessionId: 'proxy-1', rawContent: 'B', clientId: 'b',
+      beforeEnqueue: () => { throw new Error('B rejected'); },
+    }).catch((error: unknown) => error);
+    await vi.waitFor(() => expect(invoke).toHaveBeenCalledWith(ref.deviceId, 'local-db:sessions:get', ['remote-1']));
+    release();
+    await settle;
+    expect(await dispatch).toMatchObject({ message: 'B rejected' });
+    expect(runtime.hasPendingReport('proxy-1')).toBe(false);
+    expect(deps.saveReport).toHaveBeenLastCalledWith('worker-1', null, undefined);
+    state.receipts.a = 'accepted';
+    state.assistant = { id: 'result-a', content: 'already reported' };
+    await runtime.pollNow();
+    expect(deps.onTurnEnded).not.toHaveBeenCalled();
+  });
+
+  it('preserves automatic reporting when persisting manual settlement fails', async () => {
+    const { runtime, deps, state } = setup();
+    await runtime.dispatch({ proxySessionId: 'proxy-1', rawContent: 'report', clientId: 'c-1' });
+    vi.mocked(deps.saveReport).mockRejectedValueOnce(new Error('storage unavailable'));
+    await expect(runtime.captureReportSettlement('proxy-1', ['c-1'])()).rejects.toThrow('storage unavailable');
+    expect(runtime.hasPendingReport('proxy-1')).toBe(true);
+    state.receipts['c-1'] = 'accepted';
+    state.assistant = { id: 'msg-1', content: 'result' };
+    await runtime.pollNow();
+    expect(deps.onTurnEnded).toHaveBeenCalledTimes(1);
+  });
+
+  // The Team commit callback adds an asynchronous boundary to report retirement.
+  // Public dispatch/settlement/poll must preserve B prepared while that callback waits;
+  // the old save-only races did not exercise this boundary. Unit, no real IO/timers.
+  it('preserves B prepared while the Team settlement is waiting', async () => {
+    const { runtime, deps, invoke, state } = setup();
+    await runtime.dispatch({ proxySessionId: 'proxy-1', rawContent: 'A', clientId: 'a' });
+    let release!: () => void;
+    let entered!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    const settle = runtime.captureReportSettlement('proxy-1', ['a'], async commit => {
+      entered(); await gate; await commit(true);
+    })();
+    try {
+      await started;
+      invoke.mockClear();
+      const dispatch = runtime.dispatch({ proxySessionId: 'proxy-1', rawContent: 'B', clientId: 'b' });
+      await vi.waitFor(() => expect(invoke).toHaveBeenCalledWith(ref.deviceId, 'local-db:sessions:get', ['remote-1']));
+      release();
+      await expect(settle).resolves.toBe(false);
+      await dispatch;
+      expect(runtime.hasPendingReport('proxy-1')).toBe(true);
+      expect(deps.saveReport).toHaveBeenLastCalledWith('worker-1', {
+        clientIds: ['b'], baselineMessageId: 'msg-0',
+      }, undefined);
+      state.receipts.b = 'accepted';
+      state.assistant = { id: 'result-b', content: 'B completed' };
+      await runtime.pollNow();
+      expect(deps.onTurnEnded).toHaveBeenCalledExactlyOnceWith('proxy-1', {
+        status: 'done', finalText: 'B completed',
+      });
+    } finally { release(); await settle; }
   });
 
   it('keeps waiting while the message is still queued behind other input on the device', async () => {
@@ -393,14 +559,65 @@ describe('orca remote worker runtime', () => {
     expect(runtime.hasPendingReport('proxy-1')).toBe(false);
   });
 
-  it('treats a lost enqueue reply as delivered when the device already holds the message', async () => {
+  it.each(['cc', 'codex', 'pi'])('does not claim Agent %s accepted when the enqueue reply is lost and delivery is pending', async (agentKind) => {
     const lost = Object.assign(new Error('[INVOKE_TIMEOUT] no reply'), { inFlight: true });
-    const { runtime, state } = setup({ enqueueError: lost, receipts: { 'c-1': 'pending' } });
+    const { runtime, state, invoke } = setup({ agentKind, enqueueError: lost, receipts: { 'c-1': 'pending' } });
     await expect(
       runtime.dispatch({ proxySessionId: 'proxy-1', rawContent: 'x', clientId: 'c-1' }),
-    ).resolves.toEqual({ ok: true, mode: 'dispatched' });
+    ).resolves.toEqual({ ok: true, mode: 'queued', agentKind: agentKind === 'cc' ? 'claude-code' : agentKind });
+    expect(invoke.mock.calls.filter(([, channel]) => channel === 'maker:input:enqueue')).toHaveLength(1);
     expect(state.enqueued).toHaveLength(0);
     expect(runtime.hasPendingReport('proxy-1')).toBe(true);
+  });
+
+  const kinds = ['cc', 'codex', 'pi'] as const;
+  it.each(kinds.flatMap(from => kinds.filter(to => to !== from).map(to => ({ from, to }))))(
+    'reports the accepted input Agent after a pending $from → $to switch, even if the task switches again', async ({ from, to }) => {
+      const { runtime, state, invoke } = setup({ agentKind: from });
+      const original = invoke.getMockImplementation()!;
+      invoke.mockImplementation(async (deviceId, channel, args) => {
+        const result = await original(deviceId, channel, args);
+        if (channel === 'maker:input:enqueue') {
+          state.acceptedAgents['c-1'] = to;
+          state.receipts['c-1'] = 'accepted';
+          state.agentKind = from; // A later switch must not relabel this accepted input.
+        }
+        return result;
+      });
+      await expect(runtime.dispatch({ proxySessionId: 'proxy-1', rawContent: 'task', clientId: 'c-1' }))
+        .resolves.toMatchObject({ ok: true, mode: 'dispatched', agentKind: to === 'cc' ? 'claude-code' : to });
+      expect(state.enqueued[0]).toMatchObject({ createOpts: { agentKind: from === 'cc' ? 'claude-code' : from } });
+      expect(invoke).toHaveBeenCalledWith('mac-mini', 'local-db:messages:around-client-id',
+        ['remote-1', 'c-1', { radius: 0, contentCharLimit: 1 }]);
+    },
+  );
+
+  it.each(['read-failed', 'old-peer', 'wrong-client', 'wrong-role'])('keeps delivered input queued when accepted-Agent evidence is %s', async reason => {
+    const { runtime, state, invoke } = setup();
+    const original = invoke.getMockImplementation()!;
+    invoke.mockImplementation(async (deviceId, channel, args) => {
+      if (channel === 'local-db:messages:around-client-id') {
+        if (reason === 'read-failed') throw new Error('[INVOKE_TIMEOUT] no reply');
+        return [{ clientId: reason === 'wrong-client' ? 'other' : 'c-1',
+          role: reason === 'wrong-role' ? 'assistant' : 'user',
+          ...(reason === 'old-peer' ? {} : { agentKind: 'pi' }) }];
+      }
+      return original(deviceId, channel, args);
+    });
+    await expect(runtime.dispatch({ proxySessionId: 'proxy-1', rawContent: 'task', clientId: 'c-1' }))
+      .resolves.toMatchObject({ ok: true, mode: 'queued' });
+    expect(state.enqueued).toHaveLength(1);
+    expect(runtime.hasPendingReport('proxy-1')).toBe(true);
+    expect(runtime.isReachable('proxy-1')).toBe(true);
+  });
+
+  it('recovers the accepting Agent after a lost enqueue acknowledgement without resending', async () => {
+    const lost = Object.assign(new Error('[INVOKE_TIMEOUT] no reply'), { inFlight: true });
+    const { runtime, invoke } = setup({ agentKind: 'cc', enqueueError: lost,
+      receipts: { 'c-1': 'accepted' }, acceptedAgents: { 'c-1': 'pi' } });
+    await expect(runtime.dispatch({ proxySessionId: 'proxy-1', rawContent: 'task', clientId: 'c-1' }))
+      .resolves.toMatchObject({ ok: true, mode: 'dispatched', agentKind: 'pi' });
+    expect(invoke.mock.calls.filter(([, channel]) => channel === 'maker:input:enqueue')).toHaveLength(1);
   });
 
   it('does not re-report an already bridged reply and ends with an error when no new reply appears', async () => {

@@ -29,6 +29,7 @@ import {
   type BrowserBackend,
 } from './browser-backend/index.js';
 import { getRsbBrowserBridge } from '../rsb-browser-bridge/index.js';
+import type { RsbBrowserBridgeTabOp } from '../../shared/rsbBrowserBridge.js';
 import {
   readBrowserBackendSettings,
   writeBrowserBackendKind,
@@ -63,6 +64,7 @@ import {
 import { assertTrustedAppRendererEvent } from '../security/trustedAppRenderer.js';
 import { createBrowserBackendIpcHandlers } from './browser-backend/settings-ipc.js';
 import { raiseAgentBrowserWindow } from './raise-agent-browser-window.js';
+import { hasSecretPages, isSecretPage } from '../input-handoff/secretTaint.js';
 import {
   BrowserOpenForLoginError,
   browserOpenForLoginErrorCodeFromData,
@@ -273,10 +275,11 @@ function createRsbBackend(): RsbWebviewBackend {
       // Lazy main-window lookup. Phase 2 uses the same pattern; once the host
       // window is available the dispatch lands cleanly, before that the request
       // rejects with `host renderer not available`.
-      getHostWebContents: () => {
+      getHostWebContents: (op) => {
         // bootstrap-electron owns mainWindowRef; we read it through the public
-        // helper to avoid a circular import.
-        const win = readMainWindowForBackend();
+        // helper to avoid a circular import. The op lets bootstrap route tab-ops
+        // for popped-out tabs to the window that actually hosts them.
+        const win = readMainWindowForBackend(op);
         return win;
       },
       // detached 偏好开 + 侧边栏子窗口关着时,tab-op 前先把子窗口拉起来并等
@@ -323,17 +326,19 @@ const browserBackendHealthService = new BrowserBackendHealthService(backendContr
  * `setMainWindowAccessorForBackend`. Without this the RsbWebviewBackend has
  * no way to reach the renderer for tab-op dispatch.
  */
-let mainWindowAccessor: () => Electron.WebContents | null = () => null;
+type HostWebContentsAccessor = (op?: RsbBrowserBridgeTabOp) => Electron.WebContents | null;
 
-function readMainWindowForBackend(): Electron.WebContents | null {
-  return mainWindowAccessor();
+let mainWindowAccessor: HostWebContentsAccessor = () => null;
+
+function readMainWindowForBackend(op?: RsbBrowserBridgeTabOp): Electron.WebContents | null {
+  return mainWindowAccessor(op);
 }
 
 /**
  * Bootstrap hook. Called from `bootstrap-electron.ts` once `mainWindowRef` is
  * known. Idempotent re-binds are safe.
  */
-export function setMainWindowAccessorForBackend(accessor: () => Electron.WebContents | null): void {
+export function setMainWindowAccessorForBackend(accessor: HostWebContentsAccessor): void {
   mainWindowAccessor = accessor;
 }
 
@@ -450,6 +455,7 @@ export function getBrowserMcpDeps(): {
   logger: typeof logger;
   getUserRecipes(): Promise<UserRecipesResult>;
   saveUserRecipe(input: Parameters<typeof writeUserRecipe>[0]): Promise<WriteUserRecipeResult>;
+  pageReadsRestricted(target: { profile?: string; targetId?: string }): Promise<boolean>;
 } {
   return {
     setBackend: async (kind) => {
@@ -467,6 +473,17 @@ export function getBrowserMcpDeps(): {
     getRuntime: () => backendController,
     supportsResourceDownloads: () => backendController.kind === 'rsb-webview',
     supportsSemanticQueries: () => backendController.kind === 'rsb-webview',
+    // 代输入: pause page-state reads on a tab still showing a page where the owner typed a secret.
+    pageReadsRestricted: async ({ profile, targetId }) => {
+      if (!hasSecretPages()) return false;
+      const listed = await backendController.call({ action: 'tabs', ...(profile ? { profile } : {}) });
+      if (!listed.ok) return true;
+      const tabs = (listed.data as { tabs?: Array<{ targetId?: unknown; url?: unknown }> } | undefined)?.tabs ?? [];
+      // Without a target the runtime acts on its last tab; check every tab conservatively.
+      return tabs
+        .filter((tab) => !targetId || tab.targetId === targetId)
+        .some((tab) => typeof tab.url === 'string' && isSecretPage(tab.url));
+    },
     logger,
   };
 }

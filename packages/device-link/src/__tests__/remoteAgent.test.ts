@@ -8,10 +8,12 @@ import {
   isPeerResetRetryableInvoke,
   isRemoteAgentReadInvoke,
   parseRemoteAgentCaps,
+  parseRemoteAgentForkResult,
   parseRemoteAgentPollResult,
   parseRemoteAgentReadResult,
   parseRemoteAgentReply,
   parseRemoteAgentRequest,
+  parseRemoteAgentReshareResult,
   parseRemoteAgentStreamItem,
   remoteAgentErrorCode,
 } from '../index';
@@ -20,6 +22,24 @@ const runId = '0f9c4a2e-6d1b-4c3a-9e8f-1a2b3c4d5e6f';
 const otherId = '1a2b3c4d-5e6f-4a1b-8c2d-3e4f5a6b7c8d';
 
 describe('remote agent channel', () => {
+  // Shared-model fork wire: old peers must not gain write support by default; task IDs
+  // include group-relay IDs, while filesystem roots are never accepted from callers.
+  it('validates native fork boundaries and never retries a fork as a read', () => {
+    const request = { op: 'fork', sourceSessionId: 'g123', newSessionId: otherId,
+      agentKind: 'pi', sourceSdkSessionId: '/guest/pi-sessions/source.jsonl', model: 'model' };
+    expect(parseRemoteAgentRequest({ ...request, hostedGuestHome: '/owner', workingDir: '/owner' })).toEqual(request);
+    expect(() => parseRemoteAgentRequest({ ...request, sourceSessionId: '../owner' })).toThrow();
+    expect(() => parseRemoteAgentRequest({ ...request, tailTurnsToDrop: -1 })).toThrow();
+    expect(isRemoteAgentReadInvoke(REMOTE_AGENT_CHANNEL, [request])).toBe(false);
+    expect(isPeerResetRetryableInvoke(REMOTE_AGENT_CHANNEL, [request])).toBe(false);
+    expect(parseRemoteAgentForkResult({ newSdkSessionId: 'child', uuidMap: [['a', 'b']] })).toEqual({
+      newSdkSessionId: 'child', uuidMap: [['a', 'b']],
+    });
+    expect(() => parseRemoteAgentForkResult({ newSdkSessionId: 'child', uuidMap: [['a', 1]] })).toThrow();
+    const caps = { version: 1, agents: [], maxRuns: 16, uploadChunkBytes: 1024, maxPayloadBytes: 2048 };
+    expect(parseRemoteAgentCaps(caps).nativeFork).toBeUndefined();
+    expect(parseRemoteAgentCaps({ ...caps, nativeFork: true }).nativeFork).toBe(true);
+  });
   // Shared-task guests are refused by the desktop shared-task gate (not in its channel list).
   it('is registered on the same-account allowlist', () => {
     expect(REMOTE_INVOKE_ALLOWLIST.has(REMOTE_AGENT_CHANNEL)).toBe(true);
@@ -35,6 +55,113 @@ describe('remote agent channel', () => {
     const caps = { version: 1, agents: [], maxRuns: 16, uploadChunkBytes: 1024, maxPayloadBytes: 2048 };
     expect(parseRemoteAgentCaps({ ...caps, guestRelay: true }).guestRelay).toBe(true);
     expect(parseRemoteAgentCaps({ ...caps, guestRelay: 'yes' })).not.toHaveProperty('guestRelay');
+    // Restricted relays require an explicit capability; legacy/non-boolean
+    // values cannot authorize forwarding to an older execution host.
+    expect(parseRemoteAgentCaps(caps)).not.toHaveProperty('relayModelAccess');
+    expect(parseRemoteAgentCaps({ ...caps, relayModelAccess: true }).relayModelAccess).toBe(true);
+    expect(parseRemoteAgentCaps({ ...caps, relayModelAccess: 'yes' })).not.toHaveProperty('relayModelAccess');
+    const request = { t: 'request', requestId: otherId, request: { type: 'model-access', model: 'opus' } };
+    expect(parseRemoteAgentStreamItem(JSON.stringify(request))).toEqual(request);
+    expect(parseRemoteAgentStreamItem(JSON.stringify({ ...request, request: { type: 'model-access' } }))).toMatchObject({ request: { type: 'model-access' } });
+    for (const model of ['', 1, 'a'.repeat(513)]) {
+      expect(() => parseRemoteAgentStreamItem(JSON.stringify({ ...request, request: { type: 'model-access', model } }))).toThrow('REMOTE_AGENT_INVALID');
+    }
+  });
+
+  // 转分享(provider-sharing.md §4.3)：组所在电脑把它分享的人报给分享来的组内电脑，由那台的主人逐人同意。
+  it('parses the reshare op, its result and the consent capability', () => {
+    const key = 'a1b2c3d4e5f60718293a4b5c6d7e8f90';
+    const other = 'b1b2c3d4e5f60718293a4b5c6d7e8f90';
+    expect(parseRemoteAgentRequest({
+      op: 'reshare',
+      entries: [
+        { key, name: '  Bob ', avatar: 'https://cdn.example.com/a.png', extra: 1 },
+        { key: other, name: 'Carol', avatar: 'http://insecure.example.com/a.png' },
+      ],
+    })).toEqual({
+      op: 'reshare',
+      entries: [
+        { key, name: 'Bob', avatar: 'https://cdn.example.com/a.png' },
+        { key: other, name: 'Carol' },
+      ],
+    });
+    expect(parseRemoteAgentRequest({ op: 'reshare', entries: [] })).toEqual({ op: 'reshare', entries: [] });
+    for (const bad of [
+      { op: 'reshare' },
+      { op: 'reshare', entries: [{ key: 'short', name: 'Bob' }] },
+      { op: 'reshare', entries: [{ key, name: '' }] },
+      { op: 'reshare', entries: [{ key, name: 'a\u0000b' }] },
+      { op: 'reshare', entries: [{ key, name: 'x'.repeat(129) }] },
+      { op: 'reshare', entries: [{ key, name: 'Bob' }, { key, name: 'Bob again' }] },
+      { op: 'reshare', entries: Array.from({ length: 257 }, (_, i) => ({ key: `${String(i).padStart(3, '0')}${key.slice(3)}`, name: 'x' })) },
+    ]) {
+      expect(() => parseRemoteAgentRequest(bad)).toThrow('REMOTE_AGENT_INVALID');
+    }
+    // 回包：不认识的状态与请求外的键丢掉。
+    expect(parseRemoteAgentReshareResult({
+      entries: [
+        { key, state: 'approved' },
+        { key: other, state: 'maybe' },
+        { key: 'c1b2c3d4e5f60718293a4b5c6d7e8f90', state: 'pending' },
+      ],
+    }, new Set([key, other]))).toEqual({ entries: [{ key, state: 'approved' }] });
+    expect(() => parseRemoteAgentReshareResult({
+      entries: [{ key, state: 'pending' }, { key, state: 'approved' }],
+    })).toThrow('REMOTE_AGENT_INVALID');
+    expect(() => parseRemoteAgentReshareResult({
+      entries: Array.from({ length: 257 }, (_, index) => ({
+        key: String(index).padStart(3, '0') + key.slice(3),
+        state: 'pending',
+      })),
+    })).toThrow('REMOTE_AGENT_INVALID');
+    expect(() => parseRemoteAgentReshareResult({})).toThrow('REMOTE_AGENT_INVALID');
+    const caps = { version: 1, agents: [], maxRuns: 16, uploadChunkBytes: 1024, maxPayloadBytes: 2048 };
+    expect(parseRemoteAgentCaps({ ...caps, reshareConsent: true }).reshareConsent).toBe(true);
+    expect(parseRemoteAgentCaps({ ...caps, reshareConsent: 1 })).not.toHaveProperty('reshareConsent');
+    expect(remoteAgentErrorCode('[REMOTE_AGENT_RESHARE_NOT_ALLOWED] no')).toBe('REMOTE_AGENT_RESHARE_NOT_ALLOWED');
+  });
+
+  it('parses reshare batches and rejects malformed batch metadata', () => {
+    const key = 'a1b2c3d4e5f60718293a4b5c6d7e8f90';
+    const batchId = 'batch-a1b2c3d4e5f6';
+    expect(parseRemoteAgentRequest({
+      op: 'reshare',
+      entries: [{ key, name: 'Bob' }],
+      batch: { id: batchId, index: 1, count: 2 },
+    })).toEqual({
+      op: 'reshare',
+      entries: [{ key, name: 'Bob' }],
+      batch: { id: batchId, index: 1, count: 2 },
+    });
+    expect(parseRemoteAgentRequest({
+      op: 'reshare',
+      entries: [{ key, name: 'Bob' }],
+      batch: { id: batchId, index: 4096, count: 4097 },
+    })).toMatchObject({ batch: { index: 4096, count: 4097 } });
+    expect(parseRemoteAgentReshareResult({
+      entries: [{ key, state: 'approved' }],
+      batch: { id: batchId, index: 1, count: 2, complete: true },
+    }, new Set([key]))).toEqual({
+      entries: [{ key, state: 'approved' }],
+      batch: { id: batchId, index: 1, count: 2, complete: true },
+    });
+    for (const batch of [
+      { id: 'short', index: 0, count: 1 },
+      { id: 123, index: 0, count: 1 },
+      { id: batchId, index: -1, count: 2 },
+      { id: batchId, index: 2, count: 2 },
+      { id: batchId, index: 0, count: 0 },
+      { id: batchId, index: 0, count: Number.MAX_SAFE_INTEGER + 1 },
+    ]) {
+      expect(() => parseRemoteAgentRequest({ op: 'reshare', entries: [{ key, name: 'Bob' }], batch }))
+        .toThrow('REMOTE_AGENT_INVALID');
+    }
+    const caps = { version: 1, agents: [], maxRuns: 16, uploadChunkBytes: 1024, maxPayloadBytes: 2048 };
+    expect(parseRemoteAgentCaps({ ...caps, reshareConsent: true, reshareBatch: true })).toMatchObject({
+      reshareConsent: true,
+      reshareBatch: true,
+    });
+    expect(parseRemoteAgentCaps({ ...caps, reshareBatch: 'yes' })).not.toHaveProperty('reshareBatch');
   });
 
   it('parses every op and drops unknown fields', () => {
@@ -110,6 +237,24 @@ describe('remote agent channel', () => {
     expect(parseRemoteAgentCaps({ version: 1, agents: [{ kind: 'pi', available: true }, { kind: 'x' }], maxRuns: 16, uploadChunkBytes: 1024, maxPayloadBytes: 10 }))
       .toEqual({ version: 1, agents: [{ kind: 'pi', available: true }], maxRuns: 16, uploadChunkBytes: 1024, maxPayloadBytes: 10 });
     expect(remoteAgentErrorCode('[REMOTE_AGENT_BUSY] x')).toBe('REMOTE_AGENT_BUSY');
+    expect(remoteAgentErrorCode('[REMOTE_AGENT_PEER_TOO_OLD] update')).toBe('REMOTE_AGENT_PEER_TOO_OLD');
     expect(remoteAgentErrorCode('[REMOTE_AGENT_SOMETHING] x')).toBeNull();
   });
+});
+
+// #6412: additive native-image recovery must accept old caps and never accept caller paths.
+it('negotiates native image recovery and validates scoped chunk requests', () => {
+  const caps = { version: 1, agents: [], maxRuns: 1, uploadChunkBytes: 1024, maxPayloadBytes: 2048 };
+  expect(parseRemoteAgentCaps(caps).imageRecovery).toBeUndefined();
+  expect(parseRemoteAgentCaps(caps).imageRecoveryRelay).toBeUndefined();
+  expect(parseRemoteAgentCaps({ ...caps, imageRecoveryRelay: true }).imageRecoveryRelay).toBe(true);
+  expect(parseRemoteAgentRequest({ op: 'images', sessionId: 'task', relay: 'r'.repeat(16), action: 'release', imageId: 'a'.repeat(64) }))
+    .toMatchObject({ relay: 'r'.repeat(16), sessionId: 'task' });
+  expect(parseRemoteAgentRequest({ op: 'images', sessionId: 'internal-task', action: 'list' })).toEqual({ op: 'images', sessionId: 'internal-task', action: 'list', offset: 0 });
+  expect(parseRemoteAgentCaps({ ...caps, imageRecovery: true }).imageRecovery).toBe(true);
+  expect(parseRemoteAgentRequest({ op: 'images', sessionId: runId, action: 'read', imageId: 'a'.repeat(64), offset: 512, path: '/private/image.png' }))
+    .toEqual({ op: 'images', sessionId: runId, action: 'read', imageId: 'a'.repeat(64), offset: 512 });
+  for (const patch of [{ offset: -1 }, { offset: 0.5 }, { imageId: '../image.png' }, { sessionId: '' }, { relay: '../unsafe' }]) {
+    expect(() => parseRemoteAgentRequest({ op: 'images', sessionId: runId, action: 'read', imageId: 'a'.repeat(64), offset: 0, ...patch })).toThrow('REMOTE_AGENT_INVALID');
+  }
 });

@@ -1,4 +1,5 @@
 import { Button } from '@/components/ui/button';
+import { Switch } from '@/components/ui/switch';
 import { Textarea } from '@/components/ui/input';
 import { shouldShowOpenPathError } from '../../../shared/openPathResult';
 import { ConnectProviderCard } from '@/components/onboarding/ConnectProviderCard';
@@ -6,20 +7,14 @@ import { useProviderOnboarding } from '@/hooks/useProviderOnboarding';
 import { useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { MainViewHistoryContext } from '@/contexts/MainViewHistoryContext';
 import { BotPortraitPicker } from './BotPortraitPicker';
+import { botSettingsIcons } from './botSettingsIcons';
 import {
   ArrowLeft,
   Bot,
-  Brain,
   Camera,
   Check,
   ChevronRight,
-  Clock3,
   FolderOpen,
-  History,
-  Info,
-  Settings2,
-  Sparkles,
-  UserRound,
 } from 'lucide-react';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { useBotTranslation } from './botPronounContext';
@@ -54,13 +49,20 @@ import {
   shouldDeferCanonicalBotSessionNavigation,
   withBotCanonicalSessionReadTimeout,
 } from './botNavigation';
+import { useCompanionCloud } from './companionCloudStore';
+import { withoutShadowedBots } from './companionCloudPresentation';
+import { BotHomeComputerSetting } from './BotHomeComputerSetting';
+import { CindyMergeSetting } from './CindyMergeSetting';
 import { BotLifecycleSettings } from './BotLifecycleSettings';
 import { BotInvitationWelcome } from './BotInvitationWelcome';
 import { BotModelChainEditor } from './BotModelChainEditor';
 import { BotTaskModelEditor } from './BotTaskModelEditor';
 import { BotCapabilitySettings } from './BotCapabilitySettings';
 import { BotRoutines } from './BotRoutines';
+import { BotAutonomySettings } from './BotAutonomySettings';
 import { BotMemorySettings } from './BotMemorySettings';
+import { CompanionVoiceSettings } from './voice/CompanionVoiceSettings';
+import { BotChannelsPage } from './BotChannelsPage';
 import {
   botSettingsChanges,
   normalizeBotSettingsPayload,
@@ -100,7 +102,7 @@ export function BotSettings({
   beforeCloseRef,
   initialPage = 'home',
 }: {
-  initialPage?: 'home' | 'memory' | 'capabilities' | 'model';
+  initialPage?: 'home' | 'memory' | 'capabilities' | 'model' | 'voice' | 'channels';
   bot: BotProfile;
   beforeCloseRef?: { current: (() => Promise<boolean>) | null };
   onBack: () => void;
@@ -139,32 +141,39 @@ export function BotSettings({
     | 'profile'
     | 'personality'
     | 'model'
+    | 'voice'
     | 'capabilities'
+    | 'channels'
     | 'history'
     | 'advanced'
     | 'routines'
     | 'memory'
   >(initialPage);
+  const voiceLeaveRef = useRef<(() => Promise<boolean>) | null>(null);
   const routineLeaveRef = useRef<(() => Promise<boolean>) | null>(null);
   const routineBackRef = useRef<(() => Promise<boolean>) | null>(null);
   const memoryLeaveRef = useRef<(() => Promise<boolean>) | null>(null);
   const memoryBackRef = useRef<(() => Promise<boolean>) | null>(null);
   const pageTitle =
-    page === 'memory'
-      ? t('bots.memory.title')
-      : page === 'model'
-        ? t('bots.settingsTabs.model')
-        : page === 'routines'
-          ? t('routines.title')
-          : page === 'history'
-            ? t('bots.historySearch.title')
-            : page === 'advanced'
-              ? t('bots.homeFolder.title')
-              : page === 'capabilities'
-                ? t('bots.capabilities.title')
-                : page === 'personality'
-                  ? t('bots.profile.personality')
-                  : t('bots.profile.title');
+    page === 'voice'
+      ? t('bots.voiceMode.settingsTitle')
+      : page === 'channels'
+        ? t('bots.channels.title')
+        : page === 'memory'
+          ? t('bots.memory.title')
+          : page === 'model'
+            ? t('bots.settingsTabs.model')
+            : page === 'routines'
+              ? t('routines.title')
+              : page === 'history'
+                ? t('bots.historySearch.title')
+                : page === 'advanced'
+                  ? t('bots.homeFolder.title')
+                  : page === 'capabilities'
+                    ? t('bots.capabilities.title')
+                    : page === 'personality'
+                      ? t('bots.profile.personality')
+                      : t('bots.profile.title');
   const [folderError, setFolderError] = useState<string | null>(null);
   const avatarInFlight = useRef(false);
   const [avatarBusy, setAvatarBusy] = useState(false);
@@ -228,6 +237,7 @@ export function BotSettings({
     if (avatarInFlight.current) return false;
     await autosave.flush();
     if (autosave.isDirty()) return false;
+    if (!((await voiceLeaveRef.current?.()) ?? true)) return false;
     if (!((await memoryLeaveRef.current?.()) ?? true)) return false;
     return (await routineLeaveRef.current?.()) ?? true;
   }, [autosave.flush, autosave.isDirty]);
@@ -257,7 +267,7 @@ export function BotSettings({
       settingsRowRefs.current.get(returnFocusRowRef.current)?.focus();
   }, [page]);
   const go = (next: typeof page) => {
-    if (!autosave.isDirty() && !routineLeaveRef.current && !memoryLeaveRef.current) {
+    if (!autosave.isDirty() && !routineLeaveRef.current && !memoryLeaveRef.current && !voiceLeaveRef.current) {
       showPage(next);
       return;
     }
@@ -312,7 +322,7 @@ export function BotSettings({
       ...current,
       [key]: value,
       ...(key === 'fastMode' && current.modelOverride
-        ? { modelOverride: { ...current.modelOverride, fastMode: value === true } }
+        ? { modelOverride: { ...current.modelOverride, fastMode: value === 'ultrafast' ? 'ultrafast' : value === true } }
         : {}),
     }));
     autosave.onEdit('instant');
@@ -404,14 +414,16 @@ export function BotSettings({
     && !(bot.invitation.stage === 'avatar' && bot.canonicalSessionId);
 
   const settingsRows = [
-    ['profile', Info, t('bots.profile.title')],
-    ['personality', UserRound, t('bots.profile.personality')],
-    ['memory', Brain, t('bots.memory.title')],
-    ['model', Sparkles, t('bots.settingsTabs.model')],
-    ['capabilities', Settings2, t('bots.capabilities.title')],
-    ['routines', Clock3, t('routines.title')],
-    ['history', History, t('bots.historySearch.title')],
-    ['advanced', FolderOpen, t('bots.homeFolder.title')],
+    ['profile', botSettingsIcons.profile, t('bots.profile.title')],
+    ['personality', botSettingsIcons.personality, t('bots.profile.personality')],
+    ['memory', botSettingsIcons.memory, t('bots.memory.title')],
+    ['model', botSettingsIcons.model, t('bots.settingsTabs.model')],
+    ['voice', botSettingsIcons.voice, t('bots.voiceMode.settingsTitle')],
+    ['capabilities', botSettingsIcons.capabilities, t('bots.capabilities.title')],
+    ['channels', botSettingsIcons.channels, t('bots.channels.title')],
+    ['routines', botSettingsIcons.routines, t('routines.title')],
+    ['history', botSettingsIcons.history, t('bots.historySearch.title')],
+    ['advanced', botSettingsIcons.advanced, t('bots.homeFolder.title')],
   ] as const;
   return (
     <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-5 pb-8">
@@ -511,6 +523,8 @@ export function BotSettings({
                 </button>
               ))}
             </div>
+            <BotHomeComputerSetting bot={bot} />
+            <CindyMergeSetting bot={bot} />
             <div className="mt-6">
               <BotLifecycleSettings
                 bot={bot}
@@ -662,8 +676,21 @@ export function BotSettings({
                 autosave.onEdit('instant');
               }}
             />
+            <div className="mt-5 flex items-start gap-3 border-t border-[var(--border-default)] pt-4">
+              <div className="min-w-0 flex-1">
+                <p className="text-13 font-medium text-[var(--text-primary)]">{t('bots.capabilities.inputHandoff.title')}</p>
+                <p className="mt-1 text-12 leading-5 text-[var(--text-secondary)]">{t('bots.capabilities.inputHandoff.description')}</p>
+              </div>
+              <Switch
+                aria-label={t('bots.capabilities.inputHandoff.title')}
+                className="mt-0.5 shrink-0"
+                checked={capabilities.inputHandoff !== false}
+                onCheckedChange={(value) => updateCapability('inputHandoff', value === true)}
+              />
+            </div>
           </div>
         )}
+        {page === 'channels' ? <BotChannelsPage bot={bot} /> : null}
         {page === 'history' ? (
           <BotLifecycleSettings
             bot={bot}
@@ -706,6 +733,15 @@ export function BotSettings({
             </div>
           </div>
         ) : null}
+        {page === 'voice' ? (
+          <CompanionVoiceSettings botId={bot.id} sessionId={canonicalBotSessionId(bot) ?? undefined}
+            beforeLeaveRef={voiceLeaveRef}
+            onOpenProviders={() => {
+              void canLeave().then((allowed) => {
+                if (allowed) navigate('/settings?tab=providers');
+              });
+            }} />
+        ) : null}
         {page === 'memory' ? (
           <BotMemorySettings
             botId={bot.id}
@@ -722,6 +758,14 @@ export function BotSettings({
             botId={bot.id}
             beforeLeaveRef={routineLeaveRef}
             backRef={routineBackRef}
+            header={
+              <BotAutonomySettings
+                botId={bot.id}
+                botName={displayName}
+                allowSchedulerFollow={capabilities.allowSchedulerFollow === true}
+                onAllowSchedulerFollowChange={(value) => updateCapability('allowSchedulerFollow', value)}
+              />
+            }
           />
         ) : null}
       </div>
@@ -756,7 +800,9 @@ export function BotsHomeView() {
   const history = useContext(MainViewHistoryContext);
   const selectedBot = useMemo(() => bots.find((bot) => bot.id === botId && bot.status !== 'deleting') ?? null, [botId, bots]);
   const profilesLoaded = hasLoadedBotProfiles();
-  const entryTarget = botEntryTarget(bots, history?.current.lastBotId);
+  const cloud = useCompanionCloud();
+  // Demoted copies (home moved to another computer) are never the entry choice.
+  const entryTarget = botEntryTarget(withoutShadowedBots(bots, cloud), history?.current.lastBotId);
   // An empty profile projection can predate the newly connected source/runtime.
   // Only followers may resume from live defaults; Main resolves the actual route
   // when opening the canonical task without writing a per-Bot override.

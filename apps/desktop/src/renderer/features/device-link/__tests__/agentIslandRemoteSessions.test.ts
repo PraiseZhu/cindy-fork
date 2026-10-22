@@ -83,6 +83,35 @@ describe('buildAgentIslandRemoteSessionInputs', () => {
     relay.dispose(); clearRemoteSessionActivity();
   });
 
+  it('carries silence through relay, store and IPC without losing unread or suppressing later errors', () => {
+    clearRemoteSessionActivity();
+    const state = createAgentIslandState();
+    const events: string[] = [];
+    const relay = new SessionActivityRelay(payload => {
+      applyRemoteSessionActivity('device-a', payload);
+      const inputs = buildAgentIslandRemoteSessionInputs([remoteSession('a-1', 'device-a')], MACHINE_ALL, getRemoteSessionActivity);
+      const parsed = parseAgentIslandRemoteSessions(inputs);
+      expect(parsed).not.toBeNull();
+      events.push(...syncAgentIslandDeviceSessions(state, parsed!, 2_000).events.map(event => event.kind));
+    }, { minIntervalMs: 0 });
+    const activity = { sessionId: 'a-1', phase: 'running', recordStatus: 'active', compactDetail: 'Working', startedAtMs: 1, lastActivityAtMs: 1, currentActionSummary: 'Working', attention: true, workflow: null, turnGeneration: null, gracefulStopState: 'none', source: 'live' } as const;
+    try {
+      relay.publish([activity]);
+      const silent = { ...activity, phase: 'completed' as const, completionNotification: 'silent' as const };
+      relay.publish([silent]);
+      relay.replay([silent]);
+      expect(events).toEqual([]);
+      expect(state.sessions.get('a-1')).toMatchObject({ phase: 'completed', unread: true, completionNotification: 'silent' });
+      expect(state.activeTransientSessionId).toBeNull();
+      relay.publish([activity]);
+      relay.publish([{ ...activity, phase: 'error' }]);
+      expect(events).toEqual(['error']);
+    } finally {
+      relay.dispose();
+      clearRemoteSessionActivity();
+    }
+  });
+
   it('includes every remote task with live activity under the "all" scope', () => {
     expect(buildAgentIslandRemoteSessionInputs(sessions, MACHINE_ALL, readActivity)).toEqual([
       {
@@ -115,6 +144,50 @@ describe('buildAgentIslandRemoteSessionInputs', () => {
     expect(buildAgentIslandRemoteSessionInputs(sessions, [MACHINE_LOCAL], readActivity)).toEqual(
       [],
     );
+  });
+
+  // A companion whose main computer is another device never reached the island: its chat is a
+  // hidden Bot Session, skipped with the task list. It is account-wide, so the task scope does not apply.
+  it('shows a remote companion chat as the companion, whatever the task scope', () => {
+    const bot = {
+      id: 'opus', deviceId: 'device-a', deviceName: 'Mac Studio', name: 'Opus',
+      avatar: 'cindy-media://blobs/' + 'a'.repeat(64) + '.png', avatarColor: 'teal',
+      description: '', preview: '', activityAt: 1, sessionId: 'a-1', online: true,
+    };
+    const offline = { ...bot, id: 'away', sessionId: 'b-2', online: false };
+    const inputs = buildAgentIslandRemoteSessionInputs(
+      [remoteSession('a-1', 'device-a', { source: 'bot' })], [MACHINE_LOCAL], readActivity, [bot, offline],
+    );
+    // A local path is not a companion avatar value: it never reaches main.
+    const parsed = parseAgentIslandRemoteSessions([
+      ...inputs,
+      { ...inputs[0], sessionId: 'x-1', companion: { name: 'X', avatar: '/etc/passwd', avatarColor: 'red' } },
+      // Oversized values are dropped before any trimming or grapheme parsing.
+      { ...inputs[0], sessionId: 'x-2', companion: { name: 'Y', avatar: '🦊'.repeat(3_000_000), avatarColor: 'red' } },
+    ]);
+    expect(parsed?.[0]).toMatchObject({
+      sessionId: 'a-1', deviceId: 'device-a', title: 'Opus', phase: 'running', detail: 'Reading files',
+      companion: { name: 'Opus', avatar: bot.avatar, avatarColor: 'teal' },
+    });
+    expect(parsed?.map((input) => input.sessionId)).toEqual(['a-1', 'x-1', 'x-2']);
+    expect(parsed?.[1]?.companion?.avatar).toBe('');
+    expect(parsed?.[2]?.companion?.avatar).toBe('');
+
+    const state = createAgentIslandState();
+    const companion = { name: 'Opus', hue: 'teal' as const, glyph: 'O', glyphIsInitial: true };
+    syncAgentIslandDeviceSessions(state, parsed!.slice(0, 1), 2_000, (input) => (input.companion ? companion : null));
+    expect(state.sessions.get('a-1')).toMatchObject({ companion, title: 'Opus', projectName: 'Mac Studio' });
+  });
+
+  // Review of #6436: companions are prepended, so near the parser cap one extra entry voided the whole payload.
+  it('never exceeds the IPC cap, trimming tasks before companions', () => {
+    const many = Array.from({ length: 600 }, (_, index) => remoteSession(`t-${index}`, 'device-a'));
+    const everyActivity = (sessionId: string): RemoteSessionActivity => ({ sessionId, phase: 'running', compactDetail: '', attention: false });
+    const bot = { id: 'opus', deviceId: 'device-a', deviceName: 'Mac', name: 'Opus', avatar: '', avatarColor: '', description: '', preview: '', activityAt: 1, sessionId: 'bot-s', online: true };
+    const inputs = buildAgentIslandRemoteSessionInputs(many, MACHINE_ALL, everyActivity, [bot]);
+    expect(inputs).toHaveLength(500);
+    expect(inputs[0]?.sessionId).toBe('bot-s');
+    expect(parseAgentIslandRemoteSessions(inputs)).not.toBeNull();
   });
 
   it('skips Bot tasks and disconnected devices', () => {

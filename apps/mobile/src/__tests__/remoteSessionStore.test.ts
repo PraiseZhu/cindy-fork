@@ -3,6 +3,8 @@ import { MAKER_EVENT_BATCH_CHANNEL, SESSION_SYNC_CHANNEL } from '@cindy/device-l
 import { clampLiveRowCreatedAt } from '@/session/messagePaging';
 import { MOBILE_TOOL_INPUT_PROJECTION_THRESHOLD_BYTES } from '@/session/messageToolPayloadProjection';
 import { remoteSessionStore, resolveSessionWriteDevices, sessionPendingWrites } from '@/session/remoteSessionStore';
+import { buildMobileSessionMessageDeepLink, parseSessionDeepLinkUrl, resolveSessionLinkDeviceId } from '@/session/sessionLinks';
+import { sessionMenuCopyLink } from '@/session/sessionMenu';
 import type { InputProjection, PendingInteraction, RemoteMessage, RemoteSession } from '@/session/types';
 import { setJankMetricsEnabled, takeJankMetrics } from '@/debug/jankMetrics';
 
@@ -39,12 +41,63 @@ function message(id: string, sessionId: string): RemoteMessage {
   };
 }
 
+// Unit: side-chat details are omitted by the Host list. A list refresh must
+// retain opened details without leaking them into Home, and deletion must still
+// remove them. Existing tests only cover ordinary listed task reconciliation.
+it.each(['deleted', 'archived'] as const)('retains hidden side-chat details across refresh, then reports %s after removal', status => {
+  remoteSessionStore.clear();
+  const parent = session('main');
+  const child = session('side', { source: 'side-chat', parentSessionId: 'main' });
+  remoteSessionStore.setDeviceSessions('dev-1', 'Computer', [parent]);
+  remoteSessionStore.upsertDeviceSession('dev-1', 'Computer', child);
+  // Black-box regression (2026-10-20): removing the row did not close its sheet.
+  // This lifecycle signal must follow removal, and must not fire on reconnect.
+  const removed = vi.fn(() => remoteSessionStore.getSessions().map(row => row.id));
+  const off = remoteSessionStore.onSessionRemoved(removed);
+  try {
+    remoteSessionStore.setDeviceSessions('dev-1', 'Computer', [parent]);
+    remoteSessionStore.markDeviceOffline('dev-1');
+    expect(removed).not.toHaveBeenCalled();
+    expect(remoteSessionStore.getSessions().map(row => row.id)).toContain('side');
+    expect(remoteSessionStore.getVisibleSessions().map(row => row.id)).toEqual(['main']);
+    expect(remoteSessionStore.getHomeSessions().map(row => row.id)).toEqual(['main']);
+    remoteSessionStore.applyRemotePush('dev-1', 'local-db:sessions:patched', {
+      sessionId: 'side', patch: { status },
+    });
+    expect(removed).toHaveBeenCalledExactlyOnceWith('dev-1', 'side');
+    expect(removed.mock.results[0].value).toEqual(['main']);
+    remoteSessionStore.setDeviceSessions('dev-1', 'Computer', [parent]);
+    expect(remoteSessionStore.getSessions().map(row => row.id)).toEqual(['main']);
+  } finally { off(); remoteSessionStore.clear(); }
+});
+
+// Unit, #6529: reopening an archived side chat restores a detail omitted by
+// sessions:list. Active-only refresh coverage missed this archive → reopen path.
+it('keeps reopened archived side-chat details through list refresh until deletion', () => {
+  remoteSessionStore.clear();
+  const parent = session('main');
+  const archived = session('side', { source: 'side-chat', parentSessionId: 'main', status: 'archived' });
+  try {
+    remoteSessionStore.setDeviceSessions('dev-1', 'Computer', [parent]);
+    remoteSessionStore.upsertDeviceSession('dev-1', 'Computer', archived);
+    remoteSessionStore.setDeviceSessions('dev-1', 'Computer', [parent]);
+    expect(remoteSessionStore.getSessions()).toContainEqual(expect.objectContaining({ id: 'side', status: 'archived' }));
+    expect(remoteSessionStore.getVisibleSessions().map(row => row.id)).toEqual(['main']);
+    expect(remoteSessionStore.getHomeSessions().map(row => row.id)).toEqual(['main']);
+    remoteSessionStore.applyRemotePush('dev-1', 'local-db:sessions:patched', {
+      sessionId: 'side', patch: { status: 'deleted' },
+    });
+    remoteSessionStore.setDeviceSessions('dev-1', 'Computer', [parent]);
+    expect(remoteSessionStore.getSessions().map(row => row.id)).toEqual(['main']);
+  } finally { remoteSessionStore.clear(); }
+});
+
 function messageAt(id: string, sessionId: string, createdAt: string): RemoteMessage {
   return { ...message(id, sessionId), createdAt };
 }
 
-function pushMakerStatus(sessionId: string, data: Record<string, unknown>): void {
-  remoteSessionStore.applyRemotePush('dev-1', 'maker:event', {
+function pushMakerStatus(sessionId: string, data: Record<string, unknown>, deviceId = 'dev-1'): void {
+  remoteSessionStore.applyRemotePush(deviceId, 'maker:event', {
     sessionId,
     event: { type: 'status', data },
   });
@@ -135,6 +188,34 @@ function pending(kind: string, requestId?: string, persistId?: string): PendingI
 
 describe('remoteSessionStore', () => {
   beforeEach(() => remoteSessionStore.clear());
+
+  it('keeps an edited async question across disconnection but removes it on explicit history clearing', () => {
+    remoteSessionStore.setDeviceSessions('dev-1', 'Mac', [session('s1')]);
+    const item: PendingInteraction = { persistId: 'p1',
+      request: { kind: 'ask_user_question', requestId: 'q1', delivery: 'async', questions: [{ question: 'Q?' }] } };
+    remoteSessionStore.setPendingInteractions('s1', [item]);
+    remoteSessionStore.protectAsyncQuestion('s1', item);
+    remoteSessionStore.applyRemotePush('dev-1', 'maker:interaction-dismissed', {
+      sessionId: 's1', requestId: 'q1', reason: 'resolved', decision: { dismissed: true },
+    });
+    const visible = remoteSessionStore.getVisiblePendingInteractions('s1');
+    expect(remoteSessionStore.getVisiblePendingInteractions('s1')).toBe(visible);
+    remoteSessionStore.markDeviceOffline('dev-1');
+    expect(remoteSessionStore.getPendingInteractions('s1')).toHaveLength(0);
+    expect(remoteSessionStore.getVisiblePendingInteractions('s1')[0]).toMatchObject({ retainedDraft: true });
+    remoteSessionStore.invalidateSessionMessageWindow('s1', 'dev-1');
+    expect(remoteSessionStore.getVisiblePendingInteractions('s1')).toHaveLength(0);
+  });
+
+  it.each(['deleted', 'archived', 'logout'] as const)('drops protected cards on %s', (action) => {
+    remoteSessionStore.setDeviceSessions('dev-1', 'Mac', [session('s1')]);
+    remoteSessionStore.protectAsyncQuestion('s1', { request: {
+      kind: 'ask_user_question', requestId: 'q1', delivery: 'async',
+    } });
+    if (action === 'logout') remoteSessionStore.clear();
+    else remoteSessionStore.applySessionPatch('dev-1', 's1', { status: action });
+    expect(remoteSessionStore.getVisiblePendingInteractions('s1')).toHaveLength(0);
+  });
 
   it('keeps Make mirrors for transport while excluding them from visible session snapshots', () => {
     remoteSessionStore.setDeviceSessions('dev-1', 'Mac', [
@@ -3047,10 +3128,13 @@ describe('remoteSessionStore', () => {
     }
   });
 
-  it('clears a missed error and stale running state for a runtime absent from a complete snapshot', () => {
+  // Unit regression: after re-link, the physical shard can remain old while
+  // authoritative snapshots arrive from its canonical host. Preserve both paths.
+  it.each(['dev-1', 'new-dev-1'])('clears absent runtime state from complete snapshots on %s', (host) => {
     remoteSessionStore.setDeviceSessions('dev-1', 'Mac', [session('s1')]);
+    if (host !== 'dev-1') remoteSessionStore.setDeviceIdentity([{ deviceId: host, name: 'Mac' }]);
     remoteSessionStore.setDeviceSessions('dev-2', 'Mac mini', [session('s2')]);
-    remoteSessionStore.applySessionActivity('dev-1', {
+    remoteSessionStore.applySessionActivity(host, {
       sessionId: 's1', phase: 'error', attention: true,
     });
     remoteSessionStore.applySessionActivity('dev-2', {
@@ -3059,11 +3143,11 @@ describe('remoteSessionStore', () => {
     remoteSessionStore.setSessionRunning('s1', true);
 
     // A legacy host also returns an empty array, without claiming completeness.
-    remoteSessionStore.setActiveSessionSnapshots('dev-1', []);
+    remoteSessionStore.setActiveSessionSnapshots(host, []);
     expect(remoteSessionStore.getSessionLiveActivity('s1')).toMatchObject({ phase: 'error', attention: true });
     expect(remoteSessionStore.isSessionRunning('s1')).toBe(true);
 
-    remoteSessionStore.setActiveSessionSnapshots('dev-1', {
+    remoteSessionStore.setActiveSessionSnapshots(host, {
       format: 'active-sessions-v2', sessions: [],
     });
 
@@ -3072,14 +3156,15 @@ describe('remoteSessionStore', () => {
     expect(remoteSessionStore.getSessionLiveActivity('s2')).toMatchObject({ phase: 'error', attention: true });
   });
 
-  it('does not let a delayed complete snapshot clear a newer activity push', () => {
+  it.each(['dev-1', 'new-dev-1'])('preserves newer activity across delayed complete snapshots on %s', (host) => {
     remoteSessionStore.setDeviceSessions('dev-1', 'Mac', [session('s1')]);
+    if (host !== 'dev-1') remoteSessionStore.setDeviceIdentity([{ deviceId: host, name: 'Mac' }]);
     const epoch = remoteSessionStore.captureActiveSessionSnapshotEpoch();
-    remoteSessionStore.applySessionActivity('dev-1', {
+    remoteSessionStore.applySessionActivity(host, {
       sessionId: 's1', phase: 'error', attention: true,
     });
 
-    remoteSessionStore.setActiveSessionSnapshots('dev-1', {
+    remoteSessionStore.setActiveSessionSnapshots(host, {
       format: 'active-sessions-v2', sessions: [],
     }, epoch);
 
@@ -3363,7 +3448,8 @@ describe('remoteSessionStore', () => {
         generationDurationMs: 400,
         generationActive: true,
         generationReliable: true,
-      });
+      }, id);
+      expect(remoteSessionStore.isSessionMakerTurnRunning(`s-${id}`)).toBe(true);
     }
     const notify = vi.fn();
     const unsubscribe = remoteSessionStore.subscribe(notify);
@@ -3862,6 +3948,29 @@ describe('remoteSessionStore', () => {
 
     expect(remoteSessionStore.getSessions()[0].pinnedAt).toBeNull();
     expect(reseed).toHaveBeenCalledTimes(1);
+  });
+
+  // Unit regression: unopened side chats are absent from the ordinary mirror.
+  // Existing reseed coverage handled creation only, leaving their count stale.
+  it.each(['deleted', 'archived'] as const)('invalidates device lists on an unseen child becoming %s', status => {
+    for (const withShard of [false, true]) {
+      remoteSessionStore.clear();
+      if (withShard) remoteSessionStore.setDeviceSessions('dev-1', 'Mac', [session('parent')]);
+      const refresh = vi.fn();
+      const otherDevice = vi.fn();
+      const off = remoteSessionStore.registerReseedHandler('dev-1', refresh);
+      const offOther = remoteSessionStore.registerReseedHandler('dev-2', otherDevice);
+      const removed = vi.fn();
+      const offRemoved = remoteSessionStore.onSessionRemoved(removed);
+      remoteSessionStore.applyRemotePush('dev-1', 'local-db:sessions:patched', {
+        sessionId: 'unopened-child', patch: { status },
+      });
+      expect(refresh).toHaveBeenCalledOnce();
+      expect(otherDevice).not.toHaveBeenCalled();
+      expect(removed).toHaveBeenCalledExactlyOnceWith('dev-1', 'unopened-child');
+      expect(remoteSessionStore.getSessions().some(row => row.id === 'unopened-child')).toBe(false);
+      off(); offOther(); offRemoved();
+    }
   });
 
   it('fans reseed out to every subscriber and only unregisters the one that left', () => {
@@ -5164,6 +5273,35 @@ describe('remoteSessionStore', () => {
     // 路由维度:deviceLinkDeviceId 保持物理 shard id,sessionDeviceIndex 指向物理 shard(patch 不丢)。
     expect(byId.get('s-stale')?.deviceLinkDeviceId).toBe('stale-mac');
     expect(remoteSessionStore.getSessionDeviceId('s-stale')).toBe('stale-mac');
+  });
+
+  it('keeps links generated after re-link routed to the new device after archival removes the lookup', () => {
+    const routeDeviceId = 'old-mac';
+    remoteSessionStore.setDeviceIdentity([{ deviceId: routeDeviceId, name: 'Mac' }]);
+    remoteSessionStore.setDeviceSessions(routeDeviceId, 'Mac', [session('source')]);
+    const before = remoteSessionStore.getSessions()[0]!;
+    expect(parseSessionDeepLinkUrl(buildMobileSessionMessageDeepLink(
+      'source', 'anchor', { session: before, deviceId: routeDeviceId },
+    ))?.deviceId).toBe(routeDeviceId);
+
+    remoteSessionStore.setDeviceIdentity([{ deviceId: 'new-mac', name: 'Mac' }]);
+    const current = remoteSessionStore.getSessions()[0]!;
+    expect(current.canonicalDeviceId).toBe('new-mac');
+    expect(current.deviceLinkDeviceId).toBe(routeDeviceId);
+    const links = [
+      buildMobileSessionMessageDeepLink('source', 'anchor', { session: current, deviceId: routeDeviceId }),
+      sessionMenuCopyLink(current),
+    ];
+    remoteSessionStore.applySessionPatch(routeDeviceId, 'source', { status: 'archived' });
+    expect(remoteSessionStore.getSessionDeviceId('source')).toBeUndefined();
+    for (const link of links) {
+      const target = parseSessionDeepLinkUrl(link)!;
+      expect(resolveSessionLinkDeviceId({
+        listedDeviceId: remoteSessionStore.getSessionDeviceId(target.sessionId),
+        linkedDeviceId: target.deviceId,
+        currentDeviceId: 'other-mac',
+      })).toBe('new-mac');
+    }
   });
 
   it('dedupes the same session id across stale/current shards, keeping the current shard copy', () => {

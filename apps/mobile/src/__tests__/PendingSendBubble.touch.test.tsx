@@ -6,10 +6,12 @@ import type { GestureResponderEvent } from 'react-native';
 import { PendingSendBubble, type PendingSendBubbleActions } from '@/session/PendingSendBubble';
 import { MessageBodyText } from '@/session/ShareMessageCheckbox';
 import type { MobilePendingSendItem } from '@/session/pendingSendItems';
+import { collectMobileMessageGalleryImages, lightboxImagesForPayload } from '@/session/messageGallery';
 
-const { handlers, frames } = vi.hoisted(() => ({
+const { handlers, frames, durableThumbs } = vi.hoisted(() => ({
   handlers: new Map<string, Record<string, unknown>>(),
   frames: new Map<number, FrameRequestCallback>(),
+  durableThumbs: new Map<string, string>(),
 }));
 vi.mock('react-native', async () => {
   const { createElement } = await import('react');
@@ -17,16 +19,20 @@ vi.mock('react-native', async () => {
     if (props.testID) handlers.set(String(props.testID), props);
     return createElement(tag, { 'data-testid': props.testID, onClick: props.disabled ? undefined : props.onPress }, props.children);
   };
+  class AnimatedValue { setValue() {} interpolate() { return 0; } }
   return { View: view('div'), Text: view('span'), Pressable: view('button'), ActivityIndicator: () => null,
-    StyleSheet: { create: (styles: unknown) => styles, hairlineWidth: 1 } };
+    StyleSheet: { create: (styles: unknown) => styles, hairlineWidth: 1 },
+    Animated: { View: view('div'), Value: AnimatedValue, timing: () => ({ start() {}, stop() {} }) },
+    Easing: { bezier: () => (value: number) => value },
+    AccessibilityInfo: { isReduceMotionEnabled: () => Promise.resolve(true), addEventListener: () => ({ remove() {} }) } };
 });
 vi.mock('@/components/AppText', async () => ({ Text: (await import('react-native')).Text }));
 vi.mock('lucide-react-native', () => ({ Check: () => null, AlertCircle: () => null, ArrowUp: () => null,
   ListEnd: () => null, Paperclip: () => null, Pencil: () => null, RotateCcw: () => null, Trash2: () => null,
   Bot: () => null, Ghost: () => null, Send: () => null, Timer: () => null,
-  Monitor: () => null, Smartphone: () => null }));
+  Monitor: () => null, Smartphone: () => null, Clock: () => null }));
 vi.mock('@/session/SentInlineAtomBody', () => ({ SentInlineAtomBody: () => null }));
-vi.mock('@/session/sentAttachmentThumbStore', () => ({ getSentAttachmentThumbUri: () => null,
+vi.mock('@/session/sentAttachmentThumbStore', () => ({ getSentAttachmentThumbUri: (ref: string) => durableThumbs.get(ref) ?? null,
   useSentAttachmentThumbsVersion: () => 0 }));
 vi.mock('react-i18next', () => ({ initReactI18next: { type: '3rdParty', init: () => undefined },
   useTranslation: () => ({ t: (key: string) => key }) }));
@@ -41,7 +47,9 @@ let host: HTMLDivElement;
 let frameId = 0;
 const select = vi.fn();
 const openLink = vi.fn();
+const openImage = vi.fn();
 const removeOutbox = vi.fn();
+const retryOutbox = vi.fn();
 const item: MobilePendingSendItem = {
   type: 'pending_send', key: 'message-a', clientId: 'a', phase: 'queued', text: 'hello',
   queueIndex: 1, sentInlineTokens: [], thumbs: [], fileCount: 0, attachmentCount: 0, uploadedCount: 0,
@@ -54,6 +62,7 @@ beforeEach(() => {
   vi.useFakeTimers();
   vi.clearAllMocks();
   handlers.clear(); frames.clear();
+  durableThumbs.clear();
   Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
   vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => { frames.set(++frameId, cb); return frameId; });
   vi.stubGlobal('cancelAnimationFrame', (id: number) => frames.delete(id));
@@ -67,8 +76,9 @@ function show(
 ) {
   handlers.clear();
   const actions: PendingSendBubbleActions = { selectedClientId, onSelect: select, onRemove: vi.fn(),
-    onBeginEdit: vi.fn(), onSteer: vi.fn(), onRetryOutbox: vi.fn(), onRemoveOutbox: removeOutbox };
+    onBeginEdit: vi.fn(), onSteer: vi.fn(), onRetryOutbox: retryOutbox, onRemoveOutbox: removeOutbox };
   act(() => root.render(<PendingSendBubble item={{ ...item, ...overrides }} actions={actions} viewerDeviceId={viewerDeviceId}
+    onOpenImage={openImage}
     renderImage={() => null} renderFile={() => null}
     renderText={() => <MessageBodyText testID="link" onPress={openLink}>link</MessageBodyText>} />));
 }
@@ -108,10 +118,84 @@ it('lets an in-flight local outbox message open its cancel action', () => {
   act(() => host.querySelector<HTMLElement>('[data-testid="pendingSend.outboxRemove.a"]')!.click());
   expect(removeOutbox).toHaveBeenCalledWith('a');
 });
+it('offers retry and delete on a failed send without opening it first, and re-uploads only the failed image', () => {
+  show({ actions: null, phase: 'failed', queueIndex: null, attachmentCount: 2, thumbs: [
+    { key: 'a-slot-0', uri: 'file:///ok.jpg', ossRef: 'cindy-oss-attach://ok', uploading: false },
+    { key: 'a-slot-1', uri: 'file:///bad.jpg', ossRef: null, uploading: false, failed: true },
+  ] });
+  expect(host.querySelector('[data-testid="pendingSend.imageRetry.a-slot-0"]')).toBeNull();
+  act(() => host.querySelector<HTMLElement>('[data-testid="pendingSend.imageRetry.a-slot-1"]')!.click());
+  act(() => host.querySelector<HTMLElement>('[data-testid="pendingSend.outboxRetry.a"]')!.click());
+  expect(retryOutbox.mock.calls).toEqual([['a'], ['a']]);
+  act(() => host.querySelector<HTMLElement>('[data-testid="pendingSend.outboxRemove.a"]')!.click());
+  expect(removeOutbox).toHaveBeenCalledWith('a');
+  expect(select).not.toHaveBeenCalled();
+});
 it('lets a real body link consume the pending tap before the frame commits', () => {
   show(); touch('Start'); touch('End');
   act(() => host.querySelector<HTMLElement>('[data-testid="link"]')!.click());
   flush(); expect(openLink).toHaveBeenCalledOnce(); expect(select).not.toHaveBeenCalled();
+});
+it.each(['queued', 'uploading', 'sending', 'settling', 'editing', 'failed'] as const)(
+  'previews a %s image without changing queue selection or cancelling the send', (phase) => {
+    show({ phase, thumbs: [{ key: 'a-slot-0', uri: 'file:///photo.jpg', ossRef: null,
+      uploading: phase === 'uploading' }], attachmentCount: 1 });
+    act(() => host.querySelector<HTMLElement>('[data-testid="pendingSend.image.a-slot-0"]')!.click());
+    flush();
+    expect(openImage).toHaveBeenCalledOnce();
+    expect(openImage.mock.calls[0][0]).toMatchObject({ kind: 'media', media: {
+      kind: 'image', url: 'file:///photo.jpg', previewable: true,
+    } });
+    expect(select).not.toHaveBeenCalled();
+    expect(removeOutbox).not.toHaveBeenCalled();
+  },
+);
+it('opens the host original rather than its local thumbnail and preserves expanded queue actions', () => {
+  show({ thumbs: [{ key: 'a-slot-0', uri: 'file:///photo.jpg', ossRef: 'cindy-media://blobs/photo.jpg',
+    uploading: false }], attachmentCount: 1 }, 'a');
+  act(() => host.querySelector<HTMLElement>('[data-testid="pendingSend.image.a-slot-0"]')!.click());
+  expect(openImage.mock.calls[0][0].media).toMatchObject({
+    url: 'cindy-media://blobs/photo.jpg', previewable: false,
+  });
+  expect(select).not.toHaveBeenCalled();
+  expect(host.querySelector('[data-testid="pendingSend.actions.a"]')).not.toBeNull();
+});
+it('keeps an unavailable upload reference disabled until a local image becomes available', () => {
+  const thumb = { key: 'a-slot-0', uri: null, ossRef: 'cindy-oss-attach://photo', uploading: false };
+  show({ thumbs: [thumb] });
+  expect(handlers.get('pendingSend.image.a-slot-0')?.disabled).toBe(true);
+  act(() => host.querySelector<HTMLElement>('[data-testid="pendingSend.image.a-slot-0"]')!.click());
+  expect(openImage).not.toHaveBeenCalled();
+  show({ thumbs: [{ ...thumb, uri: 'file:///photo.jpg' }] });
+  expect(handlers.get('pendingSend.image.a-slot-0')?.disabled).toBe(false);
+  act(() => host.querySelector<HTMLElement>('[data-testid="pendingSend.image.a-slot-0"]')!.click());
+  expect(openImage).toHaveBeenCalledOnce();
+});
+it('opens the full gallery when a durable copy arrives after the thumbnail locks its temporary URI', () => {
+  const thumbs = [0, 1].map((index) => ({ key: `a-slot-${index}`, uri: `file:///temporary-${index}.jpg`,
+    ossRef: `cindy-oss-attach://photo-${index}`, uploading: false }));
+  show({ thumbs, attachmentCount: 2 });
+  durableThumbs.set(thumbs[1].ossRef, 'file:///durable-1.jpg');
+  show({ thumbs, attachmentCount: 2 });
+  act(() => host.querySelector<HTMLElement>('[data-testid="pendingSend.image.a-slot-1"]')!.click());
+  const payload = openImage.mock.calls[0][0];
+  const gallery = collectMobileMessageGalleryImages([{ ...item, thumbs, attachmentCount: 2 }]);
+  expect(lightboxImagesForPayload(gallery, payload, item.key)).toHaveLength(2);
+  expect(payload.galleryImageSlot).toBe(1);
+  expect(payload.media.url).toBe('file:///temporary-1.jpg');
+  expect(gallery[1].url).toBe('file:///durable-1.jpg');
+  expect(select).not.toHaveBeenCalled();
+});
+it('captures the clicked slot without skipping an earlier unreadable thumbnail', () => {
+  const thumbs = [
+    { key: 'a-slot-0', uri: null, ossRef: null, uploading: true },
+    { key: 'a-slot-1', uri: 'file:///clicked.jpg', ossRef: null, uploading: false },
+  ];
+  show({ thumbs, attachmentCount: 2 });
+  expect(handlers.get('pendingSend.image.a-slot-0')?.disabled).toBe(true);
+  act(() => host.querySelector<HTMLElement>('[data-testid="pendingSend.image.a-slot-1"]')!.click());
+  expect(openImage.mock.calls[0][0]).toMatchObject({ galleryImageKey: 'a-slot-1', galleryImageSlot: 1 });
+  expect(select).not.toHaveBeenCalled();
 });
 it('shows the source label above the bubble and announces it with the queued message', () => {
   show({ source: { kind: 'automation', label: '由自动化「巡检」发送' } });
