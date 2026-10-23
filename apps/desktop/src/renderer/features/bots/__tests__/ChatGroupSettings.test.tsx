@@ -134,6 +134,19 @@ it('labels reply and speaking modes with the same words as the local group setti
   expect(screen.queryByText(key('replyMode'))).toBeNull();
 });
 
+it('saves mention-only replies for single-speaker groups without restoring orchestration settings', async () => {
+  render(<MemoryRouter><ChatGroupSettings group={{ ...group(true), singleSpeaker: true, replyMode: 'all', speakingMode: 'auto' }} /></MemoryRouter>);
+  fireEvent.click(screen.getByRole('combobox', { name: 'bots.groupChat.settings.replyMode' }));
+  fireEvent.click(screen.getByRole('option', { name: 'bots.groupChat.settings.replyModeMentioned' }));
+  expect(screen.queryByRole('combobox', { name: 'bots.groupChat.settings.speakingMode' })).toBeNull();
+  expect(screen.queryByRole('combobox', { name: 'bots.groupChat.organizer' })).toBeNull();
+  fireEvent.submit(screen.getByRole('textbox', { name: key('name') }).closest('form')!);
+  await waitFor(() => expect(mocks.manage).toHaveBeenCalledWith({ groupId: 'room', action: expect.objectContaining({
+    type: 'update', responseMode: 'mentioned', expectedRevision: 1,
+  }) }));
+  expect(mocks.refresh).toHaveBeenCalledOnce();
+});
+
 it('does not offer leaving when this account owns every group owner, including its companion', async () => {
   render(<MemoryRouter><ChatGroupSettings group={group(true)} /></MemoryRouter>);
   expect(screen.queryByRole('button', { name: key('leave') })).toBeNull();

@@ -135,6 +135,7 @@ import { readSshCodexModelList, assertSshCodexModel, isVerifiedSshCodexResume } 
 import { prepareCodexCustomContextCatalog } from '../maker-host/codex-custom-context-catalog.js';
 import { inferProviderIdForModel } from '../maker-host/provider-route.js';
 import { resolveConfiguredContextWindow, resolveDesktopModelContextProviderId } from '../maker-host/model-context-settings.js';
+import { bindGroupFastPolicy } from '../provider-group/fastPolicyRuntime.js';
 import { getCodexHome } from '../maker-host/auth-adapters.js';
 import { getCachedBinaryStatus } from '../agent-binaries/index.js';
 import { AsyncLocalStorage } from 'node:async_hooks';
@@ -152,7 +153,7 @@ import {
 } from '@cindy/maker-core/pi-subagent-runs';
 import {
   PI_CACHE_RECOVERY_EXPECTATION, AUTO_REVIEW_SOURCE_CONTENT, AUTO_REVIEW_USER_INTENT,
-  INHERITED_CAPABILITY_SELECTION, MAIN_OWNED_SEND_CONTEXT,
+  INHERITED_CAPABILITY_SELECTION, MAIN_OWNED_SEND_CONTEXT, TurnDispatchRejectedError,
 } from '@cindy/maker-core';
 import { AUTO_REVIEW_DELEGATED_CONTINUATION, readAutoReviewUserText, restoreAutoReviewSteerIntent, restoreAutoReviewUserIntent } from './autoReviewUserIntent.js';
 import type {
@@ -181,6 +182,7 @@ import {
   storedCustomProviderId,
   isLocalOnlyProviderForAgent,
   isOrganizationManagedProvider,
+  supportsSubscriptionFastPolicy,
   type ProviderView,
 } from '@cindy/model-providers';
 import { createId } from '@paralleldrive/cuid2';
@@ -197,7 +199,7 @@ import {
   readInputDeliveryClientIds,
 } from '@cindy/device-link';
 import { and, asc, desc, eq, gte, inArray, isNull, like, lt, or, sql } from 'drizzle-orm';
-import { applyScheduledModelSelection, createScheduledModelScope, ScheduledModelSelectionBusyError, type ScheduledModelSelection, type ScheduledModelSelectionLease } from './scheduledModelSelection';
+import { applyScheduledModelSelection, createScheduledModelScope, writeScheduledModelBaselineIfProfileCurrent, ScheduledModelSelectionBusyError, type ScheduledModelSelection, type ScheduledModelSelectionLease } from './scheduledModelSelection';
 import { parseScheduledModelBaseline } from '../../shared/scheduledModelBaseline';
 import { recordTurnModelChange, type TurnModelIdentity } from './turnModelChange';
 import { app, BrowserWindow, dialog, ipcMain, shell, type IpcMainInvokeEvent } from 'electron';
@@ -625,11 +627,13 @@ import { requestUtilityText } from '../utility-model/oneShotCandidates.js';
 import { validateExistingLocalProjectDirectory } from '../mcp-integrations/createProject.js';
 import { gitExec } from '../worktree/gitExec.js';
 import { BOT_GROUP_CLIENT_ID_PREFIX } from '../../shared/botGroupChat.js';
+import { syncBotLanePermission, syncBotLinkedLanePermissions } from './botPermissionSync.js';
 import { ensureBotGroupLaneSession } from '../localDb/ipc/bots.js';
 import { restartBotRuntime } from './botRuntimeRestart.js';
 import { registerBotLifecycleHandlers } from './botLifecycleService.js';
 import { isSessionPermissionMode, persistPermissionModeWithoutRuntime } from './sessionPermissionPersistence.js';
 import { withSessionPermissionChange } from './sessionPermissionChange.js';
+import { withBotPermissionChange } from './botPermissionDispatch.js';
 import { updateBotRoutineLifecycle } from '../routines/service.js';
 import {
   createBotCompactRuntimeRefreshCoordinator,
@@ -641,17 +645,14 @@ import {
   type BotCompactRuntimeSession,
 } from './botCompactRuntimeRefresh.js';
 import {
-  buildWorkingMemoryRefreshNote,
-  createWorkingMemoryRefreshRegistry,
-  isWorkingMemoryFreshForSession,
   pruneWithdrawnWorkingMemoryForSession,
   pruneWorkingMemoryForSession,
-  readWorkingMemoryNoteForSession,
 } from './botWorkingMemory.js';
 import { listBotRecallSessionIds } from '../localDb/botHistoryScope.js';
 import { createWireNoteMemory } from './wireNoteMemory.js';
 import { isBotCanonicalReplacementBusy } from './botCanonicalReplacementGuard.js';
 import { configureBotCanonicalReplacementCoordinator } from './botCanonicalReplacementCoordinator.js';
+import { configureBotModelSelectionCoordinator, createBotModelSelectionCoordinator } from './botModelSelectionCoordinator.js';
 import { botSessionInputBlockReason, isShadowedCompanionCanonical, SHADOWED_COMPANION_INPUT_MESSAGE } from './botSessionInputGuard.js';
 import { configureBotRuntimeEpochRefreshRequest } from './botRuntimeEpochRefreshSignal.js';
 import { createGitSnapshotCoordinator } from '../maker-host/git-snapshot-host.js';
@@ -700,6 +701,7 @@ import {
   type ProviderModelMemorySnapshot,
   syncNewMakerDraftCache,
   setProviderModelMemoryCache,
+  setThinkingEnabledInMemory,
   setWorkerCreationPrefsCache,
 } from '../maker-host/newMakerDefaultsCache.js';
 import {
@@ -716,6 +718,7 @@ import {
   ORCA_IDLE_RELEASE_STATUSES,
   type OrcaIdleReleaseWatcher,
 } from './orcaIdleReleaseWatcher.js';
+import { createOrcaWorkerResumeScheduler } from './orcaWorkerResumeScheduler.js';
 import {
   ackSessionTurnEndedDurable,
   hasAssistantProgressAfterMessage,
@@ -734,6 +737,7 @@ import {
   readSessionExtraDirsFromDb,
   readSessionWritableDirsFromDb,
   readSessionWorkingDirFromDb,
+  readSessionWorkingDirRow,
   listVisibleActiveSessionDirectoryGrants,
 } from '../maker-host/session-storage.js';
 import { libraryExtraDirSyncTargets } from './libraryExtraDirSyncTargets.js';
@@ -917,6 +921,7 @@ import {
   type OrcaInterAgentDispatcher,
   type OrcaInterAgentMessageSource,
 } from './orcaInterAgentDispatcher.js';
+import { resolveOrcaImageAttachmentInput } from './orcaImageAttachments.js';
 import { OrcaWorkerPermissionConfirmBridge } from './orcaWorkerPermissionConfirmBridge.js';
 import { assertTaskActionCurrent, captureTaskActionGuard, bindTaskActionInput, hasTaskActionAuthorization, taskActionInputGuard, settleTaskActionInput, TaskActionAuthorizationError, type TaskActionDeliveryGuard } from './taskActionAuthorization.js';
 import {
@@ -1152,6 +1157,7 @@ import {
   setSessionProvider,
 } from '../maker-host/session-provider-store.js';
 import { getActiveCatalog, setDiscoveredProviderModels } from '../maker-host/active-catalog.js';
+import { createSubscriptionFastPolicy } from '../maker-host/subscription-fast-policy.js';
 import { readCompactionPct } from '../maker-host/compaction-settings-store.js';
 import { resolveVerifiedContextWindow, resolveModelDefaultContextWindow } from '../maker-host/catalog-to-descriptors.js';
 import {
@@ -2698,6 +2704,7 @@ interface OrcaCollabService {
     workingDir?: string;
     worktree?: { sourceBranch?: string };
     initialTask?: string;
+    initialTaskImages?: string[];
     executionDeviceId?: string;
     /** Worker 的 Agent 所在位置；语义见 OrcaWorkerCreateParams.agentDeviceId。 */
     agentDeviceId?: string | null;
@@ -2824,6 +2831,7 @@ interface OrcaCollabService {
     targetSessionId: string;
     message: string;
     delivery?: 'queue' | 'steer';
+    imagePaths?: string[];
   }) => Promise<SendToWorkerResult>;
   interruptWorker: (params: {
     callerLeadSessionId: string;
@@ -3625,13 +3633,6 @@ type BotCompactRuntimeRefreshHandler = (
  * and let the instance-scoped coordinator own all compact settle signals.
  */
 let botCompactRuntimeRefreshHandler: BotCompactRuntimeRefreshHandler | null = null;
-/**
- * 伙伴工作记忆账本(botWorkingMemory):换窗交接带账本;原生压缩后下一次发送补一份。
- * 登记对所有会话生效,真正注入只在伙伴主对话且有账本时发生。
- */
-const workingMemoryRefresh = createWorkingMemoryRefreshRegistry();
-const readWorkingMemoryNote = (sessionId: string): Promise<string | null> =>
-  readWorkingMemoryNoteForSession(sessionId, ownerScopedUserDataPath());
 /**
  * 逐轮环境说明(界面语言 / 客户端设备 / 个人版制作说明)的去重记忆:同一原生上下文里内容
  * 没变就不重复前置。原生压缩边界、`/clear`、换窗重建后整体重发一次(见 wireNoteMemory.ts)。
@@ -5970,7 +5971,6 @@ const sessionEventDependencies: SessionEventDependencies = {
   onUnsuccessfulProductTurn: interruptProductTurn,
   deferUnsuccessfulProductTurn: (owner) => deferredProductTurnFailureGate.defer(owner),
   get botCompactRuntimeRefreshCoordinator() { return botCompactRuntimeRefreshCoordinator; },
-  get workingMemoryRefresh() { return workingMemoryRefresh; },
   get wireNoteMemory() { return wireNoteMemory; },
   get attemptBotCompactRuntimeRefresh() { return attemptBotCompactRuntimeRefresh; },
   get botDelegationServiceHolder() { return botDelegationServiceHolder; },
@@ -8558,6 +8558,9 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       o.agentDeviceId = context.route.agentDeviceId;
       o.providerId = context.route.providerId;
     }
+    if (context && !context.groupDeviceId && context.route.agentDeviceId) {
+      await bindGroupFastPolicy({ group: context.groupProviderId, deviceId: context.route.agentDeviceId, sessionId: o.id });
+    }
     return context;
   }
 
@@ -9106,27 +9109,26 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
   }
 
   // switchFocus 和 sendToWorker 都可能唤醒 idle worker；统一走这里才能保留 extraDirs。
-  async function resumeOrcaWorkerSessionIfMissing(target: {
-    id: string;
-    teamId: string;
-    leadSessionId: string;
-    sessionId: string;
-  }, assertCurrent?: () => Promise<void>): Promise<boolean> {
-    if (maker.getSession(target.sessionId)) return false;
-    // 与发送、供应商组换电脑同一把会话锁：换电脑时会先关掉 Worker 再按新位置启动，不能在这段空档里按
-    // 旧的任务记录在原来那台上把它拉起来。拿到锁后再看一次是否已经在运行。
-    return withSendToSessionLock(target.sessionId, async () => {
-      if (maker.getSession(target.sessionId)) return false;
-      return resumeOrcaWorkerSessionLocked(target, assertCurrent);
-    });
-  }
+  // assertCurrent：插件能力权威校验，冷启动前 / bootstrap 后各一次。
+  // isCancelled：关闭协同 / 归档 / 显式 idle 会取消尚未落地的唤醒；冷启动前与
+  // bootstrap 返回后都要检查，已经拉起的 runtime 要自己关掉（review P1）。
+  // 与发送 / 供应商组换电脑共用同一把会话锁这件事由 orcaWorkerResumeScheduler
+  // （下方 withSessionLock = withSendToSessionLock）保证：锁内再查一次 live，
+  // 换电脑空档不会按旧任务记录把它拉起来。
+  async function resumeOrcaWorkerSessionIfMissing(
+    target: {
+      id: string;
+      teamId: string;
+      leadSessionId: string;
+      sessionId: string;
+    },
+    assertCurrent?: () => Promise<void>,
+    isCancelled?: () => boolean,
+  ): Promise<boolean> {
+    const live = maker.getSession(target.sessionId);
+    if (live) return false;
+    if (isCancelled?.()) return false;
 
-  async function resumeOrcaWorkerSessionLocked(target: {
-    id: string;
-    teamId: string;
-    leadSessionId: string;
-    sessionId: string;
-  }, assertCurrent?: () => Promise<void>): Promise<boolean> {
     const db = getDbClient().drizzle;
     const [row] = await db
       .select()
@@ -9134,6 +9136,9 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       .where(eq(sessions.id, target.sessionId))
       .limit(1);
     if (!row) return false;
+    // 归档 / 删除后的 worker 不允许被唤醒：关闭协同与 archive 可能和后台预热交错。
+    if (row.status !== 'active') return false;
+    if (isCancelled?.()) return false;
 
     const workerVendorOptions = {
       orcaRole: 'worker' as const,
@@ -9166,11 +9171,82 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     await assertCurrent?.();
     await ensureRemoteReadyForSessionStart({ createOpts: opts });
     await assertCurrent?.();
+    if (isCancelled?.()) return false;
     const { session: resumedSession } = await bootstrapSession(opts);
-    await assertCurrent?.();
+    // bootstrap 之后 runtime 已经存在：从这里开始的任何失败（授权失效 / 账号切换 /
+    // 关闭协同 / 归档 / 显式 idle）都必须先关掉刚拉起的 session 再返回或抛错，
+    // 否则已归档 worker 会留在运行态（review P1 + Security）。
+    const closeResumedSession = async (reason: string) => {
+      await maker.closeSession(resumedSession.id).catch((err) => {
+        log.warn('orcaWorkerResume: close resumed session failed', {
+          sessionId: resumedSession.id,
+          reason,
+          err: err instanceof Error ? err.message : String(err),
+        });
+      });
+    };
+    try {
+      await assertCurrent?.();
+    } catch (err) {
+      await closeResumedSession('assert-current-after-bootstrap');
+      throw err;
+    }
+    if (isCancelled?.() || !(await isOrcaWorkerSessionResumable(target.sessionId))) {
+      await closeResumedSession('resume-invalid-after-bootstrap');
+      return false;
+    }
     await markOrcaRoleIfNeeded(resumedSession.id, 'worker');
     return true;
   }
+
+  /** 唤醒后的会话仍必须是 active；读不到状态按不可唤醒处理（fail-closed）。 */
+  async function isOrcaWorkerSessionResumable(sessionId: string): Promise<boolean> {
+    try {
+      const [row] = await getDbClient()
+        .drizzle.select({ status: sessions.status })
+        .from(sessions)
+        .where(eq(sessions.id, sessionId))
+        .limit(1);
+      return row?.status === 'active';
+    } catch (err) {
+      log.warn('orcaWorkerResume: read session status failed', {
+        sessionId,
+        err: err instanceof Error ? err.message : String(err),
+      });
+      return false;
+    }
+  }
+
+  // focus 切换是纯 UI 操作,不再同步等待冷启动(2026-09 实报: 首次切到 dormant worker
+  // 要等 ~5s)。resume 仍要发生,但转后台并走共享调度器: per-session 去重 + 与发送路径
+  // 共用 sendToSession 锁,避免并发双 bootstrap(实现与不变量见 orcaWorkerResumeScheduler.ts)。
+  const orcaWorkerResumeScheduler = createOrcaWorkerResumeScheduler({
+    resume: async (
+      target: {
+        id: string;
+        teamId: string;
+        leadSessionId: string;
+        sessionId: string;
+      },
+      isCancelled,
+      assertCurrent,
+    ) => {
+      const didResume = await resumeOrcaWorkerSessionIfMissing(
+        target,
+        assertCurrent,
+        isCancelled,
+      );
+      if (didResume) {
+        log.info('orcaWorkerResume: resumed idle worker (session only, no status change)', {
+          workerId: target.id,
+          sessionId: target.sessionId,
+        });
+      }
+      return didResume;
+    },
+    withSessionLock: (sessionId, task) =>
+      withSendToSessionLock(sessionId, task, () => 'orca-worker-resume'),
+  });
 
   // sessionId → remoteHostId 的进程内缓存 reader(lazy resume 路径每次 send 都
   // 经过 ensureRemoteReadyForSessionStart;实现与缓存语义见 localDb/ipc/sessions.ts,
@@ -10640,7 +10716,6 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     closeSession: (sessionId) => maker.closeSession(sessionId, 'agent-switch'),
     listMessagesForHandoff: (sessionId, after) =>
       listMessagesForAgentHandoff(sessionId, 400, after),
-    readWorkingMemoryNote,
     findParkedEngineSession: (sessionId, targetDbKind) =>
       findParkedEngineSession(sessionId, targetDbKind),
     applyAgentSwitchToDb: async (sessionId, patch) => {
@@ -10674,7 +10749,20 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     setPendingHandoff: (sessionId, handoff, expectedGeneration) =>
       agentHandoffPending.set(sessionId, handoff, expectedGeneration),
     readPendingHandoffGeneration: (sessionId) => agentHandoffPending.readGeneration(sessionId),
-    bootstrapSwitchedSession: async (sessionId) => {
+    rememberThinkingIntent: ({ agentKind, providerId, model, thinking }) => {
+      setThinkingEnabledInMemory(agentKind, providerId, model, thinking);
+      // 同步本机 renderer 的记忆：主进程写的只是镜像，renderer 才是 providerModelMemory
+      // 的真相源。不写回这一笔，renderer 的全量快照会一直「尚未包含该选择」，提交时写入
+      // 的钉子也就撤不掉，反而会长期压住用户在被控端后来的显式改动（Greptile P1）。
+      broadcastToAllWindows(MAKER_PUSH.DRAFT_PREF_APPLY, {
+        agent: agentKind,
+        providerId: providerId ?? '',
+        modelId: model,
+        active: false,
+        thinking,
+      });
+    },
+    bootstrapSwitchedSession: async (sessionId, opts) => {
       // 切换已提交,从 DB 行(新引擎值)重建 live session。resumeSessionId 直接取
       // 行上的 sdk_session_id:切换事务在有停泊绑定时已把它落成停泊 id(Phase 2
       // 切回续接),否则为 null = 全新原生会话,上下文由交接注入承接——与
@@ -10697,6 +10785,11 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
         fastMode: (row.fastMode ?? false),
         permissionMode: (row.permissionMode ?? 'ask') as CreateOpts['permissionMode'],
         planMode: false,
+        // 跨引擎意图期内改的思考开关必须显式带入：否则 createSession 只能读被控端
+        // 镜像/默认值，与用户刚选的不一致（device-link 远程场景）。
+        ...(opts?.thinkingEnabled !== undefined
+          ? { thinkingEnabled: opts.thinkingEnabled }
+          : {}),
         title: row.title ?? undefined,
         resumeSessionId: row.sdkSessionId ?? undefined,
         // 远端会话切换引擎后仍是远端:带回 remoteHostId 并走 ensure (SSH
@@ -10733,6 +10826,8 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       const result = await applySessionRuntimeSelection(sessionId, intent.model, intent.providerId, {
         effort: (intent.effort ?? null) as SessionRuntimeProfile['effort'],
         fastMode: intent.fastMode ?? false,
+        ...(intent.thinking !== undefined ? { thinking: intent.thinking } : {}),
+        // 只有 Agent 在另一台电脑运行的任务会在意图里带确认过的目标窗口。
         // Preserve the exact window acknowledged by the picker until send.
         ...(intent.confirmedContextWindow ? { confirmedContextWindow: intent.confirmedContextWindow } : {}),
       }, { source: 'user', sessionLockHeld: true, applyingUserSelectionOnSend: applyNow,
@@ -10897,8 +10992,6 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     },
     getMessage: getMessageDeletionTarget,
     listMessagesForContext: (sessionId) => listMessagesForAgentHandoff(sessionId, 400),
-    readWorkingMemoryNote: (sessionId, opts) =>
-      readWorkingMemoryNoteForSession(sessionId, ownerScopedUserDataPath(), opts),
     pruneWorkingMemory: (sessionId, deletedMessageIds) =>
       pruneWorkingMemoryForSession(sessionId, ownerScopedUserDataPath(), deletedMessageIds),
     getLiveSession: (sessionId) => maker.getSession(sessionId),
@@ -10986,27 +11079,48 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
   const scheduledModelScope = createScheduledModelScope({
     createId,
     ownerEpoch: captureSessionRuntimeControlOwnerEpoch,
+    prepareBaseline: async (sessionId) => {
+      await reconcileBotModelRoute(sessionId, true);
+      // Reconciliation applies idle companion choices through the normal switch
+      // path. A deferred or failed switch must not become a stale new baseline.
+      if (agentSwitchPending.get(sessionId) || getPendingSessionRuntimeMutation(sessionId)) {
+        if (!isSessionIdleForRouteApply(sessionId)) {
+          throw new ScheduledModelSelectionBusyError('Scheduled model selection waits for the saved companion route');
+        }
+        throwIpcError('HARNESS_SWITCH_NOT_READY', 'Saved companion route did not become ready');
+      }
+    },
     read: async (sessionId) => {
       const [row] = await getDbClient().drizzle.select({
         agentKind: sessions.agentKind, model: sessions.model, providerId: sessions.providerId,
         effort: sessions.effort, fastMode: sessions.fastMode, baseline: sessions.scheduledModelBaseline,
-        status: sessions.status,
-      }).from(sessions).where(eq(sessions.id, sessionId)).limit(1);
-      return row?.status === 'active' ? { baseline: row.baseline, profile: {
+        status: sessions.status, botId: botProfiles.id, profileVersion: botProfiles.currentVersion,
+      }).from(sessions)
+        .leftJoin(botSessionLinks, and(eq(botSessionLinks.sessionId, sessions.id),
+          isNull(botSessionLinks.archivedAt), inArray(botSessionLinks.role, ['canonical', 'group', 'channel', 'thread'])))
+        .leftJoin(botProfiles, eq(botProfiles.id, botSessionLinks.botId))
+        .where(eq(sessions.id, sessionId)).limit(1);
+      return row?.status === 'active' ? { baseline: row.baseline,
+        profileRevision: row.botId ? JSON.stringify([row.botId, row.profileVersion]) : null, profile: {
         agentKind: dbToMakerAgentKind(row.agentKind), model: row.model, providerId: row.providerId,
         effort: row.effort, fastMode: row.fastMode,
       } } : null;
     },
-    write: async (sessionId, baseline) => {
+    write: async (sessionId, baseline, profileRevision) => {
+      if (baseline) {
+        const written = await writeScheduledModelBaselineIfProfileCurrent(getDbClient(), sessionId, baseline, profileRevision ?? null);
+        if (written) await broadcastSessionRuntimeProjection(sessionId);
+        return written;
+      }
       const owner = captureSessionRuntimeControlOwnerEpoch();
       const db = getDbClient().drizzle;
-      const [row] = baseline ? [] : await db.select({ baseline: sessions.scheduledModelBaseline })
+      const [row] = await db.select({ baseline: sessions.scheduledModelBaseline })
         .from(sessions).where(eq(sessions.id, sessionId)).limit(1);
       const saved = parseScheduledModelBaseline(row?.baseline);
       if (!sessionRuntimeControlOwnerEpochMatches(owner)) throw new Error('Account changed during scheduled model selection');
       await db.update(sessions)
         .set({
-          scheduledModelBaseline: baseline ? JSON.stringify(baseline) : null,
+          scheduledModelBaseline: null,
           ...(saved ? {
             agentKind: makerToDbAgentKind(saved.agentKind), model: saved.model,
             providerId: saved.providerId, effort: saved.effort ?? undefined, fastMode: saved.fastMode,
@@ -11500,6 +11614,30 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       persistedText: extractPlainText(persistedContent ?? message),
     };
 
+    // Check before route/capability reconciliation, then again after waiting for
+    // the send lock: a rejected old primary must not bootstrap or consume a restore.
+    let dispatchCompanionLink: { role?: string | null; botId?: string | null } | undefined;
+    const rejectShadowedCompanion = async (sessionId: string) => {
+      const [link] = await getDbClient().drizzle
+        .select({ role: botSessionLinks.role, botId: botSessionLinks.botId })
+        .from(botSessionLinks).where(eq(botSessionLinks.sessionId, sessionId)).limit(1);
+      dispatchCompanionLink = link;
+      return isShadowedCompanionCanonical(link, isCompanionShadowed)
+        ? { ok: false as const, errorCode: 'AGENT_NOT_READY' as const, message: SHADOWED_COMPANION_INPUT_MESSAGE }
+        : null;
+    };
+
+    let dispatchRejectedForDemotion = false;
+    const onInternalDispatching = () => {
+      // Session invokes this synchronously immediately before provider send,
+      // after bootstrap, authorization and message persistence have all awaited.
+      if (isShadowedCompanionCanonical(dispatchCompanionLink, isCompanionShadowed)) {
+        dispatchRejectedForDemotion = true;
+        throw new TurnDispatchRejectedError(SHADOWED_COMPANION_INPUT_MESSAGE);
+      }
+      dispatchAgentIslandUserPrompt(targetSessionId!);
+    };
+
     if (targetSessionId) {
       try {
         await assertReviewExternalInputAllowed(targetSessionId);
@@ -11511,6 +11649,9 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
           message: error instanceof Error ? error.message : String(error),
         };
       }
+      const shadowed = await rejectShadowedCompanion(targetSessionId);
+      if (shadowed) return shadowed;
+      await syncBotLanePermission(targetSessionId);
       await reconcileBotModelRoute(targetSessionId);
       const compactedRuntime = maker.getSession(targetSessionId);
       if (compactedRuntime) await refreshBotCapabilityEpochBeforeSend(compactedRuntime);
@@ -11819,6 +11960,12 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     let lockStage = 'resolve-session-meta+row';
     const run = waitPrev.then(async () => {
       await assertTaskActionCurrent();
+      const shadowed = await rejectShadowedCompanion(targetSessionId);
+      if (shadowed) return shadowed;
+      // Internal idle deliveries (including companion cloud-room input) bypass
+      // the ordinary send transaction. Restore under this send lock before
+      // reading metadata or dispatching; busy inputs defer to the queued path.
+      await scheduledModelScope.restore(targetSessionId);
       await reconcileBotModelRoute(targetSessionId, true);
       const [meta, dbRow] = await Promise.all([
         maker.getSessionMeta(targetSessionId).catch(() => null),
@@ -11846,18 +11993,15 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
           message: `session ${targetSessionId} is deleted`,
         };
       }
-      // Internal sends (plugins, tasks, routines) reach idle sessions without sendToAgentAccepted.
-      const [companionLink] = await getDbClient().drizzle
-        .select({ role: botSessionLinks.role, botId: botSessionLinks.botId })
-        .from(botSessionLinks).where(eq(botSessionLinks.sessionId, targetSessionId)).limit(1);
-      if (isShadowedCompanionCanonical(companionLink, isCompanionShadowed)) {
-        return { ok: false as const, errorCode: 'AGENT_NOT_READY' as const, message: SHADOWED_COMPANION_INPUT_MESSAGE };
-      }
 
       // 崩溃恢复:在路由决策前加载快照,确保恢复的排队 prompt 不被跳过。
       // 失败时 shouldQueueNewTurn 仍返回 true(未恢复即入队),消息不丢。
       lockStage = 'queue-restore';
       await inputCoordinator.ensureQueueRestored(targetSessionId).catch(() => undefined);
+      // Hand-over can finish while restoration/reconciliation awaits, before any
+      // turn is running. Recheck before either queue admission or idle dispatch.
+      const shadowedAfterRestore = await rejectShadowedCompanion(targetSessionId);
+      if (shadowedAfterRestore) return shadowedAfterRestore;
       // Private messages and authorization continuations use the durable coordinator, including an idle
       // recipient. This preserves input provenance and one recovery/dispatch path.
       // Pending selections also need the canonical send transaction: it consumes the intent,
@@ -12036,7 +12180,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
             } : {}),
             planMode: false,
             onAccepted: persistUserMessage,
-            onDispatching: () => dispatchAgentIslandUserPrompt(targetSessionId),
+            onDispatching: onInternalDispatching,
           }, directSource);
           if (userPromptPreviewStarted) {
             if (sendResult.accepted) {
@@ -12048,6 +12192,9 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
                 'send_to_session:live:not-dispatched',
               );
             }
+          }
+          if (dispatchRejectedForDemotion) {
+            return { ok: false as const, errorCode: 'AGENT_NOT_READY' as const, message: SHADOWED_COMPANION_INPUT_MESSAGE };
           }
           assertDesktopSendDispatched(sendResult, 'send_to_session live');
           return {
@@ -12166,7 +12313,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
           } : {}),
           planMode: false,
           onAccepted: persistUserMessage,
-          onDispatching: () => dispatchAgentIslandUserPrompt(targetSessionId),
+          onDispatching: onInternalDispatching,
         }, directSource);
         if (userPromptPreviewStarted) {
           if (sendResult.accepted) {
@@ -12178,6 +12325,9 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
               'send_to_session:resumed:not-dispatched',
             );
           }
+        }
+        if (dispatchRejectedForDemotion) {
+          return { ok: false as const, errorCode: 'AGENT_NOT_READY' as const, message: SHADOWED_COMPANION_INPUT_MESSAGE };
         }
         assertDesktopSendDispatched(sendResult, 'send_to_session resumed');
         return {
@@ -12591,26 +12741,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     closeLanes: async (sessionIds) => {
       await Promise.all(sessionIds.map((id) => maker.closeSession(id).catch(() => undefined)));
     },
-    syncLanePermission: async (laneSessionId, botId) => {
-      const [canonical] = await getDbClient().drizzle
-        .select({ mode: sessions.permissionMode })
-        .from(botSessionLinks)
-        .innerJoin(sessions, eq(sessions.id, botSessionLinks.sessionId))
-        .where(and(eq(botSessionLinks.botId, botId), eq(botSessionLinks.role, 'canonical'), isNull(botSessionLinks.archivedAt)))
-        .limit(1);
-      const mode = canonical?.mode;
-      if (!mode || !isSessionPermissionMode(mode)) return;
-      const live = maker.getSession(laneSessionId);
-      if (live) {
-        if (live.stablePermissionModeState?.mode !== mode) {
-          await live.setPermissionMode(mode as 'ask' | 'default' | 'acceptEdits' | 'plan' | 'auto' | 'bypassPermissions');
-        }
-        return;
-      }
-      if (!(await persistPermissionModeWithoutRuntime(laneSessionId, mode))) {
-        throw new Error('Group lane permission could not be persisted');
-      }
-    },
+    syncLanePermission: async (laneSessionId) => syncBotLanePermission(laneSessionId),
     hasPendingInteraction: (sessionId) => hasPendingAgentInteractionForSession(sessionId),
     decidePlan: createBotGroupPlanDecider((prompt, opts) => requestUtilityText(maker, prompt, opts)),
     workDir: botGroupWorkDir,
@@ -13679,7 +13810,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
           if (result.response !== 0) return { granted: false };
           // Reserve permission order before the lifecycle/restart fence. Ordinary
           // permission writers never hold that fence while awaiting this queue.
-          return await withSessionPermissionChange(task.taskId, () => service.completeOperation(() => withSessionRestartLock(task.taskId, async () => {
+          return await withBotPermissionChange(task.taskId, () => withSessionPermissionChange(task.taskId, () => service.completeOperation(() => withSessionRestartLock(task.taskId, async () => {
             assertRequestCurrent();
             if (snapshot !== getCurrentDbClientSnapshot() || before !== JSON.stringify(readPluginTaskConfig(pluginId))) throw new PluginTaskError('PERMISSION_DENIED', 'Account or permission settings changed');
             const fresh = await service.get(pluginId, task.taskId);
@@ -13714,7 +13845,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
               if (persisted) await snapshot!.client.tx('bots.persistSessionPermission', {sessionId: task.taskId, mode: task.permissionMode});
               throw error;
             }
-          })));
+          }))));
           });
         } finally { pluginPermissionRequests.delete(pluginId); }
       }
@@ -14350,6 +14481,35 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     getSessionMeta: (sessionId) => maker.getSessionMeta(sessionId).catch(() => null),
     getSessionRowSnapshot,
     getLiveSession: (sessionId) => maker.getSession(sessionId),
+    validateImageAttachments: async (paths) => {
+      // 图片来源两类: 会话受管地址(cindy-media:// / xdt-image://)与任意本机绝对路径。
+      const images: Array<{ path: string; name: string; ext: string; size: number; mimeType: string }> = [];
+      for (const input of paths) {
+        const resolved = resolveOrcaImageAttachmentInput(input);
+        if (!resolved) {
+          return {
+            ok: false,
+            message: `image not resolvable (accepts cindy-media:// / xdt-image:// URIs or local image files: png/jpeg/gif/webp): ${input}`,
+          };
+        }
+        let size: number;
+        try {
+          const stat = await fsp.stat(resolved.absPath);
+          if (!stat.isFile()) throw new Error('not a file');
+          size = stat.size;
+        } catch {
+          return { ok: false, message: `image not found or unreadable: ${input}` };
+        }
+        images.push({
+          path: resolved.absPath,
+          name: path.basename(resolved.absPath),
+          ext: path.extname(resolved.absPath).toLowerCase(),
+          size,
+          mimeType: resolved.mimeType,
+        });
+      }
+      return { ok: true, images };
+    },
     applyPendingAgentSwitch: (sessionId) =>
       applyPendingAgentSwitchIfIdle(agentSwitchDeps, sessionId, { bootstrapAfterSwitch: true }),
     hasPendingAgentSwitch: (sessionId) => !!agentSwitchPending.get(sessionId),
@@ -14670,6 +14830,11 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
 
     const workers = await listWorkersByLead(leadSessionId);
     const activeWorkers = workers.filter((w) => w.teamId === team.id);
+    // 先取消尚未落地的后台预热：关闭流程不等待 sendToSession 锁，若不取消，等锁中或
+    // 冷启动中的 resume 会在归档之后把 worker 重新拉活（review P1）。
+    for (const w of workers) {
+      orcaWorkerResumeScheduler.cancel(w.sessionId);
+    }
     for (const w of activeWorkers) {
       await assertCurrent?.();
       orcaTeamService.clearAutoBridgeState(w.sessionId);
@@ -14824,23 +14989,16 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     // focused 切换: clear 旧 + set 新, 原子化 (review F4)
     await setWorkerFocus(target.teamId, target.id);
 
-    // idle worker → resume session (so it's ready for tasks), but don't set status
-    // to 'running' — that only happens when actual work is dispatched via sendToWorker.
+    // idle worker → 后台预热 runtime(发送/派活时需要),但 focus 切换不等待冷启动:
+    // worker 历史来自 DB,切换立即生效;resume 失败只告警,不影响 focus 结果。
     if (target.status === 'idle') {
-      try {
-        const didResume = await resumeOrcaWorkerSessionIfMissing(target);
-        if (didResume) {
-          log.info('switchFocus: resumed idle worker (session only, no status change)', {
-            workerId: target.id,
-            sessionId: target.sessionId,
-          });
-        }
-      } catch (err) {
+      orcaWorkerResumeScheduler.requestInBackground(target, (err) => {
         log.warn('switchFocus: resume failed', {
           workerId: target.id,
+          sessionId: target.sessionId,
           err: err instanceof Error ? err.message : String(err),
         });
-      }
+      });
     }
 
     broadcastToAllWindows(MAKER_PUSH.ORCA_WORKER_CHANGED, {
@@ -14913,8 +15071,11 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     listWorkersByLead,
     getLiveSession: (sessionId) => maker.getSession(sessionId) ?? null,
     resumeWorkerSession: async (target) => {
-      await resumeOrcaWorkerSessionIfMissing(target);
+      // 与 focus 后台预热共享同一套去重/锁:派活不会和切换触发两次 bootstrap。
+      await orcaWorkerResumeScheduler.request(target);
     },
+    // 归档 / 显式 idle 会释放 runtime；先取消未落地的后台预热，避免释放后被重新拉起。
+    cancelWorkerResume: (sessionId) => orcaWorkerResumeScheduler.cancel(sessionId),
     updateWorkerStatus,
     markWorkerIdle: async (workerId) => {
       const now = Date.now();
@@ -14988,6 +15149,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       message,
       workerId,
       delivery,
+      imagePaths,
       dispatchMeta,
       onAccepted,
       onAcceptedRollback,
@@ -15000,6 +15162,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
         senderLabel: 'Lead',
         workerId,
         ...(delivery ? { delivery } : {}),
+        ...(imagePaths ? { imagePaths } : {}),
         meta: dispatchMeta,
         onAccepted,
         onAcceptedRollback,
@@ -15656,6 +15819,8 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       effort: SessionRuntimeProfile['effort'];
       fastMode: boolean | 'ultrafast';
       confirmedContextWindow?: number;
+      /** Pi-only：目标模型的思考开关意图；随暂存选择/换窗重试一并回放。 */
+      thinking?: boolean;
     },
     options: InternalRuntimeSelectionOptions,
   ) => Promise<{
@@ -15685,6 +15850,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
         const settleSelection = {
           effort: pending.profile.effort,
           fastMode: pending.profile.fastMode,
+          ...(pending.thinking !== undefined ? { thinking: pending.thinking } : {}),
         };
         const settleOptions = {
           source: pending.source,
@@ -15956,6 +16122,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
         providerId: sessions.providerId,
         effort: sessions.effort,
         fastMode: sessions.fastMode,
+        scheduledModelBaseline: sessions.scheduledModelBaseline,
       }).from(botSessionLinks)
         .innerJoin(botProfiles, eq(botProfiles.id, botSessionLinks.botId))
         .innerJoin(botProfileVersions, and(
@@ -15983,6 +16150,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       return {
         chain: selection.chain,
         followsCindyDefault: selection.followsCindyDefault,
+        scheduledModelBaseline: parseScheduledModelBaseline(row.scheduledModelBaseline),
         current: {
           agentDeviceId: row.agentDeviceId,
           agentKind: live?.agentKind ?? dbToMakerAgentKind(row.agentKind),
@@ -16000,6 +16168,11 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     },
     apply: async (sessionId, route, current) => {
       await stageSessionRouteSelection(sessionId, { ...route, agentDeviceId: route.agentDeviceId ?? null }, current.agentKind);
+      // A changed permanent companion choice supersedes the automation's saved
+      // preference, even if it selects the already-running temporary model.
+      // Profile saves retire it atomically in the DB; other route changes retire
+      // it only after staging succeeds. Never detach IM default following.
+      await updateScheduledPreference(sessionId, null);
       // Consume the same model/Harness intent as the normal send path. Its
       // verified window protection and history handoff also apply here; a Bot
       // settings save need not wait for a second user message. Busy runtimes
@@ -16009,6 +16182,11 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       }
     },
   });
+
+  configureBotModelSelectionCoordinator(createBotModelSelectionCoordinator({
+    acquireSessionLock: (sessionId) => acquireSendToSessionLock(sessionId),
+    invalidate: (sessionId) => reconcileBotModelRoute.invalidate(sessionId),
+  }));
 
   readPendingAgentSwitchRouteHolder = (sessionId) => {
     const intent = agentSwitchPending.get(sessionId);
@@ -16902,13 +17080,27 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
         await assertCurrent();
         await setWorkerFocus(target.teamId, target.id);
 
-        // Resume closed session so it's ready to receive tasks, but DON'T change
-        // worker status — status only transitions to 'running' when actual work is
-        // dispatched (sendToWorker). Setting 'running' here without a task causes
-        // the icon to flash indefinitely (no turn → turn-done never fires).
+        // Resume a closed session in the background so it's ready to receive tasks,
+        // but DON'T change worker status — status only transitions to 'running' when
+        // actual work is dispatched (sendToWorker). Setting 'running' here without a
+        // task causes the icon to flash indefinitely (no turn → turn-done never fires).
+        // Focus must not wait for the cold boot: the transcript is DB-backed, and the
+        // send path lazily resumes through the same deduped scheduler. The authority
+        // check stays on the synchronous path (a revoked authority fails the whole
+        // switch, as before) and is re-checked inside the background resume.
         if (target.status === 'idle') {
           await assertCurrent();
-          await resumeOrcaWorkerSessionIfMissing(target, assertCurrent);
+          orcaWorkerResumeScheduler.requestInBackground(
+            target,
+            (err) => {
+              log.warn('switchFocus: resume failed', {
+                workerId: target.id,
+                sessionId: target.sessionId,
+                err: err instanceof Error ? err.message : String(err),
+              });
+            },
+            { assertCurrent },
+          );
         }
         broadcastToAllWindows(MAKER_PUSH.ORCA_WORKER_CHANGED, { leadSessionId });
         return { ok: true, workerId: target.id };
@@ -17238,6 +17430,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     },
     checkWorkDirExists,
     resolveRecoveredWorkingDir: (sessionId, dir) => workingDirectoryRecovery.resolve(sessionId, dir),
+    statDirectory: (dir) => statWorkingDirectory(dir),
     isPersistedWorktreeFallback: (dir) => dialogueWorkspaceRoots().some((root) =>
       path.dirname(path.resolve(dir)) === path.join(root, 'worktree-recovery')),
     preflightBotRuntimeResources: async (opts) => { await preflightBotRuntimeResources(opts); },
@@ -17272,6 +17465,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     readSessionExtraDirsFromDb,
     readSessionWritableDirsFromDb,
     readSessionWorkingDirFromDb,
+    readSessionWorkingDirState: readSessionWorkingDirRow,
     withRehydrateCloseSuppressed,
     bootstrapSession,
     markOrcaRoleIfNeeded,
@@ -17487,15 +17681,6 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     readReplyQuoteNote,
     // 私聊话题的 [话题说明]:按持久化的话题链接现读,不是话题时为 null。
     readBotThreadNote: readBotDmThreadContextNote,
-    // 原生压缩后的账本刷新:只对伙伴主对话且有账本的会话真正注入;读不到按无账本,
-    // 标记仍由事务在 accepted 后按代次消费。
-    peekWorkingMemoryRefresh: async (sessionId) => {
-      const generation = workingMemoryRefresh.pendingGeneration(sessionId);
-      if (generation === null) return null;
-      const rendered = await readWorkingMemoryNote(sessionId);
-      return { generation, note: rendered ? buildWorkingMemoryRefreshNote(rendered) : null };
-    },
-    consumeWorkingMemoryRefresh: (sessionId, generation) => workingMemoryRefresh.consume(sessionId, generation),
     planRepeatableWireNotes: (sessionId, notes, opts) => wireNoteMemory.plan(sessionId, notes, opts),
     applyPendingAgentSwitch: async (sessionId, options) => {
       if (!options?.scheduled) await scheduledModelScope.restore(sessionId);
@@ -17597,6 +17782,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       throwIpcError('PRECONDITION_FAILED', 'Cindy Make is still preparing this task');
     }
     await assertReviewExternalInputAllowed(sessionId);
+    await syncBotLanePermission(sessionId);
     await reconcileBotModelRoute(sessionId);
     const compactedRuntime = maker.getSession(sessionId);
     if (compactedRuntime) await refreshBotCapabilityEpochBeforeSend(compactedRuntime);
@@ -17665,6 +17851,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     // TODO(im-bot-companion): IM turns do not yet get the desktop model-chain
     // fallback (botFallbackInputs / coordinator recovery); a failing primary
     // route surfaces as an IM error instead of moving to the next candidate.
+    await syncBotLanePermission(sessionId);
     await reconcileBotModelRoute(sessionId);
     const live = maker.getSession(sessionId);
     if (live) await refreshBotCapabilityEpochBeforeSend(live);
@@ -17730,8 +17917,6 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       return resolveConfiguredContextWindow(catalog, makerAgentKind, providerId, modelId);
     },
     listMessages: (sessionId) => listMessagesForAgentHandoff(sessionId, 400),
-    readWorkingMemoryNote,
-    isWorkingMemoryFresh: (sessionId) => isWorkingMemoryFreshForSession(sessionId, ownerScopedUserDataPath()),
     // 伙伴自有会话(当前 + 恢复前旧对话整体优先,后台任务补足),写进回忆指引限定 history 工具范围。
     listCompanionSessionIds: (sessionId) => listBotRecallSessionIds(sessionId, COMPANION_SESSION_IDS_LIMIT),
     findLatestUser: findLatestUserMessageForRebuild,
@@ -21319,8 +21504,6 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
         agentHandoffPending.invalidate(sid);
         // 清空后的原生上下文没看过任何环境说明:下一轮整体重发。
         wireNoteMemory.reset(sid);
-        // 清空前登记的压缩刷新标记同样作废:否则清空后的第一次发送会把清空前的账本注入。
-        workingMemoryRefresh.reset(sid);
         getAgentIslandService()?.notifyQueueEmptied(sid);
         // 清上下文后,active 目标失去其依据(objective 引用的内容已被抹掉)→ 一并清除目标。
         goalClearObserver?.(sid);
@@ -21808,6 +21991,12 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     const confirmedContextWindow = (selection as { confirmedContextWindow?: unknown } | undefined)
       ?.confirmedContextWindow;
     const selectionEffort = (selection as { effort?: unknown } | undefined)?.effort;
+    const selectionThinking = (selection as { thinking?: unknown } | undefined)?.thinking;
+    if (selectionThinking !== undefined && typeof selectionThinking !== 'boolean') {
+      // 与 SWITCH_SESSION_AGENT 同口径：非 boolean 的 thinking 当作「未提供」，不让
+      // 历史/异常客户端的多余字段把整次模型切换打成 INVALID_PARAMS。
+      delete (selection as { thinking?: unknown }).thinking;
+    }
     if (
       selection !== undefined &&
       (selection === null ||
@@ -21835,7 +22024,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       );
     }
     let atomicSelection = selection as
-      { effort: SessionRuntimeProfile['effort']; fastMode: boolean | 'ultrafast' } | undefined;
+      { effort: SessionRuntimeProfile['effort']; fastMode: boolean | 'ultrafast'; thinking?: boolean } | undefined;
     const runtimeOwnerEpoch = captureSessionRuntimeControlOwnerEpoch();
     const assertSharedTaskCurrent = captureSharedTaskSettingGuard(sessionId);
     const assertRuntimeOwnerCurrent = (): void => {
@@ -22090,9 +22279,11 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
         if (!axes.ok) {
           throwIpcError('INVALID_PARAMS', `Fast is unavailable for model "${model}"`);
         }
+        const retainedThinking = atomicSelection.thinking;
         atomicSelection = {
           effort: axes.effort,
           fastMode: axes.fastMode,
+          ...(retainedThinking !== undefined ? { thinking: retainedThinking } : {}),
         };
       }
       // A picker click records intent only. Keep the persisted route and native binding
@@ -22118,6 +22309,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
           providerId: effectiveProviderId === undefined ? currentProviderId : effectiveProviderId,
           effort: atomicSelection ? atomicSelection.effort ?? undefined : runtimeStatus.effort ?? undefined,
           fastMode: atomicSelection?.fastMode ?? runtimeStatus.fastMode,
+          ...(atomicSelection?.thinking !== undefined ? { thinking: atomicSelection.thinking } : {}),
           ...(acknowledgedWindow !== undefined ? { confirmedContextWindow: acknowledgedWindow } : {}),
         };
         agentSwitchPending.set(sessionId, intent);
@@ -22153,6 +22345,12 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
               source: internalOptions.source === 'fallback' ? 'fallback' : 'agent',
               previousProfile: internalOptions.previousProfile,
               deferred: true,
+              // 回合中延期同样要记住思考意图：结算时 settleSelection 会把它回放给
+              // runtime，否则 Pi 收不到 thinkingEnabled，上一个模型的 off 会原样漂给新
+              // 模型（原症状）。
+              ...(atomicSelection?.thinking !== undefined
+                ? { thinking: atomicSelection.thinking }
+                : {}),
               profile: buildDeferredRuntimeSelectionProfile({
                 agentKind: maker.getSession(sessionId)?.agentKind ?? meta.agentKind,
                 model,
@@ -22176,6 +22374,9 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
                 fastMode: getSessionFastMode(sessionId),
               },
               pendingPatch: pendingAxisPatch,
+              ...(atomicSelection?.thinking !== undefined
+                ? { thinking: atomicSelection.thinking }
+                : {}),
             });
         // A later accepted route supersedes an earlier context-only rebuild.
         if (routeExplicit && getPendingCredentialSwitchTarget(sessionId)?.forceSessionRebuild) {
@@ -22832,6 +23033,12 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
                       'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra',
                   }
                 : {}),
+              // Pi 切模后不重置 thinking level：把 renderer 记录的目标模型思考开关
+              // 意图交给 runtime，由 Pi 按目标模型能力快照收敛（否则上一个模型的
+              // off/旧档位会漂移给新模型）。非 Pi 引擎忽略该参数。
+              ...(runtimeAgentKind === 'pi' && atomicSelection?.thinking !== undefined
+                ? { thinkingEnabled: atomicSelection.thinking }
+                : {}),
               forceSessionRebuild:
                 rebuildLiveOrcaWorker ||
                 (atomicSelection?.effort === null && runtimeAgentKind !== 'pi'),
@@ -23143,6 +23350,9 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
             source: internalOptions.source,
             previousProfile: internalOptions.previousProfile,
             deferred: response.deferred,
+            ...(atomicSelection?.thinking !== undefined
+              ? { thinking: atomicSelection.thinking }
+              : {}),
             profile: buildDeferredRuntimeSelectionProfile({
               agentKind: maker.getSession(sessionId)?.agentKind ?? meta?.agentKind ?? 'claude-code',
               model,
@@ -23604,7 +23814,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
           throwIpcError('PRECONDITION_FAILED', 'Account changed during permission update');
         }
       };
-      return withSessionPermissionChange(sessionId, async () => {
+      return withBotPermissionChange(sessionId, () => withSessionPermissionChange(sessionId, async () => {
         assertOwnerCurrent();
         await assertReviewSettingsUnlocked(sessionId);
         assertOwnerCurrent();
@@ -23636,13 +23846,14 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
         // 分享供应商的「本任务总是允许」随权限档变化失效；Agent 实例被回收时执行器收不到这次切换。
         if (row.permissionMode !== mode) forgetCredentialGrants(sessionId);
         broadcastSessionPatched(sessionId, { permissionMode: mode });
+        await syncBotLinkedLanePermissions(sessionId);
         if (remote) {
           const result = {};
           markRemoteSettingPersistedInsideHandler(result);
           return result;
         }
         return true;
-      });
+      }));
     },
   );
 
@@ -23957,7 +24168,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       if (typeof sessionId !== 'string' || (typeof requestedSpeed !== 'boolean' && requestedSpeed !== 'ultrafast')) {
         throwIpcError('INVALID_PARAMS', 'sessionId + enabled required');
       }
-      const enabled: boolean | 'ultrafast' = requestedSpeed;
+      let enabled: boolean | 'ultrafast' = requestedSpeed;
       const runtimeOwnerEpoch = captureSessionRuntimeControlOwnerEpoch();
       const assertSharedTaskCurrent = captureSharedTaskSettingGuard(sessionId);
       const assertOwnerCurrent = () => {
@@ -23995,6 +24206,11 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
           );
         }
         const userIntent = agentSwitchPending.get(sessionId);
+        const fastProfile = (await readSessionRuntimeProfiles(sessionId))?.effective;
+        assertOwnerCurrent();
+        const subscriptionForbidsFast = !fastProfile?.agentDeviceId && !createSubscriptionFastPolicy(sessionId,
+          () => fastProfile?.providerId ?? getSessionProvider(sessionId)).isAllowed();
+        if (subscriptionForbidsFast) enabled = false;
         if (enabled === 'ultrafast') {
           const profiles = await readSessionRuntimeProfiles(sessionId);
           const profile = isUserPendingAgentSwitchIntent(userIntent)
@@ -24052,7 +24268,14 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
           log.debug('set-fast-mode: session not found, no-op', { sessionId });
           return remoteResponse;
         }
-        if (sess.agentKind !== 'codex' && sess.agentKind !== 'pi') {
+        // An explicit enable after relaxation must reach the policy wrapper as
+        // well as native Claude, otherwise its request suppression stays latched.
+        // Custom API connections retain their existing persistence-only path.
+        const claudeSubscription = sess.agentKind === 'claude-code' && !fastProfile?.agentDeviceId &&
+          supportsSubscriptionFastPolicy(getActiveCatalog().providers.find(
+            provider => provider.id === (fastProfile?.providerId ?? getSessionProvider(sessionId)),
+          ));
+        if (sess.agentKind !== 'codex' && sess.agentKind !== 'pi' && !claudeSubscription) {
           await commitRuntimeAxisAfterPersistence({
             persist: persistFastMode,
             commit: commitFastMode,
@@ -24078,6 +24301,9 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
         assertOwnerCurrent();
         assertSharedTaskCurrent.admit();
         await sess.setFastMode(enabled);
+        enabled = sess.getFastMode() ?? enabled;
+        livePatch.fastMode = enabled;
+        pendingPatch.fastMode = enabled;
         await commitRuntimeAxisAfterPersistence({
           persist: persistFastMode,
           commit: commitFastMode,

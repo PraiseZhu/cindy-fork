@@ -132,11 +132,11 @@ export function ChatGroupSettings({ group }: { group: BotGroupSummary }) {
           onChange={event => { editGroup(); setTopic(event); }} />}</FormField>
         <FormField label={t(key('description'))}>{props => <Input {...props} value={description} maxLength={2000} disabled={!manager || busy}
           onChange={event => { editGroup(); setDescription(event); }} />}</FormField>
-        {/* One teammate at a time: who answers follows @ (everyone queues when nobody is named), not a group mode. */}
-        {group.singleSpeaker ? null : <>
+        {/* Whether unmentioned messages trigger replies is independent of the speaking order. */}
         <FormField label={t(shared('replyMode'))}>{props => <Select {...props} label={t(shared('replyMode'))} value={replyMode}
           disabled={!manager || busy} options={(['all', 'mentioned'] as const).map(value => ({ value, label: t(REPLY_MODE_LABELS[value]) }))}
           onValueChange={value => { editGroup(); setReplyMode(value as typeof replyMode); }} />}</FormField>
+        {group.singleSpeaker ? null : <>
         <FormField label={t(shared('speakingMode'))}>{props => <Select {...props} label={t(shared('speakingMode'))} value={speakingMode}
           disabled={!manager || busy} options={(['auto', 'sequential'] as const).map(value => ({ value, label: t(SPEAKING_MODE_LABELS[value]) }))}
           onValueChange={value => { editGroup(); setSpeakingMode(value as typeof speakingMode); }} />}</FormField>

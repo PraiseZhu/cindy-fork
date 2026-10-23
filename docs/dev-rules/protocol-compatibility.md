@@ -1,5 +1,27 @@
 # 跨端协议兼容
 
+## Device Link 局域网优先直连
+
+可靠链路的 `link-open/link-accept` 增加可选能力 `direct-link-v1`。双方均支持且已完成
+现有授权与可靠握手后，字典序较小的 deviceId 后台发起 WebRTC DataChannel；信令通过
+既有 relay `push` 的 `device-link:direct-signal` channel 发送，含 offer/answer/close、
+随机通道 ID 及两端当前 transport stream。客户端验证账号范围、双方能力、链路就绪与
+stream 匹配后才处理；信令不进入业务可靠 FIFO，也不走直连。超时或信令丢失由独立退避
+重试恢复，普通业务继续走 relay，不产生新 invoke 白名单权限或服务端协议版本。
+
+数据通道 `device-link-v1` 只使用可靠有序 SCTP；同一完整 envelope 拆为不超过 16 KiB 的
+二进制片，首字节 0/1 表示续片/末片，剩余字节是 UTF-8。单条最多 `MAX_FRAME_BYTES`，
+重组有字节、分片数和超时边界；在原可靠层接收之前重组，序号、去重与 ACK 语义不变。
+桥接在途字节与 SCTP bufferedAmount 一起参与背压，平台静默失效同样会触发原有中继回退。
+
+旧端不声明能力，双方仍走 relay；只升级一端不会启用直连。Desktop 与 Mobile 均接入，
+同账号远程供应商沿用这条共享路径；跨账号供应商分享和共享任务继续由 relay 逐帧授权。
+不改数据库、服务端、Mobile 原生依赖或配置。Mobile 使用现有 WebView，iOS 的 WebKit
+网络行为参考 [Apple TN3179](https://developer.apple.com/documentation/technotes/tn3179-understanding-local-network-privacy)。
+平台不可用或系统阻止局域网访问时沿用 relay，不能阻断业务。真实跨设备、iOS/Android
+前后台及系统网络权限的发布验收必须另记实测证据；浏览器本机 smoke 不等同于真机通过。
+
+
 ## 灵动岛完成卡操作
 
 `local-db:sessions:activity` 追加可选的 `completionToken`，由任务所属进程按完成卡代次签发。
@@ -2643,16 +2665,28 @@ Chat Server `/me` 追加 `capabilities.groupDiscussionParity: 1`。Desktop 只�
 ### 服务器伙伴群一次一位伙伴（`groupSingleSpeaker`，2026-10-21）
 
 Chat Server `/me` 追加 `capabilities.groupSingleSpeaker: 1`，服务端派发随之改变且对所有客户端生效：
-主群里 @ 多位或没 @ 人都直接建 `kind=talk` 的队列（没 @ 人时排全部伙伴）、不再自动续圈。旧客户端照常可用——
+主群里 @ 多位直接建 `kind=talk` 的队列；没有定向接收人的普通消息由现有 `responseMode` 决定：
+`all` 排全部可答伙伴，`mentioned` 不产生执行、不创建或替换队列。只有一位可答伙伴时直接回答，不建队列；不再自动续圈。旧客户端照常可用——
 它们本就声明 `planVersion: 1` 领取安排步骤、渲染安排卡并能「继续」；仍发送的 `deferExecution` /
 `continueDiscussion` 被接受（后者只记录、不续圈），旧的「继续讨论」只叫被 @ 的伙伴或第一位伙伴。
 
 新 Desktop 只在看到该能力时：不再发 `deferExecution`、不做发送前的辅助判断、不发 `continueDiscussion`；
 队列停着等继续时新消息按新请求发送（不作为补充）。队列前 5 位由服务端自动接续，无需客户端参与。
-`chat_plan.kind` 是附加字段，旧客户端忽略；新客户端缺字段时按旧分工卡呈现。
+`chat_plan.kind` 是附加字段，旧客户端忽略；新客户端缺字段时按旧分工卡呈现。手机解析电脑的群资源时，
+保留经校验的可选 `kind`（talk/work）与 `canAdd`（boolean）；缺失或非法时沿用旧分工呈现，不把字符串当作补充权限。
+`mentioned` 的运行中 talk 队列及存量 work 分工不接受普通无 @ 消息作为自动补充，两端输入框不得承诺交给正在答的伙伴；存量 work 分工仍保留未结束时阻止新建分工的限制。
+手机须保留电脑投影的 `singleSpeaker: true`，据此隐藏不支持的「安排分工」；远程电脑传输不等于旧群。缺字段的旧电脑沿用原入口。
 停止的范围收窄与主群上下文精简都只在看到该能力时启用，旧服务器保留整轮停止与完整主群历史；收窄只在执行端实现（成员只停自己的请求与伙伴，群主或管理员——含本账号拥有的管理员伙伴——可 `all`），沿用既有 control /
 plan action 的服务端权限，IPC `bot-group:stop` 追加可选 `scope`；
 手机经电脑的远程动作不变（停止为本人范围）。发布顺序：服务端整集群先上，再发客户端。
+
+2026-10-23 回复模式恢复（客户端 #6888 / cindy-server #1030）：`groupSingleSpeaker` 只表示回答顺序，
+不代表每条普通消息必有回答；主群、线程与过期 `deferExecution` 恢复共用 `responseMode` 判断，显式继续不受影响。
+仍保留定向回复规则：宿主把引用回复伙伴或伙伴根消息下话题回复的原作者加入 `mentions`，即使没有手打 @，
+服务端也按非空 `mentions` 处理；人类根消息下的普通话题回复不隐式点名伙伴。服务端不从正文猜接收人。
+不新增字段、能力版本或迁移；先部署服务端整集群以恢复已存模式，再发布客户端入口与补充消息修复。
+受影响的旧服务端仍忽略 `mentioned`，旧 Desktop 也可能把闲聊作为队列补充发送；能力位本身不能证明修复已部署，
+仅客户端或仅服务端合并均不代表完整生产修复上线，发布后须复验普通消息、定向回复与运行中队列补充。
 
 ### 伙伴群聊引用回复（`cindy.quote` v1）
 
@@ -3232,3 +3266,25 @@ namespace + id 下同一插件的有界 JSON 请求；`deviceSync: true` 是独�
 本机新增 `local-db:bots:projects:list/set` 仅用于受信 renderer，不进入远程 IPC allowlist。
 旧 `workbench.json` 目录及设备归属沿用原格式；关联不进入任务负责范围或扩大文件权限。
 不改服务端、数据库 schema、Mobile 原生配置或指纹。
+
+## 订阅 Fast 的账号与组约束
+
+`remote-agent` 的 caps 新增可选 `subscriptionFastPolicy: true`，仅严格的 `true` 表示执行端支持。
+新的 `fast-policy` 操作携带组 ID、修订号、`allowFast`，以及可选的任务绑定；只经已有认证通道
+发送，不传策略函数，不授予模型或账号权限。执行端持久化并等待原生设置应用后，回传对应
+修订与允许状态。旧修订不能解除较新的禁止，同修订冲突只能收紧。
+
+`open` 的 `groupAssigned` / `relay` 是路由防环提示，不是策略豁免。执行端本机实际以 guest
+身份运行时，仍绑定本机原生订阅组的限制，与已接收的上游约束取交集；调用方不能自报
+已分配来跳过本机限制。绑定先于来源提交时，未能解析的来源按禁止处理，持久化及原生应用
+全部成功才确认；旧绑定继续兼容读取，普通 close/idle 不删除禁令记录。
+
+缺省仍允许 Fast，因此旧控制端和未配置禁止的组保持原有行为。新组设置禁止时，未声明能力
+或没有正确确认的旧执行端保持待确认，不能用于新的受限分配；自动换电脑沿用已有策略。
+旧接收方即使保留 Fast 选项，也由新版实际执行端钳制。首次使用要求组所在电脑与执行电脑
+均升级；未更新的执行端不能宣称已受控。
+
+供应商目录新增可选 `subscriptionFastPolicy` 展示字段；受限目录投影为不支持 Fast / Ultrafast。
+分享的刷新通知复用已有 `maker:provider:changed` 空载荷，只发给当前被授权的接收方，并核对
+对应 host。自定义 API 不进入这套策略与新增刷新规则。详细范围及验证见
+[订阅 Fast 控制交接说明](../subscription-fast-policy.md)。
