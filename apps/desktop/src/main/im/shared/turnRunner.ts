@@ -292,9 +292,8 @@ interface TurnState {
   interactionRouteLease: InteractionRouteLease | null;
   /**
    * Host turn lease held for the duration of a per-turn permission policy turn.
-   * While held, session.setPermissionMode() blocks any switch into a mode the
-   * agent lists as turnPermissionPolicy-unsupported (e.g. Pi Full Access),
-   * closing the hot-switch bypass window. Released on every terminal / requeue /
+   * Keeps new sends and retirement behind this turn's background continuations;
+   * the owner's live permission changes remain immediate. Released on every terminal / requeue /
    * cleanup path via releaseTurnInteractionRoute. Null when the turn has no policy.
    */
   hostTurnLeaseRelease: (() => void) | null;
@@ -1675,10 +1674,8 @@ export function createTurnRunner(
             if (sessionStates.get(rowId)?.makerSession !== noticeSession) return false;
             return im.sendText(userId, text, { threadTs: noticeScope });
           });
-          // 策略轮持一张 host turn lease:期间 setPermissionMode 切到 agent 声明为
-          // turnPermissionPolicy-unsupported 的档位(如 Pi Full Access)会被阻塞到本轮
-          // 终态,堵死"热切到 bypass 让 bridge 直接放行、策略连冒泡机会都没有"的绕过。
-          // 两个 surface 都需要:channel 与 desktop 的策略同样必须扛住热切。
+          // 策略轮保留逻辑占用直到后台续跑和收尾结束；新输入仍须等待，
+          // 主人在 Cindy 中切换权限则立即沿用普通任务的运行时切换。
           if (effectiveTurnPolicy) {
             item.turn.hostTurnLeaseRelease = state.makerSession.acquireTurnLease();
           }

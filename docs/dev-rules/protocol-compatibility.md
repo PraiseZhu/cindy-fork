@@ -3021,8 +3021,13 @@ Mark only the successfully resolved, visibly opened message, never the whole thr
 mark must retain the body and return `markReadFailed:true` for a non-blocking notice.
 It returns `MailMessage` (maker-shared/mail-message).
 Credentials and MIME parsing remain with the provider. Cindy validates the data
-and reuses its inert HTML/CID/recipient renderers, never compose actions. Multiple
-matching providers/accounts cannot silently select the first. Unknown providers or
+and reuses its inert HTML/CID/recipient renderers for delivered mail. Multiple
+matching providers/accounts cannot silently select the first. Host setup metadata
+selects a sole ready instance without probing mailboxes; several ready instances
+return optional `providers:[{id,name,namespace}]` for a user choice. The host-issued
+opaque `providerId` returned with a message pins neighboring reads to that instance;
+removal/disable never falls back to a different one. Choices are local to the current
+owner/device/session/link, with no persisted default or account migration. Unknown providers or
 older hosts keep normal browser opening. Attachments use managed image previews;
 other file types retain their metadata and the mailbox opening fallback.
 
@@ -3035,10 +3040,45 @@ unchanged. Old hosts ignore the new optional values; old providers still receive
 only `{url}`. No new channel, storage or native changes. Plugins adding an OAuth
 scope must keep existing granted operations usable; missing new scopes may fail
 marking read, not prevent viewing or composing.
+Explicit provider selection adds optional fifth `providerId` to `ghosts:mail-preview`,
+or JSON `query:{opened,providerId}` (serialized as a string) on the same remote resource;
+the three-element resource ID is unchanged. Main revalidates the selected instance
+against enabled approved matching readers after session authorization. Old clients
+ignore the extra response fields; old hosts do not expose choices, so new clients
+retain their normal legacy read request until a current host returns a choice.
 Existing 256-character resource ID bounds still apply; overlong remote links fall back to browser opening. Shared-task access does not
 grant mailbox access. Scope checks run before and after reads; clients bind display
 to account/device/session/URL and ignore stale responses. No mail content is stored
-in sidebar state or added to the chat by opening a link.
+in sidebar state. Delivered-mail links do not publish cards.
+
+For an explicit visible opening the dispatcher also injects Host-only `openDraft:true`;
+ordinary tool arguments cannot supply that intent. A draft-aware provider resolves the
+stable provider draft ID and reuses its existing compose read/presentation flow, returning
+optional `draftId`. Main registers the native call in the existing card service and returns
+optional `draftCallId` only after matching a current card's task, plugin, account and draft.
+This reference is never accepted from provider result data. Background reads cannot publish
+or return editor bindings. Desktop's local sidebar and Mobile use their existing card editors,
+autosave and send/undo actions. The Mobile editor reuses `plugin-results/card` subscriptions;
+no new transport, persistence, credential transfer or send path is introduced.
+The Mobile editor follows `supersededBy` through the same task-scoped resource reads only
+while installation, account and draft identity still match; its actions and invalidations
+use the resolved card ID. Ordinary chat rows continue hiding superseded cards.
+Remote Desktop retains the read-only message and original mailbox link because its
+existing card editor dispatches local actions only. Native reader calls are finalized
+even after owner/installation invalidation. Owner scope still guards result delivery;
+an invalid installation cannot acquire editor bindings or extend the call-bound Host capability window.
+Old hosts do not inject `openDraft` and remain read-only; old providers ignore it, and old clients ignore
+`draftCallId`. Source package compatibility remains 0.1.112; editable link support requires
+both the updated provider and the corresponding Host/client changes.
+Desktop link opening and card enlargement both await the existing card-form delivery
+barrier before changing tabs; explicit reads also await it before calling the provider.
+Failed delivery keeps the current editor intact. Probes and background reads do not
+wait for or flush editor changes.
+Link probes return `supported:false` when no enabled matching reader is ready, retaining
+normal browser opening on Desktop and Mobile. Explicit reads of restored tabs distinguish
+no matching reader (`supported:false`) from an unconfigured one (`MAIL_PROVIDER_NOT_READY`)
+without calling provider tools. Both show a labelled mailbox-opening action instead of
+an ineffective retry; restored tabs never launch an external page automatically.
 
 Desktop native mail cards also open this tab through `open-mail-card` with
 `sessionId` and `callId`. The tab stores only the card ID and uses the existing

@@ -692,8 +692,8 @@ export async function performSessionAgentSwitch(
     throwIpcError('UNSUPPORTED_CAPABILITY', 'Review task settings are fixed to the source task');
   }
   if (row.remoteHostId) {
-    // SSH 远程会话:agent 进程在远端机器,cc-manager 链路仅覆盖 Claude,v1 不支持切换。
-    throwIpcError('UNSUPPORTED_CAPABILITY', 'agent switch is not supported for remote sessions');
+    // SSH can run all three Harnesses, but cannot hand off an existing task between them.
+    throwIpcError('SSH_HARNESS_SWITCH_UNSUPPORTED', 'agent switch is not supported for remote sessions');
   }
   // Orca Lead / Worker tasks live on this computer, so moving their Agent works like
   // a normal task (2026-10-16). An execution-device Worker's task lives on that device;
@@ -1310,7 +1310,7 @@ export function applyPendingAgentSwitchIfIdle(
         signal: opts?.signal,
       });
       if (result.retryPending && intent.runtimeSource === 'agent') {
-        throw new Error('Harness switch recovery is pending; retry the send after recovery');
+        throwIpcError('HARNESS_SWITCH_NOT_READY', 'Harness switch recovery is pending; retry the send after recovery');
       }
       // CAS 语义:执行期间用户可能又选了另一个目标,不能把新意图一起清掉。
       if (!result.retryPending) {

@@ -475,7 +475,7 @@ describe('performSessionAgentSwitch', () => {
 
   it('远程会话仍拒绝切换，Orca Lead/Worker 复用跨引擎交接事务', async () => {
     const remote = makeDeps({ getSessionRow: vi.fn(async () => makeRow({ remoteHostId: 'host-1' })) });
-    await expect(performSessionAgentSwitch(remote.deps, validParams)).rejects.toThrow(/UNSUPPORTED_CAPABILITY/);
+    await expect(performSessionAgentSwitch(remote.deps, validParams)).rejects.toThrow(/SSH_HARNESS_SWITCH_UNSUPPORTED/);
     const orca = makeDeps({ getSessionRow: vi.fn(async () => makeRow({ orcaRole: 'lead' })) });
     await expect(performSessionAgentSwitch(orca.deps, validParams)).resolves.toMatchObject({
       switched: true,
